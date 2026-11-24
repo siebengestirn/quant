@@ -1,0 +1,69 @@
+# QUANT authoritative configuration. Credentials are NEVER stored here.
+# Change risk limits only through an explicitly versioned, reviewed revision.
+
+[mode]
+LIVE_TRADING_ENABLED = false
+EXECUTION_MODE = "DISABLED"
+ALLOW_MARGIN = false
+ALLOW_SHORT_SELLING = false
+ALLOW_WITHDRAWALS = false
+
+[capital]
+INITIAL_CAPITAL_INR = 500
+RISK_PER_TRADE_FRACTION = 0.01
+MAX_DAILY_LOSS_FRACTION = 0.02
+MAX_DRAWDOWN_FRACTION = 0.10
+MAX_OPEN_POSITIONS = 1
+MAX_GROSS_EXPOSURE_FRACTION = 0.80
+CASH_RESERVE_FRACTION = 0.10
+
+[data]
+DATA_DIR = "data"
+JOURNAL_PATH = "data/journal/events.jnl"
+UNIVERSE_PATH = "data/cache/universe.csv"
+HISTORY_DIR = "data/cache/history"
+REPORT_DIR = "data/reports"
+HISTORY_DAYS = 260
+UNIVERSE_LIMIT = 60
+SHORTLIST_SIZE = 8
+STALE_QUOTE_SECONDS = 300
+HTTP_TIMEOUT_SECONDS = 30
+KEYCHAIN_PREFIX = "NIRNAY_"
+
+[execution]
+MAX_SPREAD_BPS = 35
+MIN_TRADED_VALUE_INR = 5000000
+SLIPPAGE_BPS = 10
+QUEUE_CAPACITY = 4096
+
+[universe]
+# Seed symbols are a research starting set, not a permanent mandate.
+# The eligible
+# universe itself is generated dynamically from theUpstox BOD instrument file.
+SEED_SYMBOLS = [
+  "RELIANCE","TCS","HDFCBANK","ICICIBANK","INFY","HINDUNILVR","ITC","SBIN",
+  "BHARTIARTL","KOTAKBANK","LT","AXISBANK","ASIANPAINT","MARUTI","SUNPHARMA",
+  "TITAN","ULTRACEMCO","BAJFINANCE","NESTLEIND","WIPRO","ONGC","M&M","NTPC",
+  "TATAMOTORS","POWERGRID","TECHM","HCLTECH","INDUSINDBK","ADANIPORTS",
+  "SBILIFE","BAJAJFINSV","TATASTEEL","JSWSTEEL","GRASIM","CIPLA","COALINDIA",
+  "DRREDDY","HINDALCO","BRITANNIA","DIVISLAB","EICHERMOT","APOLLOHOSP",
+  "TATACONSUM","BPCL","SHREECEM","UPL","HEROMOTOCO","VEDL","INDIANBANK",
+  "PFC","RECLTD","IDEA","JIOFIN","SUZLON","TATA POWER","NHPC","IOCL",
+  "BANKBARODA","CANBK","UNIONBANK","MUTHOOTFIN","PERSISTENT","LKOM",
+  "POLICYBZR","DMART","TRENT","VOLTAS","CROMPTON","ABB","BEL","HAL",
+  "GODREJCP","DABUR","BOSCHLTD","MCDOWELL-N","PIDILITIND","ASIANPaints"
+]
+INDEX_SYMBOLS = ["NIFTY 50", "NIFTY BANK", "INDIA VIX"]
+
+[kdbx]
+# Local, loopback-only KDB-X analytics server. No broker or risk authority.
+ENABLED = true
+HOST = "127.0.0.1"
+PORT = 5001
+TIMEOUT_MS = 2000
+USERNAME = "quant"
+SCRIPT = "q/quant.q"
+HDB_DIR = "data/hdb"
+LOG_PATH = "data/db/q.log"
+PID_PATH = "data/db/q.pid"
+BATCH_SIZE = 512

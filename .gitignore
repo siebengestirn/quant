@@ -1,0 +1,12 @@
+# Generated operational state: never commit.
+build/
+build-san/
+data/
+*.o
+*.a
+quant
+quant_tests
+.DS_Store
+__pycache__/
+.pytest_cache/
+*.pyc

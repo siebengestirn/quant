@@ -1,0 +1,654 @@
+#ifndef QUANT_QUANT_HPP_
+#define QUANT_QUANT_HPP_
+
+// QUANT: deterministic financial core and provider-neutral domain models.
+// All monetary values are integer paise. All time is epoch milliseconds unless
+// a field is explicitly named *_date or ISO.
+
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <functional>
+#include <map>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+namespace quant {
+
+// ---------------------------------------------------------------------------
+// Money: integer paise. Conversions are explicit to prevent unit confusion.
+// ---------------------------------------------------------------------------
+class Money {
+ public:
+  constexpr Money() : paise_(0) {}
+  static constexpr Money FromPaise(int64_t paise) { return Money(paise); }
+  static Money FromRupees(double rupees);
+  constexpr int64_t paise() const { return paise_; }
+  double rupees() const { return static_cast<double>(paise_) / 100.0; }
+
+  constexpr Money& operator+=(const Money& other) {
+    paise_ += other.paise_;
+    return *this;
+  }
+  constexpr Money& operator-=(const Money& other) {
+    paise_ -= other.paise_;
+    return *this;
+  }
+
+ private:
+  explicit constexpr Money(int64_t paise) : paise_(paise) {}
+  int64_t paise_;
+};
+
+constexpr Money operator+(Money a, Money b) { return a += b; }
+constexpr Money operator-(Money a, Money b) { return a -= b; }
+constexpr bool operator==(Money a, Money b) { return a.paise() == b.paise(); }
+constexpr bool operator!=(Money a, Money b) { return !(a == b); }
+constexpr bool operator<(Money a, Money b) { return a.paise() < b.paise(); }
+constexpr bool operator>(Money a, Money b) { return b < a; }
+constexpr bool operator<=(Money a, Money b) { return !(b < a); }
+constexpr bool operator>=(Money a, Money b) { return !(a < b); }
+
+// ---------------------------------------------------------------------------
+// Enumerations and configuration.
+// ---------------------------------------------------------------------------
+enum class Mode {
+  kDisabled,
+  kBacktest,
+  kPaper,
+  kReadOnlyBroker,
+  kLive,
+};
+
+enum class Provider { kFyers, kUpstox, kZerodha, kSynthetic };
+
+enum class EventType {
+  kQuote,
+  kCandle,
+  kSignal,
+  kRiskDecision,
+  kOrder,
+  kFill,
+  kAccounting,
+  kHeartbeat,
+};
+
+enum class OrderState {
+  kNew,
+  kValidated,
+  kSent,
+  kAcknowledged,
+  kPartiallyFilled,
+  kFilled,
+  kRejected,
+  kCancelled,
+  kAmbiguous,
+};
+
+enum class OrderSide { kBuy, kSell };
+
+struct KdbxConfig {
+  bool enabled = true;
+  std::string host = "127.0.0.1";  // Loopback only; never exposed publicly.
+  int port = 5001;
+  int timeout_ms = 2000;
+  std::string username = "quant";
+  std::string script = "q/quant.q";
+  std::string hdb_dir = "data/hdb";
+  std::string log_path = "data/db/q.log";
+  std::string pid_path = "data/db/q.pid";
+  size_t batch_size = 512;
+};
+
+struct KdbxStatus {
+  bool compiled = false;
+  bool runtime = false;
+  bool license_present = false;
+  bool pykx_present = false;
+  bool connected = false;
+  std::string detail;
+};
+
+struct Config {
+  Mode mode = Mode::kDisabled;
+  bool live_trading_enabled = false;
+  bool allow_margin = false;
+  bool allow_short_selling = false;
+  bool allow_withdrawals = false;
+  Money initial_capital = Money::FromRupees(500.0);
+  double risk_per_trade_fraction = 0.01;
+  double max_daily_loss_fraction = 0.02;
+  double max_drawdown_fraction = 0.10;
+  int max_open_positions = 1;
+  double max_gross_exposure_fraction = 0.80;
+  double cash_reserve_fraction = 0.10;
+  double max_spread_bps = 35.0;
+  double min_traded_value_inr = 5e6;
+  double slippage_bps = 10.0;
+  size_t history_days = 260;
+  size_t universe_limit = 60;
+  size_t shortlist_size = 8;
+  size_t queue_capacity = 4096;
+  int stale_quote_seconds = 300;
+  int http_timeout_seconds = 30;
+  std::string keychain_prefix = "NIRNAY_";
+  std::string data_dir = "data";
+  std::string journal_path = "data/journal/events.jnl";
+  std::string universe_path = "data/cache/universe.csv";
+  std::string history_dir = "data/cache/history";
+  std::string report_dir = "data/reports";
+  std::vector<std::string> seed_symbols;
+  std::vector<std::string> index_symbols;
+  KdbxConfig kdbx;
+};
+
+struct ConfigResult {
+  Config config;
+  std::vector<std::string> errors;
+  bool ok() const { return errors.empty(); }
+};
+
+ConfigResult LoadConfig(const std::string& path);
+std::vector<std::string> ValidateConfig(const Config& config);
+std::string_view ModeName(Mode mode);
+Mode ParseMode(std::string_view text);
+
+// ---------------------------------------------------------------------------
+// Canonical domain models.
+// ---------------------------------------------------------------------------
+struct Instrument {
+  std::string symbol;
+  std::string exchange = "NSE";
+  std::string isin;
+  std::string
+      provider_key;  // Upstox instrument_key, canonical identity anchor.
+  std::string name;
+  std::string security_type;
+  double tick_size = 0.05;
+  double freeze_quantity = 0.0;
+  bool cas_eligible = false;
+  bool eligible = false;
+  std::string eligibility_reason;
+};
+
+struct Quote {
+  std::string symbol;
+  std::string provider_key;
+  Provider source = Provider::kSynthetic;
+  double last = 0.0;
+  double bid = 0.0;
+  double ask = 0.0;
+  int64_t bid_qty = 0;
+  int64_t ask_qty = 0;
+  double volume = 0.0;
+  double open = 0.0;
+  double high = 0.0;
+  double low = 0.0;
+  double close = 0.0;
+  int64_t exchange_timestamp_ms = 0;
+  int64_t provider_timestamp_ms = 0;
+  int64_t receive_timestamp_ms =
+      0;  // steady monotonic clock, never used as market time.
+  uint64_t sequence = 0;
+  std::string quality;  // ok | stale | missing_depth | cross_provider_mismatch
+};
+
+struct Candle {
+  std::string date;  // YYYY-MM-DD, session date IST.
+  double open = 0.0;
+  double high = 0.0;
+  double low = 0.0;
+  double close = 0.0;
+  double volume = 0.0;
+  int64_t timestamp_ms = 0;
+};
+
+struct FeatureSet {
+  double ret5 = 0.0;
+  double ret20 = 0.0;
+  double ret60 = 0.0;
+  double ret120 = 0.0;
+  double vol20 = 0.0;
+  double volume_surprise = 0.0;
+  double trend = 0.0;     // 0..1 fraction of bullish conditions.
+  double breakout = 0.0;  // close vs prior 20-day range, -1..1.
+  double vwap_dev = 0.0;
+  bool valid = false;
+};
+
+struct Signal {
+  std::string symbol;
+  std::string strategy;
+  double score = 0.0;
+  double confidence = 0.0;
+  std::string rationale;
+  FeatureSet features;
+  bool tradable = false;
+  std::string rejection_reason;
+};
+
+struct OrderRequest {
+  std::string symbol;
+  std::string provider_key;
+  OrderSide side = OrderSide::kBuy;
+  int quantity = 0;
+  double limit_price = 0.0;
+  std::string client_order_id;
+};
+
+struct OrderResult {
+  bool accepted = false;
+  bool simulated = false;
+  std::string broker_order_id;
+  std::string status;
+  std::string message;
+};
+
+struct Position {
+  std::string symbol;
+  int quantity = 0;
+  Money avg_price;
+  Money last_price;
+  int64_t opened_at_ms = 0;
+};
+
+struct Ledger {
+  Money initial_capital;
+  Money cash;
+  Money invested;
+  Money realized_pnl;
+  Money unrealized_pnl;
+  Money brokerage;
+  Money statutory;
+  Money operating;
+  Money estimated_tax;
+  Money peak_equity;
+  Money external_flows;  // Must remain zero; non-zero is a reconciliation
+                         // exception.
+  int trade_count = 0;
+};
+
+struct CostBreakdown {
+  Money brokerage;
+  Money stt;
+  Money exchange_fee;
+  Money gst;
+  Money sebi;
+  Money stamp;
+  Money dp;
+  Money slippage;
+  Money total;
+  std::string version = "ZERODHA-EQ-2026-11-25-v1";
+};
+
+// ---------------------------------------------------------------------------
+// Transaction costs. C++ is authoritative for all financial arithmetic.
+// ---------------------------------------------------------------------------
+CostBreakdown EstimateCosts(Money turnover, bool delivery, bool is_buy,
+                            double slippage_bps);
+double BreakEvenMoveBps(Money notional, const CostBreakdown& entry,
+                        const CostBreakdown& exit_costs);
+std::string FormatCosts(const CostBreakdown& costs);
+
+// ---------------------------------------------------------------------------
+// Portfolio accounting.
+// ---------------------------------------------------------------------------
+class Portfolio {
+ public:
+  explicit Portfolio(Money initial_capital);
+  bool Buy(const std::string& symbol, int quantity, Money price,
+           const CostBreakdown& costs, std::string* error);
+  bool Sell(const std::string& symbol, int quantity, Money price,
+            const CostBreakdown& costs, std::string* error);
+  void MarkToMarket(const std::string& symbol, Money price);
+  void RecordOperatingExpense(Money amount);
+  void RecordExternalFlow(Money amount, const std::string& reason);
+
+  Money equity() const;
+  Money available_cash() const;
+  Money drawdown() const;
+  double drawdown_fraction() const;
+  int open_position_count() const {
+    return static_cast<int>(positions_.size());
+  }
+  const std::map<std::string, Position>& positions() const {
+    return positions_;
+  }
+  Ledger ledger() const { return ledger_; }
+  const std::vector<std::string>& audit() const { return audit_; }
+
+ private:
+  Ledger ledger_;
+  std::map<std::string, Position> positions_;
+  std::vector<std::string> audit_;
+};
+
+// ---------------------------------------------------------------------------
+// Central risk engine. All strategies must pass through it.
+// ---------------------------------------------------------------------------
+struct RiskDecision {
+  bool approved = false;
+  int quantity = 0;
+  Money notional;
+  std::string reason;
+};
+
+class RiskEngine {
+ public:
+  explicit RiskEngine(Config config) : config_(std::move(config)) {}
+  RiskDecision Evaluate(const Signal& signal, const Quote& quote,
+                        const Portfolio& portfolio, int64_t now_ms) const;
+
+ private:
+  Config config_;
+};
+
+// ---------------------------------------------------------------------------
+// Strategy features and baselines.
+// ---------------------------------------------------------------------------
+FeatureSet ComputeFeatures(const std::vector<Candle>& candles);
+double CrossSectionalMomentumScore(const FeatureSet& features);
+double TimeSeriesMomentumScore(const FeatureSet& features);
+double VolumeBreakoutScore(const FeatureSet& features);
+double RegimeScore(const std::vector<Candle>& index_candles);
+double EnsembleScore(const FeatureSet& features, double regime);
+
+struct BacktestMetrics {
+  int trades = 0;
+  int wins = 0;
+  int open_positions = 0;
+  Money gross_pnl;
+  Money net_pnl;
+  Money realized_pnl;
+  Money unrealized_pnl;
+  Money brokerage;
+  Money statutory;
+  Money max_drawdown;
+  double sharpe = 0.0;
+  double sortino = 0.0;
+  double profit_factor = 0.0;
+  double cost_to_gross = 0.0;
+  double final_equity = 0.0;
+};
+
+BacktestMetrics RunBacktest(
+    const std::map<std::string, std::vector<Candle>>& history,
+    const Config& config);
+std::vector<double> BootstrapSharpeCI(const std::vector<double>& returns,
+                                      uint64_t seed, size_t draws = 1000);
+double DeflatedSharpe(double sharpe, size_t trials, size_t observations);
+
+// ---------------------------------------------------------------------------
+// Append-only journal with checksums, ids and deterministic replay.
+// ---------------------------------------------------------------------------
+struct Event {
+  uint64_t sequence = 0;
+  std::string id;
+  EventType type = EventType::kHeartbeat;
+  int64_t timestamp_ms = 0;
+  int schema_version = 1;
+  std::string payload;
+  std::string checksum;
+};
+
+uint64_t Checksum(std::string_view text);
+std::string EventId(uint64_t sequence, std::string_view payload);
+
+class Journal {
+ public:
+  bool Open(const std::string& path, std::string* error);
+  bool Append(Event* event, std::string* error);
+  std::vector<Event> Replay(std::string* error) const;
+  uint64_t next_sequence() const { return next_sequence_; }
+  size_t size() const { return size_; }
+  const std::string& path() const { return path_; }
+
+ private:
+  std::string path_;
+  uint64_t next_sequence_ = 1;
+  size_t size_ = 0;
+};
+
+// ---------------------------------------------------------------------------
+// Minimal JSON value + parser (no third-party dependency).
+// ---------------------------------------------------------------------------
+class Json {
+ public:
+  enum class Type { kNull, kBool, kNumber, kString, kArray, kObject };
+  using Object = std::map<std::string, Json>;
+
+  Json() = default;
+  static Json Null();
+  static Json Bool(bool value);
+  static Json Number(double value);
+  static Json String(std::string value);
+  static Json Array(std::vector<Json> value);
+  static Json ObjectValue(Object value);
+  static bool Parse(std::string_view text, Json* out, std::string* error);
+
+  Type type() const { return type_; }
+  bool is_null() const { return type_ == Type::kNull; }
+  bool as_bool(bool fallback = false) const;
+  double as_double(double fallback = 0.0) const;
+  int64_t as_int(int64_t fallback = 0) const;
+  std::string as_string(std::string fallback = "") const;
+  const std::vector<Json>& array() const { return array_; }
+  const Object& object() const { return object_; }
+  const Json* Find(std::string_view key) const;
+  std::string Dump() const;
+
+ private:
+  Type type_ = Type::kNull;
+  bool bool_ = false;
+  double number_ = 0.0;
+  std::string string_;
+  std::vector<Json> array_;
+  Object object_;
+};
+
+// ---------------------------------------------------------------------------
+// HTTP client (libcurl). Credentials are injected by the caller and never
+// logged, returned in errors, or persisted.
+// ---------------------------------------------------------------------------
+struct HttpResponse {
+  long status = 0;
+  std::string body;
+  std::string error;
+  int64_t elapsed_ms = 0;
+};
+
+class HttpClient {
+ public:
+  explicit HttpClient(int timeout_seconds = 30)
+      : timeout_seconds_(timeout_seconds) {}
+  HttpResponse Get(
+      const std::string& url,
+      const std::vector<std::pair<std::string, std::string>>& headers) const;
+  HttpResponse Post(
+      const std::string& url,
+      const std::vector<std::pair<std::string, std::string>>& headers,
+      const std::string& body) const;
+
+ private:
+  int timeout_seconds_;
+};
+
+std::vector<uint8_t> Gunzip(const std::vector<uint8_t>& input,
+                            std::string* error);
+
+// ---------------------------------------------------------------------------
+// Credential resolution. Only presence flags leave this layer.
+// ---------------------------------------------------------------------------
+struct CredentialStatus {
+  std::string service;
+  bool present = false;
+  std::string note;
+};
+
+struct Secret {
+  std::string value;
+  ~Secret() { std::fill(value.begin(), value.end(), '\0'); }
+  Secret() = default;
+  Secret(const Secret&) = delete;
+  Secret& operator=(const Secret&) = delete;
+  Secret(Secret&&) = default;
+  Secret& operator=(Secret&&) = default;
+};
+
+Secret ResolveSecret(const Config& config, const std::string& suffix);
+std::vector<CredentialStatus> InspectCredentials(const Config& config);
+
+// ---------------------------------------------------------------------------
+// Market data providers. FYERS and Upstox are data-only.
+// ---------------------------------------------------------------------------
+struct FeedStatus {
+  Provider provider;
+  bool available = false;
+  std::string detail;
+  int64_t latency_ms = 0;
+};
+
+struct UniverseResult {
+  std::vector<Instrument> instruments;
+  std::vector<Instrument> suspended;
+  size_t total_fetched = 0;
+  std::string source;
+  std::string error;
+};
+
+class MarketDataService {
+ public:
+  MarketDataService(Config config, Journal* journal);
+  std::vector<FeedStatus> CheckFeeds() const;
+  UniverseResult SyncUniverse() const;
+  bool SyncHistory(const std::vector<Instrument>& instruments,
+                   std::string* error) const;
+  bool FetchQuotes(const std::vector<Instrument>& instruments,
+                   std::vector<Quote>* quotes, std::string* error) const;
+  bool MarketStatus(std::string* status, std::string* error) const;
+  bool GlobalIndices(std::vector<Quote>* quotes, std::string* error) const;
+
+ private:
+  Config config_;
+  Journal* journal_;
+};
+
+Quote NormalizeUpstoxQuote(const Json& item, const std::string& symbol,
+                           const std::string& provider_key);
+double SpreadBps(const Quote& quote);
+bool IsStale(const Quote& quote, int64_t now_ms, int max_age_seconds);
+std::vector<Instrument> ApplyEligibility(
+    std::vector<Instrument> instruments,
+    const std::vector<Instrument>& suspended, const Config& config);
+
+// ---------------------------------------------------------------------------
+// KDB-X / q time-series client. Data and analytics only: this class has no
+// broker, risk or order-submission capability. Access is via the official KX
+// C API (k.h) over loopback IPC. Only whitelisted .quant.* functions may be
+// invoked; arbitrary q expressions are never accepted from callers.
+// ---------------------------------------------------------------------------
+class KdbxClient {
+ public:
+  explicit KdbxClient(KdbxConfig config);
+  ~KdbxClient();
+  KdbxClient(const KdbxClient&) = delete;
+  KdbxClient& operator=(const KdbxClient&) = delete;
+
+  static KdbxStatus Detect();
+  bool Connect(std::string* error);
+  void Disconnect();
+  bool connected() const;
+
+  bool Reset(std::string* error);
+  bool IngestQuote(const Quote& quote, uint64_t sequence,
+                   const std::string& event_id, std::string* error);
+  bool IngestBar(const Candle& candle, const std::string& symbol,
+                 std::string* error);
+  bool QueryJson(const std::string& function, std::string* out,
+                 std::string* error);
+  bool Persist(std::string* error);
+  bool LoadHistorical(std::string* out, std::string* error);
+  bool SelfTest(std::string* report, std::string* error);
+  bool Benchmark(std::string* report, std::string* error);
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
+// ---------------------------------------------------------------------------
+// Zerodha execution adapter. Read-only operations are supported; all order
+// submission paths are hard-locked and never reach the network.
+// ---------------------------------------------------------------------------
+class OrderStateMachine {
+ public:
+  static bool IsValidTransition(OrderState from, OrderState to);
+  bool Transition(OrderState to);
+  OrderState state() const { return state_; }
+  const std::vector<OrderState>& history() const { return history_; }
+
+ private:
+  OrderState state_ = OrderState::kNew;
+  std::vector<OrderState> history_{OrderState::kNew};
+};
+
+class ZerodhaGateway {
+ public:
+  ZerodhaGateway(Config config, Journal* journal);
+  bool ReadOnlyConnectivity(std::string* detail, std::string* error) const;
+  OrderResult Submit(const OrderRequest& request) const;  // Always locked.
+  std::string ComplianceGate() const;
+
+ private:
+  Config config_;
+  Journal* journal_;
+};
+
+// ---------------------------------------------------------------------------
+// Reports and CLI.
+// ---------------------------------------------------------------------------
+struct CandidateReport {
+  std::string symbol;
+  std::string instrument_key;
+  double last = 0.0;
+  double spread_bps = 0.0;
+  double score = 0.0;
+  std::string strategy;
+  int quantity = 0;
+  Money notional;
+  Money total_cost;
+  double break_even_bps = 0.0;
+  std::string entry;
+  std::string invalidation;
+  std::string exit;
+  int holding_sessions = 3;
+  std::string rationale;
+};
+
+struct DailyReport {
+  std::string generated_at_utc;
+  std::string market_status;
+  double regime = 0.0;
+  std::vector<std::string> index_summary;
+  std::vector<CandidateReport> candidates;
+  std::vector<std::string> rejections;
+  std::string decision = "NO TRADE";
+  std::string decision_reason;
+  std::string data_provenance;
+};
+
+std::string RenderReport(const DailyReport& report);
+std::string WriteTextFile(const std::string& path, const std::string& content);
+bool ReadCsvCandles(const std::string& path, std::vector<Candle>* candles,
+                    std::string* error);
+
+int RunCli(int argc, char** argv);
+
+}  // namespace quant
+
+#endif  // QUANT_QUANT_HPP_
