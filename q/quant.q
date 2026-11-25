@@ -143,7 +143,9 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
 
 / Point-in-time feature contract (version 2).
 / Returns are P_t/P_(t-n)-1 using sessions available at the decision time.
-/ vol20 is a 20-observation rolling sample deviation of daily simple returns.
+/ vol20 is a 20-observation rolling population deviation
+/ of daily simple returns.
+/ Both sides of the as-of join are sorted by symbol then feature timestamp.
 / vwapDev is a daily OHLCV volume-weighted typical-price proxy,
 / not intraday VWAP.
 / A feature computed from session D is available only at the next exchange
@@ -205,7 +207,8 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
   :raze .quant.latestForSymbol[h;] each distinct h`symbol}
 
 .quant.asofFeatures:{[]
-  quotes2:select seq,symbol,featureTs:`timestamp$exchangeNs,lastPx from quotes;
+  quotes2:`symbol`featureTs xasc
+    select seq,symbol,featureTs:`timestamp$exchangeNs,lastPx from quotes;
   h:.quant.featureHistory[];
   if[0=count quotes2; :`no_data];
   if[0=count h; :`no_data];

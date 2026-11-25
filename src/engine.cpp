@@ -229,8 +229,12 @@ double Mean(const std::vector<double>& values) {
          static_cast<double>(values.size());
 }
 
+// Canonical volatility convention for QUANT: population standard deviation
+// (divide by n). q's dev/mdev and Python's statistics.pstdev use the same
+// denominator. Sharpe/Sortino use this same convention so there is exactly
+// one definition of dispersion in the platform.
 double StdDev(const std::vector<double>& values) {
-  if (values.size() < 2)
+  if (values.empty())
     return 0.0;
   const double mean = Mean(values);
   double sum = 0.0;
@@ -238,7 +242,7 @@ double StdDev(const std::vector<double>& values) {
     const double delta = value - mean;
     sum += delta * delta;
   }
-  return std::sqrt(sum / static_cast<double>(values.size() - 1));
+  return std::sqrt(sum / static_cast<double>(values.size()));
 }
 
 double Clamp(double value, double low, double high) {
@@ -269,6 +273,44 @@ Money Money::FromRupees(double rupees) {
     return Invalid();
   return result;
 }
+
+namespace {
+
+bool CheckedMoneyAdd(Money a, Money b, Money* out) {
+  if (out == nullptr)
+    return false;
+  int64_t left = 0;
+  int64_t right = 0;
+  int64_t sum = 0;
+  if (!a.TryPaise(&left) || !b.TryPaise(&right) ||
+      !money_detail::CheckedAdd(left, right, &sum))
+    return false;
+  *out = Money::FromPaise(sum);
+  return true;
+}
+
+bool CheckedMoneySubtract(Money a, Money b, Money* out) {
+  if (out == nullptr)
+    return false;
+  int64_t left = 0;
+  int64_t right = 0;
+  int64_t diff = 0;
+  if (!a.TryPaise(&left) || !b.TryPaise(&right) ||
+      !money_detail::CheckedSubtract(left, right, &diff))
+    return false;
+  *out = Money::FromPaise(diff);
+  return true;
+}
+
+bool PositivePaise(Money value, int64_t* out) {
+  int64_t raw = 0;
+  if (out == nullptr || !value.TryPaise(&raw) || raw <= 0)
+    return false;
+  *out = raw;
+  return true;
+}
+
+}  // namespace
 
 // ---------------------------------------------------------------------------
 // Configuration.
@@ -401,6 +443,7 @@ ConfigResult LoadConfig(const std::string& path) {
       DoubleOr(values, exe + "MAX_PARTICIPATION_FRACTION", 0.01);
   c.stop_loss_fraction = DoubleOr(values, exe + "STOP_LOSS_FRACTION", 0.05);
   c.backtest_delivery = BoolOr(values, exe + "BACKTEST_DELIVERY", true);
+  c.execution_delivery = BoolOr(values, exe + "EXECUTION_DELIVERY", true);
   c.terminal_liquidation = BoolOr(values, exe + "TERMINAL_LIQUIDATION", false);
   c.min_traded_value_inr = DoubleOr(values, exe + "MIN_TRADED_VALUE_INR", 5e6);
   c.slippage_bps = DoubleOr(values, exe + "SLIPPAGE_BPS", 10.0);
@@ -438,8 +481,9 @@ ConfigResult LoadConfig(const std::string& path) {
 
 std::vector<std::string> ValidateConfig(const Config& config) {
   std::vector<std::string> errors;
-  if (config.initial_capital <= Money::FromRupees(0.0)) {
-    errors.push_back("INITIAL_CAPITAL_INR must be positive");
+  int64_t capital = 0;
+  if (!config.initial_capital.TryPaise(&capital) || capital <= 0) {
+    errors.push_back("INITIAL_CAPITAL_INR must be a valid positive amount");
   }
   auto fraction = [&errors](double value, const char* name) {
     if (!(value >= 0.0 && value <= 1.0)) {
@@ -453,6 +497,13 @@ std::vector<std::string> ValidateConfig(const Config& config) {
   fraction(config.cash_reserve_fraction, "CASH_RESERVE_FRACTION");
   if (config.max_open_positions < 0) {
     errors.push_back("MAX_OPEN_POSITIONS must be non-negative");
+  }
+  if (config.history_days == 0 || config.universe_limit == 0 ||
+      config.shortlist_size == 0) {
+    errors.push_back("history, universe and shortlist sizes must be positive");
+  }
+  if (config.shortlist_size > config.universe_limit) {
+    errors.push_back("SHORTLIST_SIZE cannot exceed UNIVERSE_LIMIT");
   }
   if (!std::isfinite(config.max_spread_bps) || config.max_spread_bps < 0.0) {
     errors.push_back("MAX_SPREAD_BPS must be finite and non-negative");
@@ -470,17 +521,28 @@ std::vector<std::string> ValidateConfig(const Config& config) {
     errors.push_back("MAX_PARTICIPATION_FRACTION must be finite and in (0, 1]");
   }
   if (!std::isfinite(config.min_traded_value_inr) ||
-      config.min_traded_value_inr < 0.0) {
-    errors.push_back("MIN_TRADED_VALUE_INR must be finite and non-negative");
+      config.min_traded_value_inr < 0.0 ||
+      config.min_traded_value_inr > 1.0e12) {
+    errors.push_back("MIN_TRADED_VALUE_INR must be finite and bounded");
   }
-  if (config.queue_capacity == 0) {
-    errors.push_back("QUEUE_CAPACITY must be positive");
+  if (config.queue_capacity == 0 || config.queue_capacity > (1u << 20)) {
+    errors.push_back("QUEUE_CAPACITY must be in [1, 1048576]");
   }
-  if (config.stale_quote_seconds <= 0 || config.http_timeout_seconds <= 0) {
-    errors.push_back("timeouts and staleness windows must be positive");
+  if (config.stale_quote_seconds <= 0 || config.stale_quote_seconds > 86400) {
+    errors.push_back("STALE_QUOTE_SECONDS must be in [1, 86400]");
   }
-  if (config.kdbx.timeout_ms <= 0 || config.kdbx.batch_size == 0) {
-    errors.push_back("KDB-X timeout and batch size must be positive");
+  if (config.http_timeout_seconds <= 0 || config.http_timeout_seconds > 3600) {
+    errors.push_back("HTTP_TIMEOUT_SECONDS must be in [1, 3600]");
+  }
+  if (config.kdbx.timeout_ms <= 0 || config.kdbx.timeout_ms > 3600000) {
+    errors.push_back("KDB-X timeout must be in [1, 3600000]");
+  }
+  if (config.kdbx.batch_size == 0 || config.kdbx.batch_size > (1u << 20)) {
+    errors.push_back("KDB-X batch size must be in [1, 1048576]");
+  }
+  if (config.data_dir.empty() || config.journal_path.empty() ||
+      config.report_dir.empty() || config.keychain_prefix.empty()) {
+    errors.push_back("storage paths and keychain prefix must be non-empty");
   }
   if (config.allow_margin || config.allow_short_selling) {
     errors.push_back(
@@ -512,52 +574,179 @@ std::vector<std::string> ValidateConfig(const Config& config) {
 // VERIFIED against https://zerodha.com/charges/ on 2026-11-25.
 // ESTIMATED where the schedule varies by account/segment (DP, stamp cap).
 // ---------------------------------------------------------------------------
+const char* CalculationStatusName(CalculationStatus status) {
+  switch (status) {
+    case CalculationStatus::kCalculated:
+      return "CALCULATED";
+    case CalculationStatus::kEstimated:
+      return "ESTIMATED";
+    case CalculationStatus::kUnsupported:
+      return "UNSUPPORTED";
+    case CalculationStatus::kInvalidInput:
+      return "INVALID_INPUT";
+    case CalculationStatus::kOverflow:
+      return "OVERFLOW";
+  }
+  return "UNKNOWN";
+}
+
+namespace {
+
+// Exact integer-rational scaling of an integer paise amount. All statutory
+// rates are expressed as rational numbers; no binary floating point is used
+// in their calculation.
+bool ScalePaise(int64_t base_paise,
+                int64_t numerator,
+                int64_t denominator,
+                int64_t* out,
+                bool round_half_up) {
+  if (out == nullptr || denominator <= 0)
+    return false;
+  int64_t scaled = 0;
+  if (!money_detail::CheckedMultiply(base_paise, numerator, &scaled))
+    return false;
+  if (round_half_up &&
+      !money_detail::CheckedAdd(scaled, denominator / 2, &scaled))
+    return false;
+  *out = scaled / denominator;
+  return true;
+}
+
+// Zerodha rounds STT to the nearest rupee with 50 paise rounding up.
+// Delivery STT is 0.1% (1/1000 of rupees); intraday sell STT is 0.025%
+// (1/4000 of rupees). With turnover in paise the divisors become 100000 and
+// 400000 respectively, so the whole calculation is exact integer arithmetic.
+bool RoundedSttPaise(int64_t turnover_paise, int64_t divisor, int64_t* out) {
+  int64_t rupees = 0;
+  if (!ScalePaise(turnover_paise, 1, divisor, &rupees, true))
+    return false;
+  return money_detail::CheckedMultiply(rupees, 100, out);
+}
+
+}  // namespace
+
 CostBreakdown EstimateCosts(Money turnover,
                             bool delivery,
                             bool is_buy,
                             double slippage_bps,
                             bool charge_dp) {
   CostBreakdown result;
-  if (turnover <= Money::FromRupees(0.0) || slippage_bps < 0.0)
+  if (!turnover.valid() || !std::isfinite(slippage_bps) || slippage_bps < 0.0) {
+    result.status = CalculationStatus::kInvalidInput;
+    result.brokerage = Money::Invalid();
+    result.stt = Money::Invalid();
+    result.exchange_fee = Money::Invalid();
+    result.gst = Money::Invalid();
+    result.sebi = Money::Invalid();
+    result.stamp = Money::Invalid();
+    result.dp = Money::Invalid();
+    result.slippage = Money::Invalid();
+    result.total = Money::Invalid();
     return result;
-
-  const double value = turnover.rupees();
-  const double brokerage_rate = delivery ? 0.0 : 0.0003;
-  const double brokerage_inr = std::min(value * brokerage_rate, 20.0);
-  result.brokerage = Money::FromRupees(brokerage_inr);
-
-  double stt_rate = 0.0;
-  if (delivery) {
-    stt_rate = 0.001;  // both sides.
-  } else if (!is_buy) {
-    stt_rate = 0.00025;  // sell side only.
   }
-  // Zerodha rounds STT to the nearest rupee; 50 paise rounds up.
-  const long double raw_stt =
-      static_cast<long double>(value) * static_cast<long double>(stt_rate);
-  const long long stt_rupees =
-      static_cast<long long>(std::floor(static_cast<double>(raw_stt + 0.5L)));
-  result.stt = Money::FromPaise(stt_rupees * 100);
+  int64_t value = 0;
+  if (!turnover.TryPaise(&value)) {
+    result.status = CalculationStatus::kInvalidInput;
+    return result;
+  }
+  if (value < 0) {
+    result.status = CalculationStatus::kInvalidInput;
+    return result;
+  }
+  if (value == 0) {
+    // A zero-turnover estimate is a legitimate no-trade result.
+    result.status = CalculationStatus::kCalculated;
+    return result;
+  }
 
-  result.exchange_fee = Money::FromRupees(value * 0.0000307);  // NSE cash.
-  result.sebi = Money::FromPaise(static_cast<int64_t>(
-      std::llround(static_cast<double>(turnover.paise()) * 1e-6)));
-  const double gst_base = result.brokerage.rupees() +
-                          result.exchange_fee.rupees() + result.sebi.rupees();
-  result.gst = Money::FromRupees(gst_base * 0.18);
+  result.status = charge_dp && delivery && !is_buy
+                      ? CalculationStatus::kEstimated
+                      : CalculationStatus::kCalculated;
+
+  if (delivery) {
+    result.brokerage = Money::FromPaise(0);
+  } else {
+    int64_t brokerage = 0;
+    if (!ScalePaise(value, 3, 10000, &brokerage, false)) {
+      result.status = CalculationStatus::kOverflow;
+      return result;
+    }
+    result.brokerage = Money::FromPaise(std::min<int64_t>(brokerage, 2000));
+  }
+
+  int64_t stt_divisor = 0;
+  if (delivery)
+    stt_divisor = 100000;
+  else if (!is_buy)
+    stt_divisor = 400000;
+  int64_t stt = 0;
+  if (stt_divisor != 0 && !RoundedSttPaise(value, stt_divisor, &stt)) {
+    result.status = CalculationStatus::kOverflow;
+    return result;
+  }
+  result.stt = Money::FromPaise(stt);
+
+  int64_t exchange = 0;
+  if (!ScalePaise(value, 307, 10000000, &exchange, false)) {
+    result.status = CalculationStatus::kOverflow;
+    return result;
+  }
+  result.exchange_fee = Money::FromPaise(exchange);
+
+  int64_t sebi = 0;
+  if (!ScalePaise(value, 1, 1000000, &sebi, true)) {
+    result.status = CalculationStatus::kOverflow;
+    return result;
+  }
+  result.sebi = Money::FromPaise(sebi);
+
+  int64_t gst_base = 0;
+  int64_t gst = 0;
+  if (!money_detail::CheckedAdd(
+          result.brokerage.paise(), result.exchange_fee.paise(), &gst_base) ||
+      !money_detail::CheckedAdd(gst_base, result.sebi.paise(), &gst_base) ||
+      !ScalePaise(gst_base, 18, 100, &gst, false)) {
+    result.status = CalculationStatus::kOverflow;
+    return result;
+  }
+  result.gst = Money::FromPaise(gst);
 
   if (is_buy) {
-    const double stamp_rate = delivery ? 0.00015 : 0.00003;
-    result.stamp = Money::FromRupees(value * stamp_rate);
+    int64_t stamp = 0;
+    if (!ScalePaise(value, delivery ? 15 : 3, 100000, &stamp, false)) {
+      result.status = CalculationStatus::kOverflow;
+      return result;
+    }
+    result.stamp = Money::FromPaise(stamp);
+  } else {
+    result.stamp = Money::FromPaise(0);
   }
-  if (delivery && !is_buy && charge_dp) {
-    result.dp = Money::FromRupees(15.34);  // ESTIMATED: per scrip, per day.
-  }
-  result.slippage = Money::FromRupees(value * slippage_bps / 10000.0);
 
-  result.total = result.brokerage + result.stt + result.exchange_fee +
-                 result.gst + result.sebi + result.stamp + result.dp +
-                 result.slippage;
+  if (charge_dp && delivery && !is_buy)
+    result.dp = Money::FromRupees(15.34);  // ESTIMATED: per scrip, per day.
+  else
+    result.dp = Money::FromPaise(0);
+
+  result.slippage = Money::FromRupees(static_cast<double>(value) / 100.0 *
+                                      slippage_bps / 10000.0);
+
+  int64_t total = 0;
+  if (!money_detail::CheckedAdd(total, result.brokerage.paise(), &total) ||
+      !money_detail::CheckedAdd(total, result.stt.paise(), &total) ||
+      !money_detail::CheckedAdd(total, result.exchange_fee.paise(), &total) ||
+      !money_detail::CheckedAdd(total, result.gst.paise(), &total) ||
+      !money_detail::CheckedAdd(total, result.sebi.paise(), &total) ||
+      !money_detail::CheckedAdd(total, result.stamp.paise(), &total) ||
+      !money_detail::CheckedAdd(total, result.dp.paise(), &total) ||
+      !money_detail::CheckedAdd(total, result.slippage.paise(), &total)) {
+    result.status = CalculationStatus::kOverflow;
+    return result;
+  }
+  if (!result.slippage.valid()) {
+    result.status = CalculationStatus::kOverflow;
+    return result;
+  }
+  result.total = Money::FromPaise(total);
   return result;
 }
 
@@ -567,76 +756,193 @@ CostBreakdown CostAggregator::Estimate(Money turnover,
                                        double slippage_bps,
                                        const std::string& symbol,
                                        const std::string& session) {
+  // Estimation is pure. DP entitlement is recognised only by
+  // RecognizeExecution when an execution is actually committed.
+  (void)symbol;
+  (void)session;
+  return EstimateCosts(turnover, delivery, is_buy, slippage_bps, false);
+}
+
+bool CostAggregator::RecognizeExecution(const std::string& symbol,
+                                        const std::string& session,
+                                        bool delivery,
+                                        bool is_buy,
+                                        bool* dp_applicable,
+                                        std::string* error) {
+  if (dp_applicable)
+    *dp_applicable = false;
+  if (symbol.empty() || session.empty()) {
+    if (error)
+      *error = "execution requires symbol and session identity";
+    return false;
+  }
+  if (!(delivery && !is_buy))
+    return true;
   const std::string key = session + "|" + symbol;
-  const bool first_sell = dp_charged_.find(key) == dp_charged_.end();
-  if (delivery && !is_buy && first_sell)
-    dp_charged_.insert(key);
-  return EstimateCosts(turnover, delivery, is_buy, slippage_bps, first_sell);
+  if (dp_charged_.find(key) != dp_charged_.end())
+    return true;
+  dp_charged_.insert(key);
+  if (dp_applicable)
+    *dp_applicable = true;
+  return true;
 }
 
 double BreakEvenMoveBps(Money notional,
                         const CostBreakdown& entry,
                         const CostBreakdown& exit_costs) {
-  if (notional <= Money::FromRupees(0.0))
-    return 0.0;
-  const double total =
-      static_cast<double>(entry.total.paise() + exit_costs.total.paise());
-  return total / static_cast<double>(notional.paise()) * 10000.0;
+  int64_t n = 0;
+  int64_t e = 0;
+  int64_t x = 0;
+  if (!notional.TryPaise(&n) || n <= 0 || !entry.total.TryPaise(&e) ||
+      !exit_costs.total.TryPaise(&x))
+    return std::numeric_limits<double>::quiet_NaN();
+  int64_t sum = 0;
+  if (!money_detail::CheckedAdd(e, x, &sum))
+    return std::numeric_limits<double>::quiet_NaN();
+  return static_cast<double>(sum) / static_cast<double>(n) * 10000.0;
 }
 
 std::string FormatCosts(const CostBreakdown& costs) {
+  auto field = [](const char* name, Money value) {
+    double amount = 0.0;
+    std::ostringstream oss;
+    oss << name << "=";
+    if (value.TryRupees(&amount))
+      oss << amount;
+    else
+      oss << "UNAVAILABLE";
+    return oss.str();
+  };
   std::ostringstream oss;
-  oss << "brokerage=" << costs.brokerage.rupees()
-      << " stt=" << costs.stt.rupees()
-      << " exchange=" << costs.exchange_fee.rupees()
-      << " sebi=" << costs.sebi.rupees() << " gst=" << costs.gst.rupees()
-      << " stamp=" << costs.stamp.rupees() << " dp=" << costs.dp.rupees()
-      << " slippage=" << costs.slippage.rupees()
-      << " total=" << costs.total.rupees() << " (" << costs.version << ")";
+  oss << field("brokerage", costs.brokerage) << " " << field("stt", costs.stt)
+      << " " << field("exchange", costs.exchange_fee) << " "
+      << field("sebi", costs.sebi) << " " << field("gst", costs.gst) << " "
+      << field("stamp", costs.stamp) << " " << field("dp", costs.dp) << " "
+      << field("slippage", costs.slippage) << " " << field("total", costs.total)
+      << " (" << costs.version << "," << CalculationStatusName(costs.status)
+      << ")";
   return oss.str();
 }
 
 // ---------------------------------------------------------------------------
 // Portfolio accounting.
 // ---------------------------------------------------------------------------
+Portfolio::Transaction::Transaction(Portfolio* owner)
+    : owner_(owner),
+      prior_ledger_(owner->ledger_),
+      prior_positions_(owner->positions_) {
+}
+
+Portfolio::Transaction::~Transaction() {
+  if (!committed_ && owner_ != nullptr) {
+    owner_->ledger_ = prior_ledger_;
+    owner_->positions_ = prior_positions_;
+  }
+}
+
+bool Portfolio::Transaction::Commit(std::string* error) {
+  if (!owner_->ValidateInvariants(error))
+    return false;
+  owner_->UpdatePeakEquity();
+  committed_ = true;
+  return true;
+}
+
+bool Portfolio::ValidateInvariants(std::string* error) const {
+  auto bad = [error](const char* message) {
+    if (error)
+      *error = message;
+    return false;
+  };
+  if (!ledger_.initial_capital.valid() || !ledger_.cash.valid() ||
+      !ledger_.invested.valid() || !ledger_.realized_pnl.valid() ||
+      !ledger_.unrealized_pnl.valid() || !ledger_.brokerage.valid() ||
+      !ledger_.statutory.valid() || !ledger_.slippage.valid() ||
+      !ledger_.operating.valid() || !ledger_.estimated_tax.valid() ||
+      !ledger_.peak_equity.valid() || !ledger_.external_flows.valid())
+    return bad("portfolio ledger contains an invalid monetary value");
+  int64_t cash = 0;
+  int64_t invested = 0;
+  int64_t unrealized = 0;
+  int64_t peak = 0;
+  if (!ledger_.cash.TryPaise(&cash) || cash < 0)
+    return bad("portfolio cash is negative or unavailable");
+  if (!ledger_.invested.TryPaise(&invested) || invested < 0)
+    return bad("cost basis is negative or unavailable");
+  if (!ledger_.unrealized_pnl.TryPaise(&unrealized))
+    return bad("unrealized P&L is unavailable");
+  if (!ledger_.peak_equity.TryPaise(&peak) || peak <= 0)
+    return bad("peak equity must be positive");
+  if (ledger_.trade_count < 0)
+    return bad("trade count is negative");
+  int64_t expected_unrealized = 0;
+  for (const auto& [symbol, position] : positions_) {
+    (void)symbol;
+    if (position.quantity <= 0)
+      return bad("position quantity must be positive");
+    int64_t last = 0;
+    int64_t average = 0;
+    int64_t contribution = 0;
+    if (!position.last_price.TryPaise(&last) || last <= 0 ||
+        !position.avg_price.TryPaise(&average) || average <= 0 ||
+        !money_detail::CheckedSubtract(last, average, &contribution) ||
+        !money_detail::CheckedMultiply(contribution,
+                                       static_cast<int64_t>(position.quantity),
+                                       &contribution) ||
+        !money_detail::CheckedAdd(
+            expected_unrealized, contribution, &expected_unrealized))
+      return bad("position valuation overflow or invalid price");
+  }
+  if (expected_unrealized != unrealized)
+    return bad("unrealized P&L does not reconcile to open positions");
+  if (!equity().valid() || !market_value().valid() || !drawdown().valid())
+    return bad("equity, market value or drawdown is invalid");
+  return true;
+}
+
 Portfolio::Portfolio() : Portfolio(Money::FromRupees(0.0)) {
 }
 
 Portfolio::Portfolio(Money initial_capital) {
   ledger_.initial_capital = initial_capital;
   ledger_.cash = initial_capital;
-  ledger_.invested = Money::FromRupees(0.0);
-  ledger_.realized_pnl = Money::FromRupees(0.0);
-  ledger_.unrealized_pnl = Money::FromRupees(0.0);
-  ledger_.brokerage = Money::FromRupees(0.0);
-  ledger_.statutory = Money::FromRupees(0.0);
-  ledger_.slippage = Money::FromRupees(0.0);
-  ledger_.operating = Money::FromRupees(0.0);
-  ledger_.estimated_tax = Money::FromRupees(0.0);
+  ledger_.invested = Money::FromPaise(0);
+  ledger_.realized_pnl = Money::FromPaise(0);
+  ledger_.unrealized_pnl = Money::FromPaise(0);
+  ledger_.brokerage = Money::FromPaise(0);
+  ledger_.statutory = Money::FromPaise(0);
+  ledger_.slippage = Money::FromPaise(0);
+  ledger_.operating = Money::FromPaise(0);
+  ledger_.estimated_tax = Money::FromPaise(0);
   ledger_.peak_equity = initial_capital;
-  ledger_.external_flows = Money::FromRupees(0.0);
-  audit_.push_back("INITIAL_CAPITAL " +
-                   std::to_string(initial_capital.paise()));
+  ledger_.external_flows = Money::FromPaise(0);
+  int64_t opening = 0;
+  if (initial_capital.TryPaise(&opening))
+    audit_.push_back("INITIAL_CAPITAL " + std::to_string(opening));
 }
 
 void Portfolio::UpdatePeakEquity() {
   const Money current = equity();
-  if (current > ledger_.peak_equity)
+  if (current.valid() && current > ledger_.peak_equity)
     ledger_.peak_equity = current;
 }
 
 bool Portfolio::RecomputeUnrealized() {
   int64_t unrealized = 0;
   for (const auto& [symbol, position] : positions_) {
-    int64_t contribution = 0;
-    if (!CheckedMultiply(
-            position.last_price.paise() - position.avg_price.paise(),
-            static_cast<int64_t>(position.quantity),
-            &contribution) ||
-        !CheckedAdd(unrealized, contribution, &unrealized)) {
-      return false;
-    }
     (void)symbol;
+    int64_t last = 0;
+    int64_t average = 0;
+    int64_t difference = 0;
+    int64_t contribution = 0;
+    if (!position.last_price.TryPaise(&last) ||
+        !position.avg_price.TryPaise(&average) ||
+        !money_detail::CheckedSubtract(last, average, &difference) ||
+        !money_detail::CheckedMultiply(difference,
+                                       static_cast<int64_t>(position.quantity),
+                                       &contribution) ||
+        !money_detail::CheckedAdd(unrealized, contribution, &unrealized))
+      return false;
   }
   ledger_.unrealized_pnl = Money::FromPaise(unrealized);
   return true;
@@ -651,34 +957,60 @@ bool Portfolio::Buy(const std::string& symbol,
                     Money price,
                     const CostBreakdown& costs,
                     std::string* error) {
-  if (quantity <= 0 || price <= Money::FromRupees(0.0)) {
+  auto fail = [error](const char* message) {
     if (error)
-      *error = "invalid buy quantity or price";
+      *error = message;
     return false;
-  }
+  };
+  if (quantity <= 0 || symbol.empty())
+    return fail("invalid buy quantity or symbol");
+  int64_t price_paise = 0;
+  if (!PositivePaise(price, &price_paise))
+    return fail("invalid buy price");
+  if (!costs.usable())
+    return fail("invalid or unrecognised cost calculation");
+
   int64_t notional_paise = 0;
-  if (!CheckedMultiply(
-          price.paise(), static_cast<int64_t>(quantity), &notional_paise)) {
-    if (error)
-      *error = "buy notional overflow";
-    return false;
-  }
-  const Money notional = Money::FromPaise(notional_paise);
   int64_t required_paise = 0;
-  if (!CheckedAdd(notional.paise(), costs.total.paise(), &required_paise)) {
-    if (error)
-      *error = "buy requirement overflow";
-    return false;
-  }
+  int64_t next_quantity = 0;
+  if (!money_detail::CheckedMultiply(
+          price_paise, static_cast<int64_t>(quantity), &notional_paise))
+    return fail("buy notional overflow");
+  int64_t cost_paise = 0;
+  if (!costs.total.TryPaise(&cost_paise) ||
+      !money_detail::CheckedAdd(notional_paise, cost_paise, &required_paise))
+    return fail("buy requirement overflow");
+  const Money notional = Money::FromPaise(notional_paise);
   const Money required = Money::FromPaise(required_paise);
-  const Ledger prior_ledger = ledger_;
-  const auto prior_positions = positions_;
-  if (required > ledger_.cash) {
-    if (error)
-      *error = "insufficient cash: required exceeds available";
-    return false;
-  }
-  auto it = positions_.find(symbol);
+  if (!(required <= ledger_.cash))
+    return fail("insufficient cash: required exceeds available");
+
+  const auto it = positions_.find(symbol);
+  if (it != positions_.end() &&
+      (!money_detail::CheckedAdd(static_cast<int64_t>(it->second.quantity),
+                                 static_cast<int64_t>(quantity),
+                                 &next_quantity) ||
+       next_quantity > std::numeric_limits<int>::max()))
+    return fail("position quantity overflow");
+
+  Transaction transaction(this);
+  Money cash = Money::Invalid();
+  Money invested = Money::Invalid();
+  Money realized = Money::Invalid();
+  Money brokerage = Money::Invalid();
+  Money statutory = Money::Invalid();
+  Money slippage = Money::Invalid();
+  if (!CheckedMoneySubtract(ledger_.cash, required, &cash) ||
+      !CheckedMoneyAdd(ledger_.invested, notional, &invested) ||
+      !CheckedMoneySubtract(ledger_.realized_pnl, costs.total, &realized) ||
+      !CheckedMoneyAdd(ledger_.brokerage, costs.brokerage, &brokerage) ||
+      !CheckedMoneyAdd(ledger_.statutory,
+                       costs.stt + costs.exchange_fee + costs.gst + costs.sebi +
+                           costs.stamp + costs.dp,
+                       &statutory) ||
+      !CheckedMoneyAdd(ledger_.slippage, costs.slippage, &slippage))
+    return fail("buy ledger arithmetic overflow");
+
   if (it == positions_.end()) {
     Position position;
     position.symbol = symbol;
@@ -687,43 +1019,35 @@ bool Portfolio::Buy(const std::string& symbol,
     position.last_price = price;
     positions_[symbol] = position;
   } else {
-    const int total = it->second.quantity + quantity;
     int64_t left = 0;
     int64_t right = 0;
     int64_t weighted = 0;
-    if (!CheckedMultiply(it->second.avg_price.paise(),
-                         static_cast<int64_t>(it->second.quantity),
-                         &left) ||
-        !CheckedMultiply(
-            price.paise(), static_cast<int64_t>(quantity), &right) ||
-        !CheckedAdd(left, right, &weighted)) {
-      if (error)
-        *error = "weighted cost overflow";
-      return false;
-    }
-    it->second.avg_price = Money::FromPaise(weighted / total);
-    it->second.quantity = total;
+    int64_t average = 0;
+    if (!it->second.avg_price.TryPaise(&average) ||
+        !money_detail::CheckedMultiply(
+            average, static_cast<int64_t>(it->second.quantity), &left) ||
+        !money_detail::CheckedMultiply(
+            price_paise, static_cast<int64_t>(quantity), &right) ||
+        !money_detail::CheckedAdd(left, right, &weighted))
+      return fail("weighted cost overflow");
+    it->second.avg_price = Money::FromPaise(weighted / next_quantity);
+    it->second.quantity = static_cast<int>(next_quantity);
     it->second.last_price = price;
   }
-  ledger_.cash -= required;
-  ledger_.invested += notional;
-  ledger_.realized_pnl -= costs.total;
-  ledger_.brokerage += costs.brokerage;
-  ledger_.statutory += costs.stt + costs.exchange_fee + costs.gst + costs.sebi +
-                       costs.stamp + costs.dp;
-  ledger_.slippage += costs.slippage;
+  ledger_.cash = cash;
+  ledger_.invested = invested;
+  ledger_.realized_pnl = realized;
+  ledger_.brokerage = brokerage;
+  ledger_.statutory = statutory;
+  ledger_.slippage = slippage;
   ++ledger_.trade_count;
-  if (!RecomputeUnrealized()) {
-    ledger_ = prior_ledger;
-    positions_ = prior_positions;
-    if (error)
-      *error = "buy position-state overflow";
+  if (!RecomputeUnrealized())
+    return fail("buy position-state overflow");
+  if (!transaction.Commit(error))
     return false;
-  }
-  UpdatePeakEquity();
   audit_.push_back("BUY " + symbol + " qty=" + std::to_string(quantity) +
-                   " price_paise=" + std::to_string(price.paise()) +
-                   " cost_paise=" + std::to_string(costs.total.paise()));
+                   " price_paise=" + std::to_string(price_paise) +
+                   " cost_paise=" + std::to_string(cost_paise));
   return true;
 }
 
@@ -732,58 +1056,76 @@ bool Portfolio::Sell(const std::string& symbol,
                      Money price,
                      const CostBreakdown& costs,
                      std::string* error) {
-  auto it = positions_.find(symbol);
-  if (it == positions_.end() || it->second.quantity < quantity ||
-      quantity <= 0) {
+  auto fail = [error](const char* message) {
     if (error)
-      *error = "sell quantity exceeds position";
+      *error = message;
     return false;
-  }
-  if (price <= Money::FromRupees(0.0)) {
-    if (error)
-      *error = "invalid sell price";
-    return false;
-  }
+  };
+  const auto it = positions_.find(symbol);
+  if (it == positions_.end() || it->second.quantity < quantity || quantity <= 0)
+    return fail("sell quantity exceeds position");
+  int64_t price_paise = 0;
+  if (!PositivePaise(price, &price_paise))
+    return fail("invalid sell price");
+  if (!costs.usable())
+    return fail("invalid or unrecognised cost calculation");
+
   int64_t notional_paise = 0;
   int64_t basis_paise = 0;
-  if (!CheckedMultiply(
-          price.paise(), static_cast<int64_t>(quantity), &notional_paise) ||
-      !CheckedMultiply(it->second.avg_price.paise(),
-                       static_cast<int64_t>(quantity),
-                       &basis_paise)) {
-    if (error)
-      *error = "sell notional overflow";
-    return false;
-  }
+  int64_t average = 0;
+  int64_t cost_paise = 0;
+  if (!it->second.avg_price.TryPaise(&average) ||
+      !money_detail::CheckedMultiply(
+          price_paise, static_cast<int64_t>(quantity), &notional_paise) ||
+      !money_detail::CheckedMultiply(
+          average, static_cast<int64_t>(quantity), &basis_paise) ||
+      !costs.total.TryPaise(&cost_paise))
+    return fail("sell notional overflow");
   const Money notional = Money::FromPaise(notional_paise);
   const Money basis = Money::FromPaise(basis_paise);
-  const Money pnl = notional - basis - costs.total;
-  const Ledger prior_ledger = ledger_;
-  const auto prior_positions = positions_;
-  ledger_.cash += notional - costs.total;
-  ledger_.invested -= basis;
-  ledger_.realized_pnl += pnl;
-  ledger_.brokerage += costs.brokerage;
-  ledger_.statutory += costs.stt + costs.exchange_fee + costs.gst + costs.sebi +
-                       costs.stamp + costs.dp;
-  ledger_.slippage += costs.slippage;
-  ++ledger_.trade_count;
-  it->second.quantity -= quantity;
-  if (it->second.quantity == 0) {
+  Money proceeds = Money::Invalid();
+  Money pnl = Money::Invalid();
+  if (!CheckedMoneySubtract(notional, costs.total, &proceeds) ||
+      !CheckedMoneySubtract(proceeds, basis, &pnl))
+    return fail("sell proceeds arithmetic overflow");
+
+  Transaction transaction(this);
+  Money cash = Money::Invalid();
+  Money invested = Money::Invalid();
+  Money realized = Money::Invalid();
+  Money brokerage = Money::Invalid();
+  Money statutory = Money::Invalid();
+  Money slippage = Money::Invalid();
+  if (!CheckedMoneyAdd(ledger_.cash, proceeds, &cash) ||
+      !CheckedMoneySubtract(ledger_.invested, basis, &invested) ||
+      !CheckedMoneyAdd(ledger_.realized_pnl, pnl, &realized) ||
+      !CheckedMoneyAdd(ledger_.brokerage, costs.brokerage, &brokerage) ||
+      !CheckedMoneyAdd(ledger_.statutory,
+                       costs.stt + costs.exchange_fee + costs.gst + costs.sebi +
+                           costs.stamp + costs.dp,
+                       &statutory) ||
+      !CheckedMoneyAdd(ledger_.slippage, costs.slippage, &slippage))
+    return fail("sell ledger arithmetic overflow");
+
+  if (quantity == it->second.quantity) {
     positions_.erase(it);
   } else {
+    it->second.quantity -= quantity;
     it->second.last_price = price;
   }
-  if (!RecomputeUnrealized()) {
-    ledger_ = prior_ledger;
-    positions_ = prior_positions;
-    if (error)
-      *error = "sell position-state overflow";
+  ledger_.cash = cash;
+  ledger_.invested = invested;
+  ledger_.realized_pnl = realized;
+  ledger_.brokerage = brokerage;
+  ledger_.statutory = statutory;
+  ledger_.slippage = slippage;
+  ++ledger_.trade_count;
+  if (!RecomputeUnrealized())
+    return fail("sell position-state overflow");
+  if (!transaction.Commit(error))
     return false;
-  }
-  UpdatePeakEquity();
   audit_.push_back("SELL " + symbol + " qty=" + std::to_string(quantity) +
-                   " price_paise=" + std::to_string(price.paise()) +
+                   " price_paise=" + std::to_string(price_paise) +
                    " pnl_paise=" + std::to_string(pnl.paise()));
   return true;
 }
@@ -791,50 +1133,82 @@ bool Portfolio::Sell(const std::string& symbol,
 bool Portfolio::MarkToMarket(const std::string& symbol,
                              Money price,
                              std::string* error) {
-  auto it = positions_.find(symbol);
+  const auto it = positions_.find(symbol);
   if (it == positions_.end()) {
     if (error)
       *error = "mark-to-market unknown symbol";
     return false;
   }
-  const Ledger prior_ledger = ledger_;
-  const auto prior_positions = positions_;
+  int64_t raw = 0;
+  if (!PositivePaise(price, &raw)) {
+    if (error)
+      *error = "mark-to-market price invalid";
+    return false;
+  }
+  Transaction transaction(this);
   it->second.last_price = price;
   if (!RecomputeUnrealized()) {
-    ledger_ = prior_ledger;
-    positions_ = prior_positions;
     if (error)
       *error = "mark-to-market overflow";
     return false;
   }
-  UpdatePeakEquity();
-  return true;
+  return transaction.Commit(error);
 }
 
 bool Portfolio::RecordOperatingExpense(Money amount, std::string* error) {
-  if (amount < Money::FromRupees(0.0)) {
+  int64_t raw = 0;
+  if (!amount.TryPaise(&raw) || raw < 0) {
     if (error)
-      *error = "operating expense must be non-negative";
+      *error = "operating expense must be a valid non-negative amount";
     return false;
   }
-  if (amount > ledger_.cash) {
+  if (!(amount <= ledger_.cash)) {
     if (error)
       *error = "operating expense exceeds available cash";
     return false;
   }
-  ledger_.cash -= amount;
-  ledger_.operating += amount;
-  UpdatePeakEquity();
-  audit_.push_back("OPERATING_EXPENSE " + std::to_string(amount.paise()));
+  Transaction transaction(this);
+  Money cash = Money::Invalid();
+  Money operating = Money::Invalid();
+  if (!CheckedMoneySubtract(ledger_.cash, amount, &cash) ||
+      !CheckedMoneyAdd(ledger_.operating, amount, &operating)) {
+    if (error)
+      *error = "operating expense arithmetic overflow";
+    return false;
+  }
+  ledger_.cash = cash;
+  ledger_.operating = operating;
+  if (!transaction.Commit(error))
+    return false;
+  audit_.push_back("OPERATING_EXPENSE " + std::to_string(raw));
   return true;
 }
 
-void Portfolio::RecordExternalFlow(Money amount, const std::string& reason) {
-  ledger_.cash += amount;
-  ledger_.external_flows += amount;
-  UpdatePeakEquity();
-  audit_.push_back("RECONCILIATION_EXCEPTION " +
-                   std::to_string(amount.paise()) + " " + reason);
+bool Portfolio::RecordExternalFlow(Money amount,
+                                   const std::string& reason,
+                                   std::string* error) {
+  int64_t raw = 0;
+  if (!amount.TryPaise(&raw) || reason.empty()) {
+    if (error)
+      *error = "external flow requires a valid amount and reason";
+    return false;
+  }
+  Transaction transaction(this);
+  Money cash = Money::Invalid();
+  Money flows = Money::Invalid();
+  if (!CheckedMoneyAdd(ledger_.cash, amount, &cash) ||
+      !CheckedMoneyAdd(ledger_.external_flows, amount, &flows)) {
+    if (error)
+      *error = "external flow arithmetic overflow";
+    return false;
+  }
+  ledger_.cash = cash;
+  ledger_.external_flows = flows;
+  if (!transaction.Commit(error))
+    return false;
+  audit_.push_back("RECONCILIATION_EXCEPTION " + std::to_string(raw) + " " +
+                   reason);
+  return true;
 }
 
 Money Portfolio::equity() const {
@@ -846,15 +1220,20 @@ Money Portfolio::available_cash() const {
 }
 
 Money Portfolio::drawdown() const {
-  const Money loss = ledger_.peak_equity - equity();
-  return loss > Money::FromRupees(0.0) ? loss : Money::FromRupees(0.0);
+  const Money current = equity();
+  if (!current.valid() || !ledger_.peak_equity.valid())
+    return Money::Invalid();
+  const Money loss = ledger_.peak_equity - current;
+  return loss > Money::FromPaise(0) ? loss : Money::FromPaise(0);
 }
 
 double Portfolio::drawdown_fraction() const {
-  if (ledger_.peak_equity <= Money::FromRupees(0.0))
-    return 0.0;
-  return static_cast<double>(drawdown().paise()) /
-         static_cast<double>(ledger_.peak_equity.paise());
+  int64_t peak = 0;
+  int64_t loss = 0;
+  if (!ledger_.peak_equity.TryPaise(&peak) || peak <= 0 ||
+      !drawdown().TryPaise(&loss))
+    return std::numeric_limits<double>::quiet_NaN();
+  return static_cast<double>(loss) / static_cast<double>(peak);
 }
 
 // ---------------------------------------------------------------------------
@@ -865,79 +1244,138 @@ SizingResult SizePosition(const Config& config,
                           const Portfolio& portfolio,
                           const SizingInput& input) {
   SizingResult result;
-  result.notional = Money::FromRupees(0.0);
-  if (input.price <= Money::FromRupees(0.0)) {
-    result.reason = "invalid price";
+  result.notional = Money::Invalid();
+  auto reject = [&result](const char* reason) {
+    result.quantity = 0;
+    result.notional = Money::Invalid();
+    result.reason = reason;
     return result;
-  }
-  if (input.tick_size > 0.0) {
-    const double ticks = input.price.rupees() / input.tick_size;
-    if (std::abs(ticks - std::round(ticks)) > 1e-6) {
-      result.reason = "price violates tick size";
-      return result;
-    }
-  }
-  const Money equity = portfolio.equity();
-  if (equity <= Money::FromRupees(0.0)) {
-    result.reason = "non-positive equity";
-    return result;
-  }
-  const double drawdown_scale =
-      std::max(0.0,
-               1.0 - portfolio.drawdown_fraction() /
-                         std::max(config.max_drawdown_fraction, 0.0001));
-  if (drawdown_scale <= 0.0) {
-    result.reason = "drawdown limit reached";
-    return result;
-  }
+  };
+
+  int64_t price_paise = 0;
+  if (!PositivePaise(input.price, &price_paise))
+    return reject("invalid price");
+  if (!std::isfinite(input.volatility) || input.volatility < 0.0)
+    return reject("invalid volatility");
+  if (!std::isfinite(input.stop_distance) || input.stop_distance < 0.0)
+    return reject("invalid stop distance");
+  if (!std::isfinite(input.tick_size) || input.tick_size < 0.0)
+    return reject("invalid tick size");
+  if (!std::isfinite(input.participation) || input.participation < 0.0 ||
+      input.participation > 1.0)
+    return reject("invalid participation");
+  if (input.available_depth < 0)
+    return reject("invalid depth");
+  int64_t exposure_paise = 0;
+  if (!input.current_exposure.TryPaise(&exposure_paise) || exposure_paise < 0)
+    return reject("invalid current exposure");
+  if (!std::isfinite(config.risk_per_trade_fraction) ||
+      config.risk_per_trade_fraction <= 0.0 ||
+      !std::isfinite(config.cash_reserve_fraction) ||
+      config.cash_reserve_fraction < 0.0 ||
+      !std::isfinite(config.max_gross_exposure_fraction) ||
+      config.max_gross_exposure_fraction <= 0.0)
+    return reject("invalid risk configuration");
+  if (!std::isfinite(config.max_participation_fraction) ||
+      config.max_participation_fraction <= 0.0 ||
+      !std::isfinite(config.slippage_bps) || config.slippage_bps < 0.0)
+    return reject("invalid execution configuration");
+
   const double price = input.price.rupees();
-  const double risk_budget =
-      equity.rupees() * config.risk_per_trade_fraction * drawdown_scale;
+  if (input.tick_size > 0.0) {
+    const double ticks = price / input.tick_size;
+    if (!std::isfinite(ticks) || std::abs(ticks - std::round(ticks)) > 1e-6)
+      return reject("price violates tick size");
+  }
+
+  int64_t equity_paise = 0;
+  if (!portfolio.equity().TryPaise(&equity_paise) || equity_paise <= 0)
+    return reject("non-positive equity");
+  const double drawdown_fraction = portfolio.drawdown_fraction();
+  if (!std::isfinite(drawdown_fraction))
+    return reject("invalid drawdown");
+  const double drawdown_scale = std::max(
+      0.0,
+      1.0 - drawdown_fraction / std::max(config.max_drawdown_fraction, 0.0001));
+  if (!std::isfinite(drawdown_scale) || drawdown_scale <= 0.0)
+    return reject("drawdown limit reached");
+
+  const double risk_budget = static_cast<double>(equity_paise) / 100.0 *
+                             config.risk_per_trade_fraction * drawdown_scale;
   const double stop_fraction = input.stop_distance > 0.0
                                    ? input.stop_distance
                                    : std::max(input.volatility, 0.005) * 2.0;
   const double risk_per_share = price * stop_fraction;
-  const double reserve = equity.rupees() * config.cash_reserve_fraction;
-  const double spendable =
-      std::max(0.0, portfolio.available_cash().rupees() - reserve);
-  const double exposure_cap =
-      std::max(0.0,
-               equity.rupees() * config.max_gross_exposure_fraction -
-                   input.current_exposure.rupees()) /
-      price;
+  if (!std::isfinite(risk_budget) || !std::isfinite(risk_per_share) ||
+      risk_budget <= 0.0 || risk_per_share <= 0.0)
+    return reject("invalid risk budget or stop distance");
+
+  const Money reserve = Money::FromRupees(static_cast<double>(equity_paise) /
+                                          100.0 * config.cash_reserve_fraction);
+  Money spendable = Money::Invalid();
+  if (!reserve.valid() ||
+      !CheckedMoneySubtract(portfolio.available_cash(), reserve, &spendable))
+    return reject("cash reserve arithmetic overflow");
+  int64_t spendable_paise = 0;
+  if (!spendable.TryPaise(&spendable_paise) || spendable_paise <= 0)
+    return reject("insufficient cash after reserve");
+
+  const Money exposure_cap =
+      Money::FromRupees(static_cast<double>(equity_paise) / 100.0 *
+                        config.max_gross_exposure_fraction);
+  Money headroom = Money::Invalid();
+  if (!exposure_cap.valid() ||
+      !CheckedMoneySubtract(exposure_cap, input.current_exposure, &headroom))
+    return reject("exposure arithmetic overflow");
+  int64_t headroom_paise = 0;
+  if (!headroom.TryPaise(&headroom_paise) || headroom_paise <= 0)
+    return reject("exposure limit reached");
+
+  if (input.available_depth <= 0 && !input.capacity_estimate)
+    return reject("execution depth unavailable");
   const double participation = input.participation > 0.0
                                    ? input.participation
                                    : config.max_participation_fraction;
-  if (input.available_depth <= 0 && !input.capacity_estimate) {
-    result.reason = "execution depth unavailable";
-    return result;
-  }
   const double depth_cap =
       input.available_depth > 0
           ? static_cast<double>(input.available_depth) * participation
           : std::numeric_limits<double>::infinity();
 
-  int quantity =
-      static_cast<int>(std::floor(std::min({risk_budget / risk_per_share,
-                                            spendable / price,
-                                            exposure_cap,
-                                            depth_cap})));
+  const double raw_quantity = std::min(
+      {risk_budget / risk_per_share,
+       static_cast<double>(spendable_paise) / static_cast<double>(price_paise),
+       static_cast<double>(headroom_paise) / static_cast<double>(price_paise),
+       depth_cap});
+  if (!std::isfinite(raw_quantity) || raw_quantity < 1.0)
+    return reject("minimum one share violates risk/cash/liquidity budget");
+  if (raw_quantity > static_cast<double>(std::numeric_limits<int>::max()))
+    return reject("quantity conversion overflow");
+
+  int quantity = static_cast<int>(std::floor(raw_quantity));
+  Money approved_notional = Money::Invalid();
   while (quantity > 0) {
-    const Money notional =
-        Money::FromPaise(input.price.paise() * static_cast<int64_t>(quantity));
+    int64_t notional_paise = 0;
+    if (!money_detail::CheckedMultiply(
+            price_paise, static_cast<int64_t>(quantity), &notional_paise))
+      return reject("notional overflow");
+    const Money notional = Money::FromPaise(notional_paise);
     const CostBreakdown costs =
         EstimateCosts(notional, input.delivery, true, config.slippage_bps);
-    if (notional + costs.total <= Money::FromRupees(spendable))
+    if (!costs.usable())
+      return reject("invalid cost estimate");
+    Money required = Money::Invalid();
+    if (!CheckedMoneyAdd(notional, costs.total, &required))
+      return reject("cash requirement overflow");
+    if (required <= spendable) {
+      approved_notional = notional;
       break;
+    }
     --quantity;
   }
-  if (quantity < 1) {
-    result.reason = "minimum one share violates risk/cash/liquidity budget";
-    return result;
-  }
+  if (quantity < 1 || !approved_notional.valid())
+    return reject("minimum one share violates risk/cash/liquidity budget");
   result.quantity = quantity;
-  result.notional =
-      Money::FromPaise(input.price.paise() * static_cast<int64_t>(quantity));
+  result.notional = approved_notional;
   result.reason = "approved: current-equity sizing within all limits";
   return result;
 }
@@ -1018,6 +1456,7 @@ RiskDecision RiskEngine::Evaluate(const Signal& signal,
   sizing.price = Money::FromRupees(quote.ask);  // Executable ask for a buy.
   sizing.volatility = signal.features.vol20;
   sizing.stop_distance = config_.stop_loss_fraction;
+  sizing.delivery = config_.execution_delivery;
   sizing.available_depth = quote.ask_qty;  // Side-specific depth.
   sizing.current_exposure = portfolio.market_value();
   if (sizing.available_depth <= 0)
@@ -1246,6 +1685,39 @@ BacktestMetrics RunBacktest(
   Money entry_price = Money::FromRupees(0.0);
   int64_t gross_wins = 0;
   int64_t gross_losses = 0;
+  auto record_gross = [&](Money price, Money basis, int quantity) {
+    int64_t exit = 0;
+    int64_t average = 0;
+    int64_t difference = 0;
+    int64_t gross = 0;
+    int64_t wins = gross_wins;
+    int64_t losses = gross_losses;
+    if (!price.TryPaise(&exit) || !basis.TryPaise(&average) ||
+        !money_detail::CheckedSubtract(exit, average, &difference) ||
+        !money_detail::CheckedMultiply(
+            difference, static_cast<int64_t>(quantity), &gross)) {
+      metrics.halted = true;
+      metrics.warnings.push_back("gross P&L arithmetic overflow");
+      return false;
+    }
+    if (gross > 0) {
+      if (!money_detail::CheckedAdd(wins, gross, &wins)) {
+        metrics.halted = true;
+        metrics.warnings.push_back("gross win accumulation overflow");
+        return false;
+      }
+    } else if (gross < 0) {
+      if (!money_detail::CheckedAdd(losses, -gross, &losses)) {
+        metrics.halted = true;
+        metrics.warnings.push_back("gross loss accumulation overflow");
+        return false;
+      }
+    }
+    gross_wins = wins;
+    gross_losses = losses;
+    metrics.gross_pnl += Money::FromPaise(gross);
+    return metrics.gross_pnl.valid();
+  };
 
   std::vector<std::string> ordered_dates(dates.begin(), dates.end());
   for (size_t day = 120; day + 1 < ordered_dates.size(); ++day) {
@@ -1281,14 +1753,25 @@ BacktestMetrics RunBacktest(
             auto position = portfolio.positions().find(open_symbol);
             if (position != portfolio.positions().end()) {
               const int qty = position->second.quantity;
+              int64_t exit_notional = 0;
+              if (!money_detail::CheckedMultiply(exit_price.paise(),
+                                                 static_cast<int64_t>(qty),
+                                                 &exit_notional)) {
+                metrics.warnings.push_back("exit notional overflow");
+                metrics.halted = true;
+                break;
+              }
               const CostBreakdown costs =
-                  EstimateCosts(Money::FromPaise(exit_price.paise() * qty),
+                  EstimateCosts(Money::FromPaise(exit_notional),
                                 config.backtest_delivery,
                                 false,
                                 config.slippage_bps);
+              if (!costs.usable()) {
+                metrics.warnings.push_back("exit cost calculation invalid");
+                metrics.halted = true;
+                break;
+              }
               const Money basis = position->second.avg_price;  // per share.
-              const int64_t trade_gross = (exit_price.paise() - basis.paise()) *
-                                          static_cast<int64_t>(qty);
               std::string sell_error;
               if (!portfolio.Sell(
                       open_symbol, qty, exit_price, costs, &sell_error)) {
@@ -1296,11 +1779,10 @@ BacktestMetrics RunBacktest(
                 metrics.halted = true;
                 break;
               }
-              metrics.gross_pnl += Money::FromPaise(trade_gross);
-              if (trade_gross > 0)
-                gross_wins += trade_gross;
-              else
-                gross_losses -= trade_gross;
+              if (!record_gross(exit_price, basis, qty)) {
+                ++metrics.trades;
+                break;
+              }
               ++metrics.trades;
               if (exit_price > basis)
                 ++metrics.wins;
@@ -1372,6 +1854,11 @@ BacktestMetrics RunBacktest(
                                                     config.backtest_delivery,
                                                     true,
                                                     config.slippage_bps);
+          if (!costs.usable()) {
+            metrics.warnings.push_back("entry cost calculation invalid");
+            metrics.halted = true;
+            break;
+          }
           std::string error;
           if (portfolio.Buy(
                   best_symbol, sized.quantity, price, costs, &error)) {
@@ -1388,34 +1875,72 @@ BacktestMetrics RunBacktest(
     equity_curve.push_back(portfolio.equity().rupees());
   }
 
+  metrics.terminal_liquidation_requested = config.terminal_liquidation;
   if (config.terminal_liquidation) {
-    // Snapshot before mutation: Sell invalidates the positions map iterator.
     std::vector<std::pair<std::string, int>> terminal_positions;
-    for (const auto& [symbol, position] : portfolio.positions()) {
+    for (const auto& [symbol, position] : portfolio.positions())
       terminal_positions.emplace_back(symbol, position.quantity);
-    }
     for (const auto& [symbol, qty] : terminal_positions) {
       auto series_it = history.find(symbol);
-      if (series_it == history.end() || series_it->second.empty())
+      const Money price =
+          series_it == history.end() || series_it->second.empty()
+              ? Money::Invalid()
+              : Money::FromRupees(series_it->second.back().close);
+      if (!price.valid()) {
+        metrics.warnings.push_back("terminal liquidation missing price for " +
+                                   symbol);
+        metrics.terminal_liquidation_failed = true;
+        metrics.halted = true;
         continue;
-      const Money price = Money::FromRupees(series_it->second.back().close);
+      }
+      int64_t notional_paise = 0;
+      if (!money_detail::CheckedMultiply(
+              price.paise(), static_cast<int64_t>(qty), &notional_paise)) {
+        metrics.warnings.push_back("terminal notional overflow for " + symbol);
+        metrics.terminal_liquidation_failed = true;
+        metrics.halted = true;
+        continue;
+      }
       const CostBreakdown costs =
-          EstimateCosts(Money::FromPaise(price.paise() * qty),
+          EstimateCosts(Money::FromPaise(notional_paise),
                         config.backtest_delivery,
                         false,
                         config.slippage_bps);
+      if (!costs.usable()) {
+        metrics.warnings.push_back("terminal cost estimate invalid for " +
+                                   symbol);
+        metrics.terminal_liquidation_failed = true;
+        metrics.halted = true;
+        continue;
+      }
       const auto position_it = portfolio.positions().find(symbol);
       if (position_it == portfolio.positions().end())
         continue;
-      metrics.gross_pnl += Money::FromPaise(
-          (price.paise() - position_it->second.avg_price.paise()) *
-          static_cast<int64_t>(qty));
+      const Money basis = position_it->second.avg_price;
       std::string terminal_error;
       if (!portfolio.Sell(symbol, qty, price, costs, &terminal_error)) {
         metrics.warnings.push_back("terminal liquidation failed: " +
                                    terminal_error);
+        metrics.terminal_liquidation_failed = true;
         metrics.halted = true;
+        continue;
       }
+      if (!record_gross(price, basis, qty)) {
+        metrics.terminal_liquidation_failed = true;
+        break;
+      }
+      ++metrics.trades;
+      if (price > basis)
+        ++metrics.wins;
+    }
+    metrics.terminal_open_positions = portfolio.open_position_count();
+    metrics.terminal_liquidation_completed =
+        !metrics.terminal_liquidation_failed &&
+        metrics.terminal_open_positions == 0;
+    if (!metrics.terminal_liquidation_completed && !metrics.halted) {
+      metrics.warnings.push_back(
+          "terminal liquidation incomplete with residual positions");
+      metrics.halted = true;
     }
   } else {
     std::vector<std::string> symbols;
@@ -1425,17 +1950,22 @@ BacktestMetrics RunBacktest(
     }
     for (const std::string& symbol : symbols) {
       auto series_it = history.find(symbol);
-      if (series_it == history.end() || series_it->second.empty())
-        continue;
-      const Money price = Money::FromRupees(series_it->second.back().close);
+      const Money price =
+          series_it == history.end() || series_it->second.empty()
+              ? Money::Invalid()
+              : Money::FromRupees(series_it->second.back().close);
       std::string error;
-      if (!portfolio.MarkToMarket(symbol, price, &error)) {
-        metrics.warnings.push_back("terminal mark failed: " + error);
+      if (!price.valid() || !portfolio.MarkToMarket(symbol, price, &error)) {
+        metrics.warnings.push_back("terminal mark failed: " + symbol + " " +
+                                   error);
+        metrics.halted = true;
       }
     }
+    metrics.terminal_open_positions = portfolio.open_position_count();
   }
+  // Terminal valuation is part of the equity path used for drawdown.
+  metrics.max_drawdown = std::max(metrics.max_drawdown, portfolio.drawdown());
   equity_curve.push_back(portfolio.equity().rupees());
-  metrics.terminal_liquidation = config.terminal_liquidation;
 
   metrics.net_pnl = portfolio.equity() - config.initial_capital;
   metrics.realized_pnl = portfolio.ledger().realized_pnl;
@@ -1545,6 +2075,40 @@ uint64_t Checksum(std::string_view text) {
   return hash;
 }
 
+namespace {
+
+constexpr int32_t kSupportedSchemaVersion = 1;
+constexpr size_t kMaxEventPayloadBytes = 1u << 20;
+
+// The single authoritative event contract. Append and Replay both call this
+// validator, so no event can be acknowledged that the reader would reject.
+bool ValidateEventFields(const Event& event, std::string* error) {
+  auto reject = [error](const char* message) {
+    if (error)
+      *error = message;
+    return false;
+  };
+  const auto type = static_cast<int32_t>(event.type);
+  if (type < 0 || type > static_cast<int32_t>(EventType::kHeartbeat))
+    return reject("invalid event type");
+  if (event.schema_version != kSupportedSchemaVersion)
+    return reject("unsupported schema version");
+  if (event.id.empty())
+    return reject("empty event id");
+  if (event.id.find_first_of("|\r\n") != std::string::npos)
+    return reject("unescaped delimiter in event id");
+  if (event.timestamp_ms <= 0)
+    return reject("invalid event timestamp");
+  if (event.payload.size() > kMaxEventPayloadBytes)
+    return reject("event payload exceeds limit");
+  if (event.payload.find('\r') != std::string::npos ||
+      event.payload.find('\n') != std::string::npos)
+    return reject("event payload contains a record terminator");
+  return true;
+}
+
+}  // namespace
+
 std::string EventId(uint64_t sequence, std::string_view payload) {
   std::ostringstream oss;
   oss << "evt-" << std::setfill('0') << std::setw(12) << sequence << "-"
@@ -1553,11 +2117,17 @@ std::string EventId(uint64_t sequence, std::string_view payload) {
 }
 
 bool Journal::Open(const std::string& path, std::string* error) {
+  if (healthy_ || locked_ || lock_fd_ >= 0) {
+    if (error)
+      *error = "journal already open";
+    return false;
+  }
   path_ = path;
   healthy_ = false;
+  std::string directory = ".";
   const size_t slash = path_.find_last_of('/');
   if (slash != std::string::npos) {
-    std::string directory = path_.substr(0, slash);
+    directory = path_.substr(0, slash);
     std::filesystem::create_directories(directory);
   }
   lock_fd_ =
@@ -1572,6 +2142,24 @@ bool Journal::Open(const std::string& path, std::string* error) {
     return false;
   }
   locked_ = true;
+  writer_thread_ = std::this_thread::get_id();
+  if (!std::filesystem::exists(path_)) {
+    const int dir_fd =
+        open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dir_fd >= 0) {
+      if (fsync(dir_fd) != 0) {
+        close(dir_fd);
+        flock(lock_fd_, LOCK_UN);
+        close(lock_fd_);
+        lock_fd_ = -1;
+        locked_ = false;
+        if (error)
+          *error = "journal directory synchronization failed";
+        return false;
+      }
+      close(dir_fd);
+    }
+  }
   if (std::filesystem::exists(path_)) {
     std::string replay_error;
     const std::vector<Event> existing = Replay(&replay_error);
@@ -1582,6 +2170,7 @@ bool Journal::Open(const std::string& path, std::string* error) {
       close(lock_fd_);
       lock_fd_ = -1;
       locked_ = false;
+      writer_thread_ = std::thread::id();
       return false;
     }
     size_ = existing.size();
@@ -1604,6 +2193,7 @@ void Journal::Close() {
   }
   locked_ = false;
   healthy_ = false;
+  writer_thread_ = std::thread::id();
 }
 
 Journal::~Journal() {
@@ -1619,26 +2209,45 @@ bool Journal::Append(Event* event, std::string* error) {
       *error = "journal unhealthy or writer lock not held";
     return false;
   }
+  if (std::this_thread::get_id() != writer_thread_) {
+    if (error)
+      *error = "journal writer ownership is thread-local";
+    return false;
+  }
+  if (event == nullptr) {
+    if (error)
+      *error = "journal event is null";
+    return false;
+  }
   if (path_.empty()) {
     if (error)
       *error = "journal not opened";
     return false;
   }
-  const uint64_t candidate_sequence = next_sequence_;
-  event->sequence = candidate_sequence;
-  if (event->id.empty())
-    event->id = EventId(event->sequence, event->payload);
-  event->timestamp_ms =
-      event->timestamp_ms == 0
-          ? std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch())
-                .count()
-          : event->timestamp_ms;
+  if (next_sequence_ == std::numeric_limits<uint64_t>::max()) {
+    if (error)
+      *error = "journal sequence exhausted";
+    return false;
+  }
+  // Build the complete candidate first, then validate it. The caller's event
+  // is only updated once every field is known to satisfy the reader contract.
+  Event candidate = *event;
+  candidate.sequence = next_sequence_;
+  if (candidate.id.empty())
+    candidate.id = EventId(candidate.sequence, candidate.payload);
+  if (candidate.timestamp_ms == 0)
+    candidate.timestamp_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count();
+  if (!ValidateEventFields(candidate, error))
+    return false;
   std::ostringstream canonical;
-  canonical << event->sequence << '|' << event->id << '|'
-            << static_cast<int>(event->type) << '|' << event->timestamp_ms
-            << '|' << event->schema_version << '|' << event->payload;
-  event->checksum = ChecksumHex(canonical.str());
+  canonical << candidate.sequence << '|' << candidate.id << '|'
+            << static_cast<int>(candidate.type) << '|' << candidate.timestamp_ms
+            << '|' << candidate.schema_version << '|' << candidate.payload;
+  candidate.checksum = ChecksumHex(canonical.str());
+  *event = candidate;
 
   // Durability boundary: the record is acknowledged only after fsync succeeds.
   const std::string record =
@@ -1677,7 +2286,7 @@ bool Journal::Append(Event* event, std::string* error) {
     return false;
   }
   close(fd);
-  next_sequence_ = candidate_sequence + 1;
+  next_sequence_ = candidate.sequence + 1;
   ++size_;
   if (error)
     error->clear();
@@ -1740,17 +2349,13 @@ std::vector<Event> Journal::Replay(std::string* error) const {
         *error = "non-numeric journal field";
       return {};
     }
-    if (type < 0 || type > static_cast<int>(EventType::kHeartbeat) ||
-        schema != 1) {
-      if (error)
-        *error = "invalid event type or schema version";
-      return {};
-    }
     event.type = static_cast<EventType>(type);
     event.schema_version = schema;
     event.id = fields[1];
     event.payload = HexDecode(fields[5]);
     event.checksum = fields[6];
+    if (!ValidateEventFields(event, error))
+      return {};
     std::ostringstream canonical;
     canonical << event.sequence << '|' << event.id << '|'
               << static_cast<int>(event.type) << '|' << event.timestamp_ms

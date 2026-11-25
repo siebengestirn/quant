@@ -118,7 +118,21 @@ def features(rows: list[dict[str, float]], index: int) -> dict[str, float]:
     low = min(row["low"] for row in last20)
     span = high - low
     breakout = (close[-1] - low) / span * 2 - 1 if span > 0 else 0.0
+    # Canonical feature contract (version 2):
+    #   returns: P_t/P_(t-n)-1 from sessions available at time t;
+    #   vol20:   population standard deviation (divide by n) of the last 20
+    #            daily simple returns, matching C++ StdDev and q dev/mdev;
+    #   vwap_dev: deviation from the daily volume-weighted typical-price
+    #            proxy, not intraday VWAP;
+    #   valid:   false until the 21-session warm-up is complete. Unavailable
+    #            features are reported through validity metadata, never as a
+    #            silently valid zero.
+    warmup_complete = len(close) >= 21
     return {
+        "valid": warmup_complete,
+        "validity_reason": (
+            "READY" if warmup_complete else "INSUFFICIENT_HISTORY"
+        ),
         "ret5": ret(5),
         "ret20": ret(20),
         "ret60": ret(60),
@@ -139,7 +153,12 @@ def feature_history(rows: list[dict[str, float]]) -> list[dict[str, float]]:
     for index in range(len(rows)):
         item = features(rows, index)
         item["index"] = index
-        item["availability_index"] = min(index + 1, len(rows) - 1)
+        # The final observed session has no known subsequent exchange
+        # boundary in this dataset, so its availability is explicitly
+        # unavailable rather than silently pointing at itself.
+        item["availability_index"] = (
+            index + 1 if index + 1 < len(rows) else None
+        )
         item["date"] = rows[index]["date"]
         result.append(item)
     return result

@@ -530,9 +530,12 @@ int CommandDataSync(App& app) {
   std::cout << "syncing daily history for seed symbols...\n";
   std::string history_error;
   const bool ok = service.SyncHistory(result.instruments, &history_error);
-  std::cout << "  " << (ok ? "done" : "partial") << ": " << history_error
-            << "\n";
-  return result.instruments.empty() ? 1 : 0;
+  const char* status =
+      result.instruments.empty()
+          ? "BLOCKED"
+          : (!ok || !history_error.empty() ? "PARTIAL" : "COMPLETE");
+  std::cout << "  " << status << ": " << history_error << "\n";
+  return (ok && !result.instruments.empty()) ? 0 : 1;
 }
 
 std::string IndexProviderName(const std::string& symbol) {
@@ -821,6 +824,11 @@ DailyReport BuildReport(App& app, bool* ok) {
                                                    app.config.backtest_delivery,
                                                    false,
                                                    app.config.slippage_bps);
+    if (!entry.usable() || !exit_costs.usable()) {
+      report.rejections.push_back(instrument.symbol +
+                                  ": cost calculation unavailable; NO TRADE");
+      continue;
+    }
     candidate.total_cost = entry.total + exit_costs.total;
     candidate.break_even_bps =
         BreakEvenMoveBps(decision.notional, entry, exit_costs);
@@ -905,6 +913,13 @@ int CommandResearch(App& app) {
       << "cost_to_gross=" << metrics.cost_to_gross << " ("
       << metrics.cost_to_gross_status << ")\n"
       << "halted=" << (metrics.halted ? "true" : "false") << "\n"
+      << "terminal_liquidation_requested="
+      << (metrics.terminal_liquidation_requested ? "true" : "false") << "\n"
+      << "terminal_liquidation_completed="
+      << (metrics.terminal_liquidation_completed ? "true" : "false") << "\n"
+      << "terminal_liquidation_failed="
+      << (metrics.terminal_liquidation_failed ? "true" : "false") << "\n"
+      << "terminal_open_positions=" << metrics.terminal_open_positions << "\n"
       << "labels: SIMULATED fills at next-day open, conservative 10 bps "
          "slippage, "
          "no order-book history, no survivorship-bias correction.\n";
@@ -973,6 +988,52 @@ int CommandReplay(App& app) {
   return 0;
 }
 
+// Accounting events carry the amounts that were actually posted at the time
+// of the transaction. Replay must never reconstruct old charges from today's
+// cost configuration.
+bool ParseRecordedCosts(const Json& payload,
+                        CostBreakdown* out,
+                        std::string* error) {
+  const Json* recorded = payload.Find("recorded_costs_paise");
+  if (recorded == nullptr || recorded->type() != Json::Type::kObject) {
+    *error = "accounting event has no recorded cost amounts; replay refused";
+    return false;
+  }
+  static const char* fields[] = {"brokerage",
+                                 "stt",
+                                 "exchange_fee",
+                                 "gst",
+                                 "sebi",
+                                 "stamp",
+                                 "dp",
+                                 "slippage",
+                                 "total"};
+  int64_t values[9] = {};
+  for (size_t i = 0; i < 9; ++i) {
+    const Json* field = recorded->Find(fields[i]);
+    if (field == nullptr || field->type() != Json::Type::kNumber) {
+      *error = std::string("recorded cost field missing: ") + fields[i];
+      return false;
+    }
+    values[i] = field->as_int(0);
+  }
+  out->brokerage = Money::FromPaise(values[0]);
+  out->stt = Money::FromPaise(values[1]);
+  out->exchange_fee = Money::FromPaise(values[2]);
+  out->gst = Money::FromPaise(values[3]);
+  out->sebi = Money::FromPaise(values[4]);
+  out->stamp = Money::FromPaise(values[5]);
+  out->dp = Money::FromPaise(values[6]);
+  out->slippage = Money::FromPaise(values[7]);
+  out->total = Money::FromPaise(values[8]);
+  out->status = CalculationStatus::kCalculated;
+  if (!out->usable()) {
+    *error = "recorded cost amounts are invalid";
+    return false;
+  }
+  return true;
+}
+
 bool RebuildPortfolio(App& app, Portfolio* out, std::string* error) {
   Portfolio portfolio(app.config.initial_capital);
   const std::vector<Event> events = app.journal.Replay(error);
@@ -995,29 +1056,28 @@ bool RebuildPortfolio(App& app, Portfolio* out, std::string* error) {
       return false;
     }
     const Money value = Money::FromPaise(price->as_int(0));
-    const int quantity = static_cast<int>(qty->as_int(0));
+    const int64_t quantity_value = qty->as_int(0);
+    if (quantity_value <= 0 ||
+        quantity_value > std::numeric_limits<int>::max() || !value.valid()) {
+      *error = "accounting event has invalid quantity or price";
+      return false;
+    }
+    const int quantity = static_cast<int>(quantity_value);
     bool posted = false;
-    if (action->as_string() == "BUY") {
-      const CostBreakdown costs =
-          EstimateCosts(Money::FromPaise(value.paise() * quantity),
-                        false,
-                        true,
-                        app.config.slippage_bps);
-      posted =
-          portfolio.Buy(symbol->as_string(), quantity, value, costs, error);
-    } else if (action->as_string() == "SELL") {
-      const CostBreakdown costs =
-          EstimateCosts(Money::FromPaise(value.paise() * quantity),
-                        false,
-                        false,
-                        app.config.slippage_bps);
-      posted =
-          portfolio.Sell(symbol->as_string(), quantity, value, costs, error);
+    if (action->as_string() == "BUY" || action->as_string() == "SELL") {
+      CostBreakdown costs;
+      if (!ParseRecordedCosts(payload, &costs, error))
+        return false;
+      posted = action->as_string() == "BUY"
+                   ? portfolio.Buy(
+                         symbol->as_string(), quantity, value, costs, error)
+                   : portfolio.Sell(
+                         symbol->as_string(), quantity, value, costs, error);
     } else if (action->as_string() == "EXPENSE") {
       posted = portfolio.RecordOperatingExpense(value, error);
     } else if (action->as_string() == "FLOW") {
-      portfolio.RecordExternalFlow(value, "external flow observed");
-      posted = true;
+      posted =
+          portfolio.RecordExternalFlow(value, "external flow observed", error);
     } else {
       *error = "unknown accounting action at sequence " +
                std::to_string(event.sequence);

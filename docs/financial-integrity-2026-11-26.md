@@ -78,3 +78,88 @@ Status remains TESTED. Independent acceptance is not recorded. DP settlement
 aggregation is explicitly NOT IMPLEMENTED and the cost-model version string now
 states this. Daily-risk persistence, operational q recovery, real provider-to-q
 ingestion and genuine paper execution remain BLOCKED / NOT IMPLEMENTED.
+
+## Sprint 2 — source-level remediation and independent reproduction
+
+Two release blockers were reproduced against the previous PR head before
+being fixed, using compiled standalone programs rather than the delivery
+report:
+
+1. `Money::Invalid()` compared `<= 0` and `>= 0` as true, and `paise()` and
+   `rupees()` exposed zero for an invalid value. `0 - INT64_MIN` produced a
+   UBSan negation error and an incorrect valid result.
+2. `Journal::Append()` accepted `schema_version = 999`; the journal then
+   refused to reopen its own history because `Replay()` rejected that record.
+
+### Corrections
+
+- Money now compares invalid operands as UNORDERED (`std::partial_ordering`);
+  every relational operator and equality returns false for invalid money.
+  `TryPaise`/`TryRupees` are the explicit checked extraction API. The raw
+  accessors require `valid()` and terminate on violation, so invalid money is
+  never silently converted to zero. A dedicated `CheckedSubtract` removes the
+  `INT64_MIN` negation, and `CheckedMultiply` covers the signed boundary.
+- Every financial entry point explicitly validates its operands before using
+  them: cost estimation, sizing, portfolio Buy/Sell/Mark/Expense/Flow, break
+  even calculation and report formatting. Invalid turnover returns
+  `kInvalidInput` with no usable total, never a valid zero charge.
+- All statutory charges use exact integer-rational arithmetic on integer
+  paise. STT uses divisors 100000 (delivery) and 400000 (intraday sell) with
+  half-up rounding; brokerage, exchange fee, SEBI fee, GST and stamp duty are
+  computed with checked integer scaling.
+- `CalculationStatus` is carried on every `CostBreakdown`. A default-constructed
+  breakdown is `kInvalidInput` and is rejected by the portfolio. Estimated DP
+  components are marked `kEstimated`.
+- `CostAggregator::Estimate()` is pure. DP entitlement is recorded only by
+  `RecognizeExecution()` for a committed execution, and estimation never
+  mutates settlement state.
+- Portfolio mutations use one transactional guard: candidate state is built,
+  all invariants are validated, and peak equity is updated only on commit.
+  Any failure restores the exact prior ledger and positions. Quantity addition,
+  unrealized-P&L subtraction and all ledger accumulators are checked.
+- `RecordExternalFlow()` now returns an explicit status. Replay reconstructs
+  accounting from recorded cost amounts and refuses events that lack them.
+- Journal Append and Replay call one validator covering event type, schema,
+  identity, delimiters, timestamp and payload. Invalid events are rejected
+  before any byte is written; sequence advances only after a successful fsync.
+  Repeated Open is rejected, directory sync occurs on file creation, and
+  writer ownership is enforced at both process and thread level. The checksum
+  remains a non-cryptographic FNV-style corruption detector, not tamper
+  evidence.
+- Sizing rejects invalid floating-point inputs, checks quantity conversion and
+  notional multiplication, requires usable cost status, and receives the
+  execution product explicitly from the risk engine.
+- Backtest terminal liquidation records gross P&L only after a successful
+  sale, distinguishes requested/completed/failed/residual states, treats
+  missing or invalid prices as failures, includes the terminal valuation in
+  drawdown, and halts on mark failure.
+- C++ and Python share one population-standard-deviation convention and one
+  volume-weighted typical-price proxy. A deterministic unequal-volume fixture
+  is embedded in both test suites; the two implementations agree to 1e-12.
+  Python reports explicit feature validity and an unavailable final-session
+  availability. q now sorts both sides of the as-of join.
+- Configuration validation rejects invalid capital, non-finite cost rates,
+  out-of-range timeouts, queue sizes, batch sizes and ports, and inconsistent
+  universe/shortlist sizes.
+
+### Verification
+
+- C++ unit tests: 13520 checks, 0 failures.
+- Property-based accounting: independent reference ledger reconciled across
+  40 randomized runs of 60 buy/mark/sell/expense steps each.
+- Sanitizer build and unit tests: PASS.
+- pytest: PASS. Cross-language feature fixture: PASS in Python and C++.
+- Ruff, Black for checked sources, clang-format, q style, secret scan, git
+  policy and the single-file assurance gate: PASS.
+- Hosted CI result is recorded in the PR evidence bundle after each push.
+
+### Remaining, explicitly not represented as complete
+
+- Native q numerical verification is SKIPPED where the q runtime is
+  unavailable; portable CI does not certify q arithmetic.
+- DP settlement aggregation remains NOT IMPLEMENTED; estimates are labelled.
+- Durable daily risk state (F-006), new-process KDB-X recovery, real
+  provider-to-journal-to-q ingestion, FYERS integration and genuine paper
+  execution remain BLOCKED or NOT IMPLEMENTED.
+- Statistical research remains INCONCLUSIVE. The regenerated result stays
+  negative; no alpha claim is made.

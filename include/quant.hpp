@@ -7,7 +7,9 @@
 
 #include <algorithm>
 #include <array>
+#include <compare>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <map>
 #include <limits>
@@ -16,6 +18,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -35,6 +38,21 @@ constexpr bool CheckedAdd(int64_t left, int64_t right, int64_t* out) {
     return false;
   }
   *out = left + right;
+  return true;
+}
+
+// Dedicated subtraction: never evaluates -right when right == INT64_MIN.
+constexpr bool CheckedSubtract(int64_t left, int64_t right, int64_t* out) {
+  if (out == nullptr)
+    return false;
+  if (right > 0) {
+    if (left < std::numeric_limits<int64_t>::min() + right)
+      return false;
+  } else if (right < 0) {
+    if (left > std::numeric_limits<int64_t>::max() + right)
+      return false;
+  }
+  *out = left - right;
   return true;
 }
 
@@ -78,8 +96,20 @@ constexpr bool CheckedMultiply(int64_t left, int64_t right, int64_t* out) {
 
 }  // namespace money_detail
 
-// Money carries its validity state. Invalid values propagate through all
-// arithmetic; they never silently become a valid zero.
+// Money is an optional monetary value expressed in integer paise.
+//
+// Contract:
+//   * Invalid money is an explicit absence of a value, never a zero amount.
+//   * Ordering with an invalid operand is UNORDERED: every relational operator
+//     (<, <=, >, >=) and equality returns false. Invalid values cannot approve
+//     a comparison in a financial decision.
+//   * TryPaise/TryRupees are the checked extraction API and return false for an
+//     invalid value. They are the only conversions that may be used when the
+//     validity of a value is not already established.
+//   * paise()/rupees() are precondition accessors: they require valid() == true
+//     and terminate on violation. A violation is a hard, observable failure,
+//     never a silent conversion of invalid money to zero.
+//   * All arithmetic propagates invalidity and reports overflow as invalid.
 class Money {
  public:
   constexpr Money() : paise_(0), valid_(true) {
@@ -95,10 +125,29 @@ class Money {
   constexpr bool valid() const {
     return valid_;
   }
+
+  bool TryPaise(int64_t* out) const {
+    if (out == nullptr || !valid_)
+      return false;
+    *out = paise_;
+    return true;
+  }
+  bool TryRupees(double* out) const {
+    if (out == nullptr || !valid_)
+      return false;
+    *out = static_cast<double>(paise_) / 100.0;
+    return true;
+  }
+
+  // Precondition accessors. See the class contract above.
   constexpr int64_t paise() const {
+    if (!valid_)
+      std::abort();
     return paise_;
   }
-  double rupees() const {
+  constexpr double rupees() const {
+    if (!valid_)
+      std::abort();
     return static_cast<double>(paise_) / 100.0;
   }
 
@@ -116,7 +165,7 @@ class Money {
   constexpr Money& operator-=(const Money& other) {
     int64_t result = 0;
     if (!valid_ || !other.valid_ ||
-        !money_detail::CheckedAdd(paise_, -other.paise_, &result)) {
+        !money_detail::CheckedSubtract(paise_, other.paise_, &result)) {
       paise_ = 0;
       valid_ = false;
       return *this;
@@ -138,23 +187,20 @@ constexpr Money operator+(Money a, Money b) {
 constexpr Money operator-(Money a, Money b) {
   return a -= b;
 }
+
+// Invalid operands are UNORDERED. All derived relational operators therefore
+// return false, so an invalid amount can never satisfy a financial guard.
+constexpr std::partial_ordering operator<=>(Money a, Money b) {
+  if (!a.valid() || !b.valid())
+    return std::partial_ordering::unordered;
+  if (a.paise() < b.paise())
+    return std::partial_ordering::less;
+  if (a.paise() > b.paise())
+    return std::partial_ordering::greater;
+  return std::partial_ordering::equivalent;
+}
 constexpr bool operator==(Money a, Money b) {
-  return a.valid() == b.valid() && (!a.valid() || a.paise() == b.paise());
-}
-constexpr bool operator!=(Money a, Money b) {
-  return !(a == b);
-}
-constexpr bool operator<(Money a, Money b) {
-  return a.valid() && b.valid() && a.paise() < b.paise();
-}
-constexpr bool operator>(Money a, Money b) {
-  return b < a;
-}
-constexpr bool operator<=(Money a, Money b) {
-  return !(b < a);
-}
-constexpr bool operator>=(Money a, Money b) {
-  return !(a < b);
+  return a.valid() && b.valid() && a.paise() == b.paise();
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +281,7 @@ struct Config {
   double max_participation_fraction = 0.01;
   double stop_loss_fraction = 0.05;
   bool backtest_delivery = true;
+  bool execution_delivery = true;
   bool terminal_liquidation = false;
   double min_traded_value_inr = 5e6;
   double slippage_bps = 10.0;
@@ -397,6 +444,18 @@ struct Ledger {
   int trade_count = 0;
 };
 
+// Every financial calculation reports how it was produced. A default
+// CostBreakdown is NOT a valid zero-cost result: it is an invalid input and
+// must be rejected by the portfolio.
+enum class CalculationStatus {
+  kCalculated,    // exact, fully implemented
+  kEstimated,     // implemented, but contains an explicitly estimated input
+  kUnsupported,   // required behaviour is not implemented
+  kInvalidInput,  // an operand was invalid
+  kOverflow,      // checked arithmetic overflowed
+};
+const char* CalculationStatusName(CalculationStatus status);
+
 struct CostBreakdown {
   Money brokerage;
   Money stt;
@@ -407,8 +466,17 @@ struct CostBreakdown {
   Money dp;
   Money slippage;
   Money total;
+  CalculationStatus status = CalculationStatus::kInvalidInput;
   std::string version =
       "ZERODHA-EQ-2026-11-25-v1 (DP settlement aggregation NOT IMPLEMENTED)";
+
+  bool usable() const {
+    return (status == CalculationStatus::kCalculated ||
+            status == CalculationStatus::kEstimated) &&
+           brokerage.valid() && stt.valid() && exchange_fee.valid() &&
+           gst.valid() && sebi.valid() && stamp.valid() && dp.valid() &&
+           slippage.valid() && total.valid();
+  }
 };
 
 // ---------------------------------------------------------------------------
@@ -428,6 +496,20 @@ class CostAggregator {
                          double slippage_bps,
                          const std::string& symbol,
                          const std::string& session);
+
+  // Records a committed execution's DP entitlement. Estimation never mutates
+  // this state; only an actual or simulated recognised execution may do so.
+  // dp_applicable reports whether this execution is the first qualifying
+  // delivery sell for the scrip/session.
+  bool RecognizeExecution(const std::string& symbol,
+                          const std::string& session,
+                          bool delivery,
+                          bool is_buy,
+                          bool* dp_applicable,
+                          std::string* error);
+  size_t charged_session_count() const {
+    return dp_charged_.size();
+  }
 
  private:
   std::set<std::string> dp_charged_;
@@ -458,7 +540,9 @@ class Portfolio {
                     Money price,
                     std::string* error = nullptr);
   bool RecordOperatingExpense(Money amount, std::string* error = nullptr);
-  void RecordExternalFlow(Money amount, const std::string& reason);
+  bool RecordExternalFlow(Money amount,
+                          const std::string& reason,
+                          std::string* error = nullptr);
 
   Money equity() const;
   Money available_cash() const;
@@ -479,8 +563,29 @@ class Portfolio {
   }
 
  private:
+  // One authoritative state-transition guard. A Transaction snapshots the
+  // ledger and positions; Commit validates every invariant and is the only
+  // path that makes a mutation visible. Destruction without Commit restores
+  // the exact prior state, so no failed operation can leave a partial post.
+  class Transaction {
+   public:
+    explicit Transaction(Portfolio* owner);
+    ~Transaction();
+    bool Commit(std::string* error);
+    Transaction(const Transaction&) = delete;
+    Transaction& operator=(const Transaction&) = delete;
+
+   private:
+    Portfolio* owner_;
+    Ledger prior_ledger_;
+    std::map<std::string, Position> prior_positions_;
+    bool committed_ = false;
+  };
+  friend class Transaction;
+
   void UpdatePeakEquity();
   bool RecomputeUnrealized();
+  bool ValidateInvariants(std::string* error) const;
 
   Ledger ledger_;
   std::map<std::string, Position> positions_;
@@ -568,7 +673,10 @@ struct BacktestMetrics {
   Money statutory;
   Money slippage;
   Money max_drawdown;
-  bool terminal_liquidation = false;
+  bool terminal_liquidation_requested = false;
+  bool terminal_liquidation_completed = false;
+  bool terminal_liquidation_failed = false;
+  int terminal_open_positions = 0;
   bool halted = false;
   std::string profit_factor_status = "UNDEFINED";
   std::string cost_to_gross_status = "NOT_MEANINGFUL";
@@ -646,6 +754,7 @@ class Journal {
   size_t size_ = 0;
   bool healthy_ = false;
   bool locked_ = false;
+  std::thread::id writer_thread_;
   int lock_fd_ = -1;
 };
 

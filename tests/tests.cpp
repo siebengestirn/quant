@@ -158,6 +158,23 @@ void TestConfigParsing() {
   invalid_numbers = TestConfig();
   invalid_numbers.queue_capacity = 0;
   Check(!ValidateConfig(invalid_numbers).empty(), "zero queue rejected");
+  Config invalid_capital = TestConfig();
+  invalid_capital.initial_capital = Money::Invalid();
+  Check(!ValidateConfig(invalid_capital).empty(),
+        "invalid initial capital rejected");
+  Config invalid_sizes = TestConfig();
+  invalid_sizes.queue_capacity = (1u << 21);
+  Check(!ValidateConfig(invalid_sizes).empty(), "oversized queue rejected");
+  invalid_sizes = TestConfig();
+  invalid_sizes.http_timeout_seconds = 0;
+  Check(!ValidateConfig(invalid_sizes).empty(), "zero HTTP timeout rejected");
+  invalid_sizes = TestConfig();
+  invalid_sizes.history_days = 0;
+  Check(!ValidateConfig(invalid_sizes).empty(), "zero history window rejected");
+  invalid_sizes = TestConfig();
+  invalid_sizes.kdbx.port = 80;
+  Check(!ValidateConfig(invalid_sizes).empty(),
+        "non-loopback privileged port rejected");
   Check(ParseMode("LIVE") == Mode::kLive, "mode parse live");
   Check(ModeName(Mode::kDisabled) == "DISABLED", "mode name disabled");
 }
@@ -192,12 +209,34 @@ void TestCosts() {
        0.01,
        "₹500 delivery STT rounds 0.50 up to 1 rupee");
   CostAggregator agg;
+  std::string agg_error;
+  bool first_dp = false;
+  Check(agg.RecognizeExecution("X", "D1", true, false, &first_dp, &agg_error),
+        "first execution recognised");
+  Check(first_dp, "first delivery sell earns DP entitlement");
+  const CostBreakdown committed_first =
+      EstimateCosts(Money::FromRupees(1000.0), true, false, 0.0, first_dp);
+  Near(committed_first.dp.rupees(),
+       15.34,
+       0.01,
+       "committed first delivery sell incurs DP");
   const CostBreakdown first =
       agg.Estimate(Money::FromRupees(1000.0), true, false, 0.0, "X", "D1");
   const CostBreakdown second =
       agg.Estimate(Money::FromRupees(1000.0), true, false, 0.0, "X", "D1");
-  Near(first.dp.rupees(), 15.34, 0.01, "first delivery sell incurs DP");
-  Check(second.dp.paise() == 0, "second same-day sell has no DP charge");
+  Check(first.dp.paise() == 0 && second.dp.paise() == 0,
+        "estimation is pure and never charges DP");
+  Check(agg.charged_session_count() == 1,
+        "repeated estimation does not mutate settlement state");
+  bool second_dp = true;
+  Check(agg.RecognizeExecution("X", "D1", true, false, &second_dp, &agg_error),
+        "second execution recognised");
+  Check(!second_dp, "second same-day sell has no DP charge");
+  bool other_symbol_dp = false;
+  Check(agg.RecognizeExecution(
+            "Y", "D1", true, false, &other_symbol_dp, &agg_error),
+        "other scrip recognised");
+  Check(other_symbol_dp, "different scrip earns its own DP entitlement");
   Check(intraday.stamp.paise() == 0, "no stamp on intraday sell");
   Check(intraday.dp.paise() == 0, "no DP on intraday sell");
   const CostBreakdown small =
@@ -210,6 +249,29 @@ void TestCosts() {
   Check(
       EstimateCosts(Money::FromRupees(0.0), true, true, 0.0).total.paise() == 0,
       "zero turnover costs zero");
+
+  // Explicit calculation status: invalid input is never a valid zero cost.
+  const CostBreakdown invalid_turnover =
+      EstimateCosts(Money::Invalid(), true, true, 0.0);
+  Check(invalid_turnover.status == CalculationStatus::kInvalidInput,
+        "invalid turnover reports INVALID_INPUT");
+  Check(!invalid_turnover.usable(), "invalid turnover is not usable");
+  Check(!invalid_turnover.total.valid(), "invalid turnover has no total");
+  Check(EstimateCosts(
+            turnover, true, true, std::numeric_limits<double>::quiet_NaN())
+                .status == CalculationStatus::kInvalidInput,
+        "NaN slippage reports INVALID_INPUT");
+  Check(EstimateCosts(Money::FromRupees(-1.0), true, true, 0.0).status ==
+            CalculationStatus::kInvalidInput,
+        "negative turnover reports INVALID_INPUT");
+  Check(EstimateCosts(turnover, true, false, 0.0).status ==
+            CalculationStatus::kEstimated,
+        "DP component is explicitly ESTIMATED");
+  Check(CostBreakdown().status == CalculationStatus::kInvalidInput,
+        "default cost breakdown is not a valid zero charge");
+  Check(std::string(CalculationStatusName(CalculationStatus::kInvalidInput)) ==
+            "INVALID_INPUT",
+        "status names are stable");
 }
 
 void TestAccounting() {
@@ -410,6 +472,74 @@ void TestJournal() {
         "truncated journal is rejected before append");
   Check(error.find("incomplete trailing journal record") != std::string::npos,
         "incomplete trailing record is explicit");
+
+  // Exclusive writer ownership: a closed object must not append after another
+  // instance has acquired the journal lock.
+  const std::string owner_path = TempPath("journal_owner.jnl");
+  std::remove(owner_path.c_str());
+  Journal writer_a;
+  Check(writer_a.Open(owner_path, &error), "writer A opens");
+  Event owned;
+  owned.type = EventType::kHeartbeat;
+  owned.payload = "owned";
+  owned.timestamp_ms = 3000;
+  Check(writer_a.Append(&owned, &error), "writer A appends");
+  writer_a.Close();
+  Journal writer_b;
+  Check(writer_b.Open(owner_path, &error), "writer B acquires the lock");
+  Event rejected;
+  rejected.type = EventType::kHeartbeat;
+  rejected.payload = "rejected";
+  rejected.timestamp_ms = 4000;
+  Check(!writer_a.Append(&rejected, &error),
+        "closed writer cannot append while another owns the lock");
+  Check(writer_b.Append(&owned, &error), "current writer can append");
+  writer_b.Close();
+
+  // Append and Replay enforce one identical event contract.
+  const std::string schema_path = TempPath("journal_schema.jnl");
+  std::remove(schema_path.c_str());
+  Journal schema_journal;
+  Check(schema_journal.Open(schema_path, &error), "schema journal opens");
+  Check(!schema_journal.Open(schema_path, &error), "repeated open is rejected");
+  Event bad_schema;
+  bad_schema.type = EventType::kHeartbeat;
+  bad_schema.schema_version = 999;
+  bad_schema.payload = "{}";
+  bad_schema.timestamp_ms = 9000;
+  const uint64_t before = schema_journal.next_sequence();
+  Check(!schema_journal.Append(&bad_schema, &error),
+        "unsupported schema is rejected at append");
+  Check(std::string(error).find("schema") != std::string::npos,
+        "schema rejection is explicit");
+  Check(schema_journal.healthy(), "rejection leaves journal healthy");
+  Check(schema_journal.next_sequence() == before,
+        "rejection does not advance durable sequence");
+  Event bad_type;
+  bad_type.type = static_cast<EventType>(77);
+  bad_type.timestamp_ms = 9001;
+  Check(!schema_journal.Append(&bad_type, &error),
+        "invalid event type rejected at append");
+  Event bad_id;
+  bad_id.type = EventType::kHeartbeat;
+  bad_id.id = "bad|id";
+  bad_id.timestamp_ms = 9002;
+  Check(!schema_journal.Append(&bad_id, &error),
+        "delimiter in event id rejected at append");
+  Event good_event;
+  good_event.type = EventType::kHeartbeat;
+  good_event.payload = "{}";
+  good_event.timestamp_ms = 9003;
+  Check(schema_journal.Append(&good_event, &error),
+        "valid event appends after rejections");
+  schema_journal.Close();
+  Journal schema_reopen;
+  Check(schema_reopen.Open(schema_path, &error),
+        "journal containing only valid events reopens");
+  Check(error.empty(), "reopen error is empty");
+  Check(schema_reopen.Replay(&error).size() == 1,
+        "replay contains exactly the committed event");
+  schema_reopen.Close();
 }
 
 void TestJson() {
@@ -650,7 +780,8 @@ void TestFreshnessSemantics() {
 void TestMarkedSaleAndCostBoundaries() {
   Portfolio portfolio(Money::FromRupees(500.0));
   std::string error;
-  const CostBreakdown zero;
+  CostBreakdown zero;
+  zero.status = CalculationStatus::kCalculated;
   Check(portfolio.Buy("Z", 1, Money::FromRupees(100.0), zero, &error),
         "zero-cost buy");
   Check(portfolio.MarkToMarket("Z", Money::FromRupees(120.0), &error),
@@ -693,6 +824,27 @@ void TestMarkedSaleAndCostBoundaries() {
        2.0,
        0.01,
        "raw STT 1.50 rounds up");
+  // Exact integer-rational boundaries at large notional (no FP drift).
+  Near(EstimateCosts(Money::FromPaise(49999), true, true, 0.0).stt.rupees(),
+       0.0,
+       0.0,
+       "delivery STT 0.49999 rounds to zero rupees");
+  Near(EstimateCosts(Money::FromPaise(50000), true, true, 0.0).stt.rupees(),
+       1.0,
+       0.0,
+       "delivery STT 0.50 rounds up to one rupee");
+  Near(EstimateCosts(Money::FromPaise(149000), true, true, 0.0).stt.rupees(),
+       1.0,
+       0.0,
+       "delivery STT 1.49 rounds to one rupee");
+  Near(EstimateCosts(Money::FromPaise(199999), false, false, 0.0).stt.rupees(),
+       0.0,
+       0.0,
+       "intraday sell STT 0.4999975 rounds to zero");
+  Near(EstimateCosts(Money::FromPaise(200000), false, false, 0.0).stt.rupees(),
+       1.0,
+       0.0,
+       "intraday sell STT 0.50 rounds up to one rupee");
 
   Config config = TestConfig();
   SizingInput missing;
@@ -917,19 +1069,283 @@ void TestCsv() {
 }  // namespace
 }  // namespace quant
 
+using namespace quant;
+
+void TestFeatureCrossLanguage() {
+  // Independent reference values produced by python/research.py on this exact
+  // unequal-volume fixture. Tolerance-based equivalence is required.
+  std::vector<Candle> candles;
+  for (int i = 0; i < 25; ++i) {
+    const double close = 100.0 + 0.7 * i + 2.0 * std::sin(i);
+    Candle candle;
+    candle.date = "D" + std::to_string(i);
+    candle.open = close;
+    candle.high = close + 3.0;
+    candle.low = close - 2.0;
+    candle.close = close;
+    candle.volume = 1000.0 + 37.0 * i;
+    candles.push_back(candle);
+  }
+  const FeatureSet features = ComputeFeatures(candles);
+  Check(features.valid, "cross-language fixture warms up");
+  Near(features.ret5, 0.012227921299313493, 1e-12, "ret5 matches Python");
+  Near(features.ret20, 0.13528419355169152, 1e-12, "ret20 matches Python");
+  Near(features.vol20,
+       0.012173429881693497,
+       1e-12,
+       "population vol20 matches Python");
+  Near(features.volume_surprise,
+       0.22876667751383017,
+       1e-12,
+       "volume surprise matches Python");
+  Near(features.vwap_dev,
+       0.03664852280982922,
+       1e-12,
+       "volume-weighted typical-price proxy matches Python");
+  Near(features.trend, 1.0, 1e-12, "trend matches Python");
+  Near(features.breakout, 0.5569266238518116, 1e-12, "breakout matches Python");
+  Check(!ComputeFeatures(
+             std::vector<Candle>(candles.begin(), candles.begin() + 20))
+             .valid,
+        "short warm-up is invalid rather than a valid zero");
+}
+
+// Independent reference ledger for property-based accounting checks.
+struct ReferenceLedger {
+  int64_t cash = 0;
+  int64_t invested = 0;
+  int64_t realized = 0;
+  int64_t operating = 0;
+  int64_t peak = 0;
+  struct RefPosition {
+    int quantity = 0;
+    int64_t average = 0;
+    int64_t last = 0;
+  };
+  std::map<std::string, RefPosition> positions;
+
+  int64_t unrealized() const {
+    int64_t total = 0;
+    for (const auto& [symbol, position] : positions) {
+      (void)symbol;
+      total += static_cast<int64_t>(position.quantity) *
+               (position.last - position.average);
+    }
+    return total;
+  }
+  int64_t equity() const {
+    return cash + invested + unrealized();
+  }
+  void mark_peak() {
+    peak = std::max(peak, equity());
+  }
+  int64_t drawdown() const {
+    return std::max<int64_t>(0, peak - equity());
+  }
+};
+
+void TestMoneyAdversarial() {
+  const Money invalid = Money::Invalid();
+  const Money zero = Money::FromPaise(0);
+  Check(!(invalid <= zero), "invalid is not less-or-equal to zero");
+  Check(!(invalid >= zero), "invalid is not greater-or-equal to zero");
+  Check(!(invalid < zero) && !(invalid > zero),
+        "invalid is unordered against zero");
+  Check(!(invalid == zero) && !(invalid == invalid),
+        "invalid never compares equal");
+  int64_t extracted = -1;
+  double rupees = -1.0;
+  Check(!invalid.TryPaise(&extracted) && extracted == -1,
+        "invalid paise extraction fails explicitly");
+  Check(!invalid.TryRupees(&rupees) && rupees == -1.0,
+        "invalid rupee extraction fails explicitly");
+  Check(zero.TryPaise(&extracted) && extracted == 0,
+        "valid zero extracts normally");
+  Check(!(invalid + Money::FromPaise(100)).valid(),
+        "invalid plus valid propagates invalid");
+  Check(!(Money::FromPaise(100) - invalid).valid(),
+        "valid minus invalid propagates invalid");
+  const int64_t minimum = std::numeric_limits<int64_t>::min();
+  const int64_t maximum = std::numeric_limits<int64_t>::max();
+  Check(!(zero - Money::FromPaise(minimum)).valid(),
+        "zero minus INT64_MIN is rejected without UB");
+  Check((Money::FromPaise(minimum) - Money::FromPaise(minimum)).valid(),
+        "INT64_MIN minus itself is zero");
+  Check(!(Money::FromPaise(maximum) - Money::FromPaise(-1)).valid(),
+        "INT64_MAX minus negative one overflows");
+  Check((Money::FromPaise(-5) - Money::FromPaise(-3)) == Money::FromPaise(-2),
+        "negative subtraction is exact");
+  Check((Money::FromPaise(maximum) + Money::FromPaise(1)).valid() == false,
+        "addition overflow is invalid");
+  int64_t product = 0;
+  Check(!money_detail::CheckedMultiply(minimum, -1, &product),
+        "INT64_MIN times minus one is rejected");
+  Check(money_detail::CheckedMultiply(-3, 7, &product) && product == -21,
+        "signed multiplication is exact");
+}
+
+void TestPortfolioProperty() {
+  uint64_t state = 0x9e3779b97f4a7c15ULL;
+  auto next = [&state]() {
+    state ^= state << 13;
+    state ^= state >> 7;
+    state ^= state << 17;
+    return state;
+  };
+  CostBreakdown zero_costs;
+  zero_costs.status = CalculationStatus::kCalculated;
+  const std::vector<std::string> symbols = {"AAA", "BBB", "CCC"};
+  for (int run = 0; run < 40; ++run) {
+    Portfolio portfolio(Money::FromRupees(100000.0));
+    ReferenceLedger reference;
+    reference.cash = 10000000;
+    reference.peak = 10000000;
+    std::string error;
+    for (int step = 0; step < 60; ++step) {
+      const std::string& symbol = symbols[next() % symbols.size()];
+      const int operation = static_cast<int>(next() % 10);
+      const int quantity = 1 + static_cast<int>(next() % 5);
+      const int64_t price = (100 + static_cast<int>(next() % 200)) * 100;
+      if (operation < 4) {
+        const bool ok = portfolio.Buy(
+            symbol, quantity, Money::FromPaise(price), zero_costs, &error);
+        auto it = reference.positions.find(symbol);
+        bool expected = it == reference.positions.end() ||
+                        price * quantity <= reference.cash;
+        Check(ok == expected, "property buy acceptance");
+        if (ok) {
+          if (it == reference.positions.end()) {
+            ReferenceLedger::RefPosition position;
+            position.quantity = quantity;
+            position.average = price;
+            position.last = price;
+            reference.positions[symbol] = position;
+          } else {
+            const int total = it->second.quantity + quantity;
+            it->second.average =
+                (it->second.average * it->second.quantity + price * quantity) /
+                total;
+            it->second.quantity = total;
+            it->second.last = price;
+          }
+          reference.cash -= price * quantity;
+          reference.invested += price * quantity;
+        }
+      } else if (operation < 7) {
+        const bool ok = portfolio.Sell(
+            symbol, quantity, Money::FromPaise(price), zero_costs, &error);
+        auto it = reference.positions.find(symbol);
+        bool expected =
+            it != reference.positions.end() && it->second.quantity >= quantity;
+        Check(ok == expected, "property sell acceptance");
+        if (ok) {
+          reference.cash += price * quantity;
+          reference.invested -= it->second.average * quantity;
+          reference.realized += (price - it->second.average) * quantity;
+          it->second.quantity -= quantity;
+          if (it->second.quantity == 0)
+            reference.positions.erase(it);
+          else
+            it->second.last = price;
+        }
+      } else if (operation < 9) {
+        const bool ok =
+            portfolio.MarkToMarket(symbol, Money::FromPaise(price), &error);
+        auto it = reference.positions.find(symbol);
+        Check(ok == (it != reference.positions.end()),
+              "property mark acceptance");
+        if (ok)
+          it->second.last = price;
+      } else {
+        const int64_t amount = (1 + static_cast<int>(next() % 50)) * 100;
+        const bool ok =
+            portfolio.RecordOperatingExpense(Money::FromPaise(amount), &error);
+        Check(ok == (amount <= reference.cash), "property expense acceptance");
+        if (ok) {
+          reference.cash -= amount;
+          reference.operating += amount;
+        }
+      }
+      reference.mark_peak();
+      const auto ledger = portfolio.ledger();
+      int64_t actual_cash = 0;
+      int64_t actual_invested = 0;
+      int64_t actual_realized = 0;
+      int64_t actual_operating = 0;
+      int64_t actual_peak = 0;
+      Check(ledger.cash.TryPaise(&actual_cash) &&
+                ledger.invested.TryPaise(&actual_invested) &&
+                ledger.realized_pnl.TryPaise(&actual_realized) &&
+                ledger.operating.TryPaise(&actual_operating) &&
+                ledger.peak_equity.TryPaise(&actual_peak),
+            "property ledger values are valid");
+      if (actual_cash != reference.cash ||
+          actual_invested != reference.invested ||
+          actual_realized != reference.realized ||
+          actual_operating != reference.operating ||
+          actual_peak != reference.peak) {
+        Check(false, "property ledger reconciliation");
+        break;
+      }
+      int64_t actual_drawdown = 0;
+      Check(portfolio.drawdown().TryPaise(&actual_drawdown) &&
+                actual_drawdown == reference.drawdown(),
+            "property drawdown reconciliation");
+      for (const auto& [symbol_name, position] : portfolio.positions()) {
+        auto it = reference.positions.find(symbol_name);
+        int64_t price_paise = 0;
+        Check(it != reference.positions.end() &&
+                  position.last_price.TryPaise(&price_paise) &&
+                  price_paise == it->second.last,
+              "property position mark reconciliation");
+      }
+    }
+  }
+}
+
+void TestTerminalAccounting() {
+  std::map<std::string, std::vector<Candle>> history;
+  history["NIFTY 50"] = SyntheticCandles(200, 20000.0, 0.001);
+  history["AAA"] = SyntheticCandles(200, 100.0, 0.003);
+  Config config = TestConfig();
+  config.terminal_liquidation = true;
+  const BacktestMetrics liquidated = RunBacktest(history, config);
+  Check(liquidated.terminal_liquidation_requested,
+        "terminal liquidation requested is reported");
+  Check(!liquidated.terminal_liquidation_failed,
+        "valid prices do not fail terminal liquidation");
+  Check(liquidated.terminal_open_positions == liquidated.open_positions,
+        "terminal residual matches final open positions");
+  if (liquidated.terminal_open_positions == 0) {
+    Check(liquidated.terminal_liquidation_completed,
+          "zero residual positions complete liquidation");
+  }
+  Config no_liquidation = TestConfig();
+  no_liquidation.terminal_liquidation = false;
+  const BacktestMetrics marked = RunBacktest(history, no_liquidation);
+  Check(!marked.terminal_liquidation_requested,
+        "terminal liquidation not requested when disabled");
+  Check(!marked.terminal_liquidation_completed,
+        "disabled liquidation is never reported as completed");
+}
+
 int main() {
   using namespace quant;
   TestMoney();
+  TestMoneyAdversarial();
   TestConfigParsing();
   TestCosts();
   TestAccounting();
+  TestPortfolioProperty();
   TestRisk();
   TestFeatures();
+  TestFeatureCrossLanguage();
   TestJournal();
   TestJson();
   TestNormalization();
   TestOrders();
   TestBacktest();
+  TestTerminalAccounting();
   TestGunzip();
   TestCsv();
   TestFreshnessSemantics();
