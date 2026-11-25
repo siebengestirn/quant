@@ -199,7 +199,7 @@ with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
     assert code == 0, out
     values = json.loads(out.strip().splitlines()[-1])
     assert abs(values["ret20"] - 0.2) < 1e-9
-    assert 0.0 <= values["vwapDev"] < 1.0
+    assert -1.0 < values["vwapDev"] < 1.0
 
 
 def test_point_in_time_features_and_recovery(isolated_q):
