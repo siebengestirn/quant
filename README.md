@@ -4,9 +4,8 @@
 
 Autonomous quantitative research and paper-trading platform for Indian cash
 equities.
-Initial venture capital: **₹500, permanently compounding. No withdrawals, no
-external
-deposits, no leverage, long-only.**
+Initial venture capital: **Permanently compounding. No withdrawals, no
+external deposits, no leverage, long-only.**
 
 **Live Zerodha order placement is unconditionally locked in this build.**
 
