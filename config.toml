@@ -20,6 +20,7 @@ CASH_RESERVE_FRACTION = 0.10
 [data]
 DATA_DIR = "data"
 JOURNAL_PATH = "data/journal/events.jnl"
+RISK_SNAPSHOT_PATH = "data/journal/risk.snap"
 UNIVERSE_PATH = "data/cache/universe.csv"
 HISTORY_DIR = "data/cache/history"
 REPORT_DIR = "data/reports"

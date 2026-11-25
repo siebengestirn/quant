@@ -825,6 +825,347 @@ std::string FormatCosts(const CostBreakdown& costs) {
 }
 
 // ---------------------------------------------------------------------------
+// Durable daily risk state. The journal is authoritative; snapshots are
+// checksummed recovery accelerators carrying a journal watermark.
+// ---------------------------------------------------------------------------
+std::string RiskSnapshotCanonical(const RiskSnapshot& snapshot) {
+  std::ostringstream oss;
+  oss << snapshot.version << '|' << snapshot.account_id << '|'
+      << snapshot.session_id << '|' << snapshot.policy_version << '|'
+      << snapshot.journal_sequence << '|' << snapshot.starting_equity_paise
+      << '|' << snapshot.current_equity_paise << '|'
+      << snapshot.peak_equity_paise << '|' << snapshot.low_equity_paise << '|'
+      << snapshot.realized_pnl_paise << '|' << snapshot.unrealized_pnl_paise
+      << '|' << (snapshot.halted ? 1 : 0) << '|' << snapshot.halt_reason;
+  return oss.str();
+}
+
+bool SaveRiskSnapshot(const std::string& path,
+                      const RiskSnapshot& snapshot,
+                      std::string* error) {
+  if (path.empty() || snapshot.version != 1) {
+    if (error)
+      *error = "invalid risk snapshot identity";
+    return false;
+  }
+  RiskSnapshot committed = snapshot;
+  committed.checksum = ChecksumHex(RiskSnapshotCanonical(committed));
+  const std::string temporary = path + ".tmp";
+  const int fd =
+      open(temporary.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+  if (fd < 0) {
+    if (error)
+      *error = "cannot create risk snapshot";
+    return false;
+  }
+  const std::string payload =
+      Json::ObjectValue(
+          {{"version", Json::Number(committed.version)},
+           {"account_id", Json::String(committed.account_id)},
+           {"session_id", Json::String(committed.session_id)},
+           {"policy_version", Json::String(committed.policy_version)},
+           {"journal_sequence", Json::Number(committed.journal_sequence)},
+           {"starting_equity_paise",
+            Json::Number(committed.starting_equity_paise)},
+           {"current_equity_paise",
+            Json::Number(committed.current_equity_paise)},
+           {"peak_equity_paise", Json::Number(committed.peak_equity_paise)},
+           {"low_equity_paise", Json::Number(committed.low_equity_paise)},
+           {"realized_pnl_paise", Json::Number(committed.realized_pnl_paise)},
+           {"unrealized_pnl_paise",
+            Json::Number(committed.unrealized_pnl_paise)},
+           {"halted", Json::Bool(committed.halted)},
+           {"halt_reason", Json::String(committed.halt_reason)},
+           {"checksum", Json::String(committed.checksum)}})
+          .Dump();
+  size_t written = 0;
+  while (written < payload.size()) {
+    const ssize_t count =
+        write(fd, payload.data() + written, payload.size() - written);
+    if (count < 0 && errno == EINTR)
+      continue;
+    if (count <= 0) {
+      close(fd);
+      if (error)
+        *error = "risk snapshot write failed";
+      return false;
+    }
+    written += static_cast<size_t>(count);
+  }
+  if (fsync(fd) != 0 || close(fd) != 0 ||
+      rename(temporary.c_str(), path.c_str()) != 0) {
+    close(fd);
+    if (error)
+      *error = "risk snapshot commit failed";
+    return false;
+  }
+  const size_t slash = path.find_last_of('/');
+  const std::string directory =
+      slash == std::string::npos ? "." : path.substr(0, slash);
+  const int dir_fd =
+      open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (dir_fd >= 0) {
+    if (fsync(dir_fd) != 0) {
+      close(dir_fd);
+      if (error)
+        *error = "risk snapshot directory synchronization failed";
+      return false;
+    }
+    close(dir_fd);
+  }
+  if (error)
+    error->clear();
+  return true;
+}
+
+bool LoadRiskSnapshot(const std::string& path,
+                      RiskSnapshot* snapshot,
+                      std::string* error) {
+  if (snapshot == nullptr) {
+    if (error)
+      *error = "snapshot output is null";
+    return false;
+  }
+  std::ifstream input(path);
+  if (!input.is_open()) {
+    if (error)
+      *error = "risk snapshot not found";
+    return false;
+  }
+  const std::string content((std::istreambuf_iterator<char>(input)),
+                            std::istreambuf_iterator<char>());
+  Json parsed;
+  if (!Json::Parse(content, &parsed, error))
+    return false;
+  auto integer = [&parsed](const char* key, int64_t* out) {
+    const Json* value = parsed.Find(key);
+    if (value == nullptr || value->type() != Json::Type::kNumber)
+      return false;
+    *out = value->as_int(0);
+    return true;
+  };
+  auto text = [&parsed](const char* key, std::string* out) {
+    const Json* value = parsed.Find(key);
+    if (value == nullptr || value->type() != Json::Type::kString)
+      return false;
+    *out = value->as_string();
+    return true;
+  };
+  RiskSnapshot loaded;
+  int64_t sequence = 0;
+  if (!integer("version", &sequence) || sequence != 1 ||
+      !integer("journal_sequence", &sequence) || sequence < 0)
+    return false;
+  loaded.journal_sequence = static_cast<uint64_t>(sequence);
+  if (!text("account_id", &loaded.account_id) ||
+      !text("session_id", &loaded.session_id) ||
+      !text("policy_version", &loaded.policy_version) ||
+      !text("halt_reason", &loaded.halt_reason) ||
+      !text("checksum", &loaded.checksum))
+    return false;
+  if (!integer("starting_equity_paise", &loaded.starting_equity_paise) ||
+      !integer("current_equity_paise", &loaded.current_equity_paise) ||
+      !integer("peak_equity_paise", &loaded.peak_equity_paise) ||
+      !integer("low_equity_paise", &loaded.low_equity_paise) ||
+      !integer("realized_pnl_paise", &loaded.realized_pnl_paise) ||
+      !integer("unrealized_pnl_paise", &loaded.unrealized_pnl_paise))
+    return false;
+  const Json* halted = parsed.Find("halted");
+  if (halted == nullptr || halted->type() != Json::Type::kBool)
+    return false;
+  loaded.halted = halted->as_bool();
+  if (loaded.account_id.empty() || loaded.session_id.empty() ||
+      loaded.policy_version.empty())
+    return false;
+  if (loaded.checksum != ChecksumHex(RiskSnapshotCanonical(loaded))) {
+    if (error)
+      *error = "risk snapshot checksum mismatch";
+    return false;
+  }
+  *snapshot = loaded;
+  if (error)
+    error->clear();
+  return true;
+}
+
+bool AppendRiskEvent(Journal* journal,
+                     const std::string& action,
+                     DailyRiskState* state,
+                     int64_t now_ms,
+                     std::string* error) {
+  if (journal == nullptr || state == nullptr || !journal->healthy()) {
+    if (error)
+      *error = "risk event requires a healthy journal";
+    return false;
+  }
+  static const std::set<std::string> allowed = {"RISK_SESSION_INITIALIZED",
+                                                "EQUITY_MARKED",
+                                                "KILL_SWITCH_ACTIVATED",
+                                                "DAILY_LIMIT_APPROACHED"};
+  if (allowed.find(action) == allowed.end()) {
+    if (error)
+      *error = "unknown risk event action";
+    return false;
+  }
+  Json::Object payload;
+  payload["action"] = Json::String(action);
+  payload["session_id"] = Json::String(state->date);
+  payload["policy_version"] = Json::String(state->policy_version);
+  payload["starting_equity_paise"] =
+      Json::Number(state->starting_equity.paise());
+  payload["current_equity_paise"] = Json::Number(state->current_equity.paise());
+  payload["peak_equity_paise"] = Json::Number(state->peak_equity.paise());
+  payload["low_equity_paise"] = Json::Number(state->low_equity.paise());
+  payload["halted"] = Json::Bool(state->halted);
+  payload["halt_reason"] = Json::String(state->halt_reason);
+  Event event;
+  event.type = EventType::kRiskDecision;
+  event.timestamp_ms = now_ms;
+  event.payload = Json::ObjectValue(payload).Dump();
+  if (!journal->Append(&event, error))
+    return false;
+  state->journal_sequence = event.sequence;
+  return true;
+}
+
+bool RecoverRiskState(const std::string& snapshot_path,
+                      const std::string& journal_path,
+                      DailyRiskState* state,
+                      std::string* error) {
+  Journal journal;
+  if (!journal.Open(journal_path, error))
+    return false;
+  const bool recovered =
+      RecoverRiskStateFromJournal(snapshot_path, &journal, state, error);
+  journal.Close();
+  return recovered;
+}
+
+bool RecoverRiskStateFromJournal(const std::string& snapshot_path,
+                                 Journal* journal,
+                                 DailyRiskState* state,
+                                 std::string* error) {
+  if (state == nullptr || journal == nullptr) {
+    if (error)
+      *error = "risk recovery requires a journal and output";
+    return false;
+  }
+  RiskSnapshot snapshot;
+  bool have_snapshot = LoadRiskSnapshot(snapshot_path, &snapshot, error);
+  if (!have_snapshot) {
+    // A missing or corrupt snapshot is rebuilt from the authoritative journal.
+    if (error)
+      error->clear();
+    snapshot = RiskSnapshot();
+    snapshot.account_id = "PRIMARY";
+    snapshot.policy_version = "RISK-2026-11-26-v1";
+  }
+  std::string replay_error;
+  const std::vector<Event> events = journal->Replay(&replay_error);
+  if (!replay_error.empty()) {
+    if (error)
+      *error = "risk recovery journal replay failed: " + replay_error;
+    return false;
+  }
+  DailyRiskState recovered;
+  recovered.policy_version = snapshot.policy_version;
+  recovered.journal_sequence = snapshot.journal_sequence;
+  int64_t starting = 0;
+  int64_t current = 0;
+  int64_t peak = 0;
+  int64_t low = 0;
+  if (have_snapshot) {
+    starting = snapshot.starting_equity_paise;
+    current = snapshot.current_equity_paise;
+    peak = snapshot.peak_equity_paise;
+    low = snapshot.low_equity_paise;
+    recovered.realized_pnl = Money::FromPaise(snapshot.realized_pnl_paise);
+    recovered.unrealized_pnl = Money::FromPaise(snapshot.unrealized_pnl_paise);
+    recovered.halted = snapshot.halted;
+    recovered.halt_reason = snapshot.halt_reason;
+    recovered.date = snapshot.session_id;
+  }
+  bool applied_risk_event = false;
+  for (const Event& event : events) {
+    if (event.type != EventType::kRiskDecision ||
+        event.sequence <= recovered.journal_sequence)
+      continue;
+    Json payload;
+    if (!Json::Parse(event.payload, &payload, error))
+      return false;
+    const Json* action = payload.Find("action");
+    if (action == nullptr) {
+      if (error)
+        *error = "risk event missing action";
+      return false;
+    }
+    const std::string name = action->as_string();
+    auto paise = [&payload](const char* key, int64_t fallback) {
+      const Json* value = payload.Find(key);
+      return value == nullptr ? fallback : value->as_int(fallback);
+    };
+    if (name == "RISK_SESSION_INITIALIZED") {
+      recovered.date = payload.Find("session_id") == nullptr
+                           ? ""
+                           : payload.Find("session_id")->as_string();
+      recovered.policy_version =
+          payload.Find("policy_version") == nullptr
+              ? recovered.policy_version
+              : payload.Find("policy_version")->as_string();
+      starting = paise("starting_equity_paise", starting);
+      current = paise("current_equity_paise", current);
+      peak = paise("peak_equity_paise", peak);
+      low = paise("low_equity_paise", low);
+      recovered.halted = false;
+      recovered.halt_reason.clear();
+    } else if (name == "EQUITY_MARKED" || name == "DAILY_LIMIT_APPROACHED") {
+      current = paise("current_equity_paise", current);
+      peak = paise("peak_equity_paise", peak);
+      low = paise("low_equity_paise", low);
+    } else if (name == "KILL_SWITCH_ACTIVATED") {
+      current = paise("current_equity_paise", current);
+      low = paise("low_equity_paise", low);
+      recovered.halted = true;
+      const Json* reason = payload.Find("halt_reason");
+      recovered.halt_reason =
+          reason == nullptr ? "daily loss limit" : reason->as_string();
+    } else {
+      if (error)
+        *error = "unknown risk event in journal";
+      return false;
+    }
+    recovered.journal_sequence = event.sequence;
+    applied_risk_event = true;
+  }
+  const bool has_risk_history = have_snapshot || applied_risk_event;
+  recovered.starting_equity = Money::FromPaise(starting);
+  recovered.current_equity = Money::FromPaise(current);
+  recovered.peak_equity = Money::FromPaise(peak);
+  recovered.low_equity = Money::FromPaise(low);
+  recovered.realized_pnl = recovered.realized_pnl.valid()
+                               ? recovered.realized_pnl
+                               : Money::FromPaise(0);
+  recovered.unrealized_pnl = recovered.unrealized_pnl.valid()
+                                 ? recovered.unrealized_pnl
+                                 : Money::FromPaise(0);
+  if (!recovered.starting_equity.valid() ||
+      (has_risk_history && starting <= 0) ||
+      !recovered.current_equity.valid() || !recovered.peak_equity.valid() ||
+      !recovered.low_equity.valid() ||
+      recovered.low_equity > recovered.current_equity ||
+      recovered.peak_equity < recovered.current_equity ||
+      !recovered.realized_pnl.valid() || !recovered.unrealized_pnl.valid()) {
+    if (error)
+      *error = "reconstructed risk state is inconsistent";
+    return false;
+  }
+  *state = recovered;
+  if (error)
+    error->clear();
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Portfolio accounting.
 // ---------------------------------------------------------------------------
 Portfolio::Transaction::Transaction(Portfolio* owner)
@@ -1391,6 +1732,12 @@ RiskEngine::RiskEngine(Config config, std::shared_ptr<DailyRiskState> state)
     : config_(std::move(config)), state_(std::move(state)) {
 }
 
+RiskEngine::RiskEngine(Config config,
+                       std::shared_ptr<DailyRiskState> state,
+                       Journal* journal)
+    : config_(std::move(config)), state_(std::move(state)), journal_(journal) {
+}
+
 RiskDecision RiskEngine::Evaluate(const Signal& signal,
                                   const Quote& quote,
                                   const Portfolio& portfolio,
@@ -1406,24 +1753,76 @@ RiskDecision RiskEngine::Evaluate(const Signal& signal,
 
   const std::string session = UtcSessionDate(now_ms);
   const Money equity = portfolio.equity();
+  if (!equity.valid()) {
+    state_->halted = true;
+    state_->halt_reason = "invalid portfolio equity";
+    return reject(state_->halt_reason);
+  }
+  auto persist = [&](const char* action) {
+    if (journal_ == nullptr)
+      return true;
+    std::string risk_error;
+    if (!AppendRiskEvent(journal_, action, state_.get(), now_ms, &risk_error)) {
+      decision.reason =
+          std::string("risk event persistence failed: ") + risk_error;
+      return false;
+    }
+    return true;
+  };
   if (state_->date != session) {
     state_->date = session;
     state_->starting_equity = equity;
+    state_->current_equity = equity;
+    state_->peak_equity = equity;
     state_->low_equity = equity;
+    state_->realized_pnl = portfolio.ledger().realized_pnl;
+    state_->unrealized_pnl = portfolio.ledger().unrealized_pnl;
     state_->halted = false;
-  } else if (equity < state_->low_equity) {
-    state_->low_equity = equity;
+    state_->halt_reason.clear();
+    if (!persist("RISK_SESSION_INITIALIZED")) {
+      decision.approved = false;
+      decision.quantity = 0;
+      return decision;
+    }
+  } else {
+    bool changed = false;
+    if (equity != state_->current_equity) {
+      state_->current_equity = equity;
+      changed = true;
+    }
+    if (equity > state_->peak_equity) {
+      state_->peak_equity = equity;
+      changed = true;
+    }
+    if (equity < state_->low_equity) {
+      state_->low_equity = equity;
+      changed = true;
+    }
+    state_->realized_pnl = portfolio.ledger().realized_pnl;
+    state_->unrealized_pnl = portfolio.ledger().unrealized_pnl;
+    if (changed && !persist("EQUITY_MARKED")) {
+      decision.approved = false;
+      decision.quantity = 0;
+      return decision;
+    }
   }
   if (state_->halted)
-    return reject("daily kill switch active");
+    return reject("daily kill switch active: " + state_->halt_reason);
+  int64_t start = 0;
+  int64_t low = 0;
+  if (!state_->starting_equity.TryPaise(&start) ||
+      !state_->low_equity.TryPaise(&low) || start <= 0)
+    return reject("invalid risk baseline");
   const double loss_fraction =
-      state_->starting_equity > Money::FromRupees(0.0)
-          ? static_cast<double>(
-                (state_->starting_equity - state_->low_equity).paise()) /
-                static_cast<double>(state_->starting_equity.paise())
-          : 0.0;
+      static_cast<double>(start - low) / static_cast<double>(start);
   if (loss_fraction >= config_.max_daily_loss_fraction) {
     state_->halted = true;
+    state_->halt_reason = "daily loss limit reached";
+    if (!persist("KILL_SWITCH_ACTIVATED")) {
+      decision.approved = false;
+      decision.quantity = 0;
+      return decision;
+    }
     return reject("daily loss limit reached");
   }
 

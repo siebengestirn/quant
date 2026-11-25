@@ -25,6 +25,8 @@
 
 namespace quant {
 
+class Journal;
+
 // ---------------------------------------------------------------------------
 // Money: integer paise. Conversions are explicit to prevent unit confusion.
 // ---------------------------------------------------------------------------
@@ -294,6 +296,7 @@ struct Config {
   std::string keychain_prefix = "NIRNAY_";
   std::string data_dir = "data";
   std::string journal_path = "data/journal/events.jnl";
+  std::string risk_snapshot_path = "data/journal/risk.snap";
   std::string universe_path = "data/cache/universe.csv";
   std::string history_dir = "data/cache/history";
   std::string report_dir = "data/reports";
@@ -603,11 +606,63 @@ struct RiskDecision {
 };
 
 struct DailyRiskState {
-  std::string date;
+  std::string date;  // Exchange session identity (IST trading day).
+  std::string policy_version = "RISK-2026-11-26-v1";
+  uint64_t journal_sequence = 0;
   Money starting_equity;
+  Money current_equity;
+  Money peak_equity;
   Money low_equity;
+  Money realized_pnl;
+  Money unrealized_pnl;
   bool halted = false;
+  std::string halt_reason;
 };
+
+// Persistent checkpoint. The journal remains the source of truth; a snapshot
+// is only a recovery accelerator with a verified journal watermark.
+struct RiskSnapshot {
+  uint64_t version = 1;
+  std::string account_id;
+  std::string session_id;
+  std::string policy_version;
+  uint64_t journal_sequence = 0;
+  int64_t starting_equity_paise = 0;
+  int64_t current_equity_paise = 0;
+  int64_t peak_equity_paise = 0;
+  int64_t low_equity_paise = 0;
+  int64_t realized_pnl_paise = 0;
+  int64_t unrealized_pnl_paise = 0;
+  bool halted = false;
+  std::string halt_reason;
+  std::string checksum;
+};
+
+bool SaveRiskSnapshot(const std::string& path,
+                      const RiskSnapshot& snapshot,
+                      std::string* error);
+bool LoadRiskSnapshot(const std::string& path,
+                      RiskSnapshot* snapshot,
+                      std::string* error);
+std::string RiskSnapshotCanonical(const RiskSnapshot& snapshot);
+
+// Deterministic startup reconstruction. Returns false when the reconstructed
+// state is inconsistent; callers must keep execution blocked in that case.
+bool RecoverRiskState(const std::string& snapshot_path,
+                      const std::string& journal_path,
+                      DailyRiskState* state,
+                      std::string* error);
+bool RecoverRiskStateFromJournal(const std::string& snapshot_path,
+                                 Journal* journal,
+                                 DailyRiskState* state,
+                                 std::string* error);
+
+// Durable risk events written before a decision becomes visible.
+bool AppendRiskEvent(Journal* journal,
+                     const std::string& action,
+                     DailyRiskState* state,
+                     int64_t now_ms,
+                     std::string* error);
 
 struct SizingInput {
   Money price;  // Intended executable price, not LTP.
@@ -638,6 +693,9 @@ class RiskEngine {
  public:
   explicit RiskEngine(Config config);
   explicit RiskEngine(Config config, std::shared_ptr<DailyRiskState> state);
+  RiskEngine(Config config,
+             std::shared_ptr<DailyRiskState> state,
+             Journal* journal);
   RiskDecision Evaluate(const Signal& signal,
                         const Quote& quote,
                         const Portfolio& portfolio,
@@ -649,6 +707,7 @@ class RiskEngine {
  private:
   Config config_;
   std::shared_ptr<DailyRiskState> state_;
+  Journal* journal_ = nullptr;
 };
 
 // ---------------------------------------------------------------------------

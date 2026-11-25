@@ -1071,6 +1071,129 @@ void TestCsv() {
 
 using namespace quant;
 
+RiskSnapshot SnapshotFromState(const DailyRiskState& state) {
+  RiskSnapshot snapshot;
+  snapshot.account_id = "PRIMARY";
+  snapshot.session_id = state.date;
+  snapshot.policy_version = state.policy_version;
+  snapshot.journal_sequence = state.journal_sequence;
+  snapshot.starting_equity_paise = state.starting_equity.paise();
+  snapshot.current_equity_paise = state.current_equity.paise();
+  snapshot.peak_equity_paise = state.peak_equity.paise();
+  snapshot.low_equity_paise = state.low_equity.paise();
+  snapshot.realized_pnl_paise = state.realized_pnl.paise();
+  snapshot.unrealized_pnl_paise = state.unrealized_pnl.paise();
+  snapshot.halted = state.halted;
+  snapshot.halt_reason = state.halt_reason;
+  return snapshot;
+}
+
+void TestRiskPersistence() {
+  const std::string journal_path = TempPath("risk_state.jnl");
+  const std::string snapshot_path = TempPath("risk_state.snap");
+  std::remove(journal_path.c_str());
+  std::remove(snapshot_path.c_str());
+  std::string error;
+  Journal journal;
+  Check(journal.Open(journal_path, &error), "risk journal opens");
+  DailyRiskState original;
+  original.date = "2026-11-26";
+  original.starting_equity = Money::FromRupees(500.0);
+  original.current_equity = original.starting_equity;
+  original.peak_equity = original.starting_equity;
+  original.low_equity = original.starting_equity;
+  original.realized_pnl = Money::FromPaise(0);
+  original.unrealized_pnl = Money::FromPaise(0);
+  Check(AppendRiskEvent(
+            &journal, "RISK_SESSION_INITIALIZED", &original, 1000, &error),
+        "session initialised durably");
+  original.current_equity = Money::FromRupees(480.0);
+  original.low_equity = original.current_equity;
+  Check(AppendRiskEvent(&journal, "EQUITY_MARKED", &original, 2000, &error),
+        "equity mark durably recorded");
+  original.halted = true;
+  original.halt_reason = "daily loss limit reached";
+  Check(AppendRiskEvent(
+            &journal, "KILL_SWITCH_ACTIVATED", &original, 3000, &error),
+        "kill switch durably recorded");
+  journal.Close();
+
+  DailyRiskState recovered;
+  Check(RecoverRiskState(snapshot_path, journal_path, &recovered, &error),
+        "risk state rebuilt from journal without snapshot");
+  Check(recovered.halted, "breached kill switch survives recovery");
+  Check(recovered.halt_reason == "daily loss limit reached",
+        "halt reason survives recovery");
+  Check(recovered.low_equity == Money::FromRupees(480.0),
+        "session low survives recovery");
+  Check(recovered.journal_sequence == 3, "journal watermark restored");
+
+  Check(SaveRiskSnapshot(snapshot_path, SnapshotFromState(recovered), &error),
+        "checkpoint saved atomically");
+  Journal later;
+  Check(later.Open(journal_path, &error), "journal reopens for new events");
+  DailyRiskState after = recovered;
+  after.current_equity = Money::FromRupees(470.0);
+  after.low_equity = after.current_equity;
+  Check(AppendRiskEvent(&later, "EQUITY_MARKED", &after, 4000, &error),
+        "post-checkpoint event recorded");
+  later.Close();
+  DailyRiskState replayed;
+  Check(RecoverRiskState(snapshot_path, journal_path, &replayed, &error),
+        "recovery replays events after the checkpoint");
+  Check(replayed.low_equity == Money::FromRupees(470.0),
+        "post-checkpoint equity applied");
+  Check(replayed.halted && replayed.journal_sequence == 4,
+        "kill switch and sequence remain intact after replay");
+
+  std::ofstream corrupt(snapshot_path, std::ios::trunc);
+  corrupt << "not a snapshot";
+  corrupt.close();
+  DailyRiskState rebuilt;
+  Check(RecoverRiskState(snapshot_path, journal_path, &rebuilt, &error),
+        "corrupt snapshot is rebuilt from the journal");
+  Check(rebuilt.halted && rebuilt.low_equity == Money::FromRupees(470.0),
+        "rebuild reproduces authoritative risk state");
+
+  RiskSnapshot inconsistent = SnapshotFromState(rebuilt);
+  inconsistent.low_equity_paise = 999999;  // above current equity.
+  Check(SaveRiskSnapshot(snapshot_path, inconsistent, &error),
+        "inconsistent checkpoint written for rejection test");
+  DailyRiskState rejected;
+  Check(!RecoverRiskState(snapshot_path, journal_path, &rejected, &error),
+        "inconsistent reconstructed state is rejected");
+  Check(error.find("inconsistent") != std::string::npos,
+        "inconsistency is explicit");
+  std::remove(snapshot_path.c_str());
+
+  DailyRiskState fresh;
+  const Config config = TestConfig();
+  Journal decision_journal;
+  Check(decision_journal.Open(journal_path, &error),
+        "journal opens for engine persistence test");
+  auto shared = std::make_shared<DailyRiskState>(fresh);
+  RiskEngine engine(config, shared, &decision_journal);
+  Signal signal;
+  signal.symbol = "AAA";
+  signal.tradable = false;
+  signal.rejection_reason = "test";
+  Quote quote;
+  quote.last = 100.0;
+  quote.bid = 99.9;
+  quote.ask = 100.1;
+  quote.bid_qty = 1000;
+  quote.ask_qty = 1000;
+  quote.exchange_timestamp_ms = 100000;
+  quote.provider_timestamp_ms = 100000;
+  quote.receive_timestamp_ms = 100000;
+  quote.quality = "ok";
+  Portfolio portfolio(Money::FromRupees(500.0));
+  (void)engine.Evaluate(signal, quote, portfolio, 100000);
+  Check(shared->journal_sequence == 5,
+        "risk engine persists a session event before decisions");
+  decision_journal.Close();
+}
+
 void TestFeatureCrossLanguage() {
   // Independent reference values produced by python/research.py on this exact
   // unequal-volume fixture. Tolerance-based equivalence is required.
@@ -1350,6 +1473,7 @@ int main() {
   TestCsv();
   TestFreshnessSemantics();
   TestDailyRiskLimit();
+  TestRiskPersistence();
   TestMarkedSaleAndCostBoundaries();
   TestHighWaterAndMoneyBounds();
   TestDynamicSizing();
