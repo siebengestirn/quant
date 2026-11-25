@@ -54,13 +54,29 @@ INDEPENDENTLY_VERIFIED or ACCEPTED.
 |---|---|---|---|
 | QG-001 | Python fixture accepted an existing q server, reset it and stopped an unowned process; C++ test port was fixed and ownership unproven | Fixture now starts its own q process on an OS-assigned port with a unique instance id, temporary directory and identity handshake. C++ `db verify`/`benchmark` use the same contract and delete only their own temp dir. Production endpoint is never contacted by tests. | TESTED (review pending) |
 | QG-002 | Buy sizing used bid depth/LTP, reserve was not preserved, exposure and stop distance were ignored | `SizingInput` is side/price/depth/stop/exposure aware; reserve is enforced after costs; tick validation added. Risk engine uses ask price and ask depth. | TESTED (review pending) |
-| QG-003 | Daily loss limit was not enforced | NOT IMPLEMENTED in this change set. | BLOCKED |
-| QG-004 | Indices could enter equity universe; surveillance failure fail-open | NOT IMPLEMENTED in this change set. | BLOCKED |
+| QG-003 | Daily loss limit was not enforced | `DailyRiskState` and shared `RiskEngine` state establish a session baseline, latch a kill switch on breach, and reset on a new UTC date. Persistence across process restart remains open. | TESTED (review pending) |
+| QG-004 | Indices could enter equity universe; surveillance failure fail-open | Canonical `InstrumentClass` added; non-equity classes rejected; missing surveillance status now fails closed as `INELIGIBLE_PENDING_VERIFICATION`; traded-value filter enforced in market report. | TESTED (review pending) |
 | QG-005 | Backtest used execution-session total volume, leaking future information | `PriorAverageVolume` uses only sessions strictly before the execution index. Tests verify execution-day volume cannot change the earlier decision input. | TESTED (review pending) |
 | QG-006 | Multi-session strategy used intraday charges; terminal position not liquidated | `BACKTEST_DELIVERY` and `TERMINAL_LIQUIDATION` config; delivery costs used for entry/exit; terminal liquidation optional and reported. | TESTED (review pending) |
-| QG-007 | Provider freshness fallback and monotonic timestamp conversion | NOT FULLY IMPLEMENTED; timestamp fallback remains under review. | BLOCKED |
-| QG-008 | Journal failure state, writer lock, checksum identity, permissions | NOT FULLY IMPLEMENTED; fsync/validation remain. | BLOCKED |
+| QG-007 | Provider freshness fallback and monotonic timestamp conversion | Missing provider time is UNKNOWN and rejected by risk; trade freshness separate; monotonic receive time converted to ns for q; source identity preserved from the event instead of hardcoded. | TESTED (review pending) |
+| QG-008 | Journal failure state, writer lock, checksum identity, permissions | Failed write/sync marks journal unhealthy; exclusive `flock` writer lock; 0600 file and lock; checksum includes journal sequence; EINTR handled; explicit `Close`. | TESTED (review pending) |
 | QG-009 | q vol20 was full-history deviation; VWAP proxy mislabelled | `vol20` now uses rolling 20-observation `mdev`; added `dailyVwapProxyDev` and documented that `vwapDev` is a daily OHLCV proxy, not intraday VWAP. | TESTED (review pending) |
 | QG-010..016 | Historical feature leakage, recovery, real pipeline, security, point-in-time data, statistical validation, audit lifecycle | NOT IMPLEMENTED. | BLOCKED |
 
 No gate is accepted. PR #1 remains open and unmerged.
+
+## QG addendum — 2026-11-25
+
+- QG-003 persistence of daily risk state across restart: NOT IMPLEMENTED.
+- QG-004 research/execution universe separation: PARTIAL; execution eligibility
+  still lacks price bands and full historical status data.
+- QG-007 cross-language boundary fixtures for 2^53 and large timestamps:
+  NOT IMPLEMENTED.
+- QG-008 process-kill and power-loss tests: NOT IMPLEMENTED; existing tests
+  cover parsing, lock, sequence and checksum behaviour only.
+- Journal checksum identity changed to include the sequence. The pre-change
+  generated journal was preserved as
+  `data/journal/events.jnl.legacy-checksum-v1` and a new journal started.
+- QG-003 daily state persistence across process restart: NOT IMPLEMENTED.
+- QG-007 cross-language timestamp boundary fixtures: NOT IMPLEMENTED.
+- QG-010..016: unchanged blockers.

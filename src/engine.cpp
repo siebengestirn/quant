@@ -17,6 +17,8 @@
 #include <numeric>
 #include <set>
 #include <sstream>
+#include <sys/file.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace quant {
@@ -74,6 +76,15 @@ bool ParseArray(std::string_view text, std::vector<std::string>* out) {
     pos = quote_end + 1;
   }
   return true;
+}
+
+std::string UtcSessionDate(int64_t now_ms) {
+  const time_t seconds = static_cast<time_t>(now_ms / 1000);
+  std::tm utc{};
+  gmtime_r(&seconds, &utc);
+  std::ostringstream oss;
+  oss << std::put_time(&utc, "%Y-%m-%d");
+  return oss.str();
 }
 
 bool ParseInteger64(const std::string& text, int64_t* out) {
@@ -714,9 +725,14 @@ SizingResult SizePosition(const Config& config, const Portfolio& portfolio,
 // ---------------------------------------------------------------------------
 // Central risk engine.
 // ---------------------------------------------------------------------------
+RiskEngine::RiskEngine(Config config)
+    : config_(std::move(config)), state_(std::make_shared<DailyRiskState>()) {}
+
+RiskEngine::RiskEngine(Config config, std::shared_ptr<DailyRiskState> state)
+    : config_(std::move(config)), state_(std::move(state)) {}
+
 RiskDecision RiskEngine::Evaluate(const Signal& signal, const Quote& quote,
-                                  const Portfolio& portfolio,
-                                  int64_t now_ms) const {
+                                  const Portfolio& portfolio, int64_t now_ms) {
   RiskDecision decision;
   decision.notional = Money::FromRupees(0.0);
   auto reject = [&decision](const std::string& reason) {
@@ -726,12 +742,37 @@ RiskDecision RiskEngine::Evaluate(const Signal& signal, const Quote& quote,
     return decision;
   };
 
+  const std::string session = UtcSessionDate(now_ms);
+  const Money equity = portfolio.equity();
+  if (state_->date != session) {
+    state_->date = session;
+    state_->starting_equity = equity;
+    state_->low_equity = equity;
+    state_->halted = false;
+  } else if (equity < state_->low_equity) {
+    state_->low_equity = equity;
+  }
+  if (state_->halted) return reject("daily kill switch active");
+  const double loss_fraction =
+      state_->starting_equity > Money::FromRupees(0.0)
+          ? static_cast<double>(
+                (state_->starting_equity - state_->low_equity).paise()) /
+                static_cast<double>(state_->starting_equity.paise())
+          : 0.0;
+  if (loss_fraction >= config_.max_daily_loss_fraction) {
+    state_->halted = true;
+    return reject("daily loss limit reached");
+  }
+
   if (!signal.tradable)
     return reject("signal rejected upstream: " + signal.rejection_reason);
   if (config_.live_trading_enabled && config_.mode != Mode::kLive) {
     return reject("fail-closed: live flag inconsistent with execution mode");
   }
-  if (IsStale(quote, now_ms, config_.stale_quote_seconds)) {
+  if (ProviderFreshnessUnknown(quote)) {
+    return reject("provider freshness unknown");
+  }
+  if (IsStaleProviderUpdate(quote, now_ms, config_.stale_quote_seconds)) {
     return reject("stale market data");
   }
   if (!(quote.last > 0.0) || !(quote.bid > 0.0) || !(quote.ask >= quote.bid)) {
@@ -1195,10 +1236,19 @@ std::string EventId(uint64_t sequence, std::string_view payload) {
 
 bool Journal::Open(const std::string& path, std::string* error) {
   path_ = path;
+  healthy_ = false;
   const size_t slash = path_.find_last_of('/');
   if (slash != std::string::npos) {
     std::string directory = path_.substr(0, slash);
     std::filesystem::create_directories(directory);
+  }
+  lock_fd_ =
+      open((path_ + ".lock").c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+  if (lock_fd_ < 0 || flock(lock_fd_, LOCK_EX | LOCK_NB) != 0) {
+    if (lock_fd_ >= 0) close(lock_fd_);
+    lock_fd_ = -1;
+    if (error) *error = "journal writer lock unavailable";
+    return false;
   }
   if (std::filesystem::exists(path_)) {
     std::string replay_error;
@@ -1213,11 +1263,31 @@ bool Journal::Open(const std::string& path, std::string* error) {
     size_ = 0;
     next_sequence_ = 1;
   }
+  healthy_ = true;
   if (error) error->clear();
   return true;
 }
 
+void Journal::Close() {
+  if (lock_fd_ >= 0) {
+    flock(lock_fd_, LOCK_UN);
+    close(lock_fd_);
+    lock_fd_ = -1;
+  }
+}
+
+Journal::~Journal() {
+  if (lock_fd_ >= 0) {
+    flock(lock_fd_, LOCK_UN);
+    close(lock_fd_);
+  }
+}
+
 bool Journal::Append(Event* event, std::string* error) {
+  if (!healthy_) {
+    if (error) *error = "journal unhealthy; recovery required";
+    return false;
+  }
   if (path_.empty()) {
     if (error) *error = "journal not opened";
     return false;
@@ -1231,9 +1301,9 @@ bool Journal::Append(Event* event, std::string* error) {
                 .count()
           : event->timestamp_ms;
   std::ostringstream canonical;
-  canonical << event->id << '|' << static_cast<int>(event->type) << '|'
-            << event->timestamp_ms << '|' << event->schema_version << '|'
-            << event->payload;
+  canonical << event->sequence << '|' << event->id << '|'
+            << static_cast<int>(event->type) << '|' << event->timestamp_ms
+            << '|' << event->schema_version << '|' << event->payload;
   event->checksum = ChecksumHex(canonical.str());
 
   // Durability boundary: the record is acknowledged only after fsync succeeds.
@@ -1243,7 +1313,8 @@ bool Journal::Append(Event* event, std::string* error) {
       std::to_string(event->timestamp_ms) + '|' +
       std::to_string(event->schema_version) + '|' + HexEncode(event->payload) +
       '|' + event->checksum + '\n';
-  const int fd = open(path_.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+  const int fd =
+      open(path_.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
   if (fd < 0) {
     if (error) *error = "cannot open journal for append";
     return false;
@@ -1252,16 +1323,19 @@ bool Journal::Append(Event* event, std::string* error) {
   while (written < record.size()) {
     const ssize_t count =
         write(fd, record.data() + written, record.size() - written);
+    if (count < 0 && errno == EINTR) continue;
     if (count <= 0) {
       close(fd);
+      healthy_ = false;
       if (error) *error = "journal write failed";
       return false;
     }
     written += static_cast<size_t>(count);
   }
-  if (fsync(fd) != 0) {
+  if (fchmod(fd, 0600) != 0 || fsync(fd) != 0) {
     close(fd);
-    if (error) *error = "journal fsync failed";
+    healthy_ = false;
+    if (error) *error = "journal synchronization failed";
     return false;
   }
   close(fd);
@@ -1274,7 +1348,11 @@ std::vector<Event> Journal::Replay(std::string* error) const {
   std::vector<Event> events;
   std::ifstream input(path_, std::ios::binary);
   if (!input.is_open()) {
-    if (error) *error = "cannot open journal for replay";
+    if (std::filesystem::exists(path_)) {
+      if (error) *error = "cannot open journal for replay";
+    } else if (error) {
+      error->clear();
+    }
     return events;
   }
   const std::string content((std::istreambuf_iterator<char>(input)),
@@ -1315,9 +1393,9 @@ std::vector<Event> Journal::Replay(std::string* error) const {
     event.payload = HexDecode(fields[5]);
     event.checksum = fields[6];
     std::ostringstream canonical;
-    canonical << event.id << '|' << static_cast<int>(event.type) << '|'
-              << event.timestamp_ms << '|' << event.schema_version << '|'
-              << event.payload;
+    canonical << event.sequence << '|' << event.id << '|'
+              << static_cast<int>(event.type) << '|' << event.timestamp_ms
+              << '|' << event.schema_version << '|' << event.payload;
     if (ChecksumHex(canonical.str()) != event.checksum) {
       if (error)
         *error = "journal checksum mismatch at sequence " +

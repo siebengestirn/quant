@@ -18,6 +18,19 @@
 
 namespace quant {
 namespace {
+const char* ProviderName(Provider provider) {
+  switch (provider) {
+    case Provider::kFyers:
+      return "FYERS";
+    case Provider::kUpstox:
+      return "UPSTOX";
+    case Provider::kZerodha:
+      return "ZERODHA";
+    case Provider::kSynthetic:
+      return "SYNTHETIC";
+  }
+  return "UNKNOWN";
+}
 
 #ifdef QUANT_HAS_KDBX
 
@@ -228,14 +241,14 @@ bool KdbxClient::IngestQuote(const Quote& quote, uint64_t sequence,
       13, kj(static_cast<long long>(sequence)),
       ks(const_cast<char*>(event_id.c_str())),
       ks(const_cast<char*>(quote.symbol.c_str())),
-      ks(const_cast<char*>("UPSTOX")),
+      ks(const_cast<char*>(ProviderName(quote.source))),
       kj(static_cast<long long>(UnixMsToKxNs(quote.exchange_timestamp_ms))),
       kj(static_cast<long long>(UnixMsToKxNs(quote.provider_timestamp_ms))),
       kj(static_cast<long long>(UnixMsToKxNs(
           quote.last_trade_timestamp_ms > 0 ? quote.last_trade_timestamp_ms
                                             : quote.exchange_timestamp_ms))),
-      kj(static_cast<long long>(quote.receive_timestamp_ms)), kf(quote.last),
-      kf(quote.bid), kf(quote.ask), kf(quote.volume),
+      kj(static_cast<long long>(quote.receive_timestamp_ms) * 1000000LL),
+      kf(quote.last), kf(quote.bid), kf(quote.ask), kf(quote.volume),
       ks(const_cast<char*>(quote.quality.empty() ? "ok"
                                                  : quote.quality.c_str())));
   return impl_->CallOk(".quant.ingest", args, error);

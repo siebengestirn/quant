@@ -165,6 +165,17 @@ Mode ParseMode(std::string_view text);
 // ---------------------------------------------------------------------------
 // Canonical domain models.
 // ---------------------------------------------------------------------------
+enum class InstrumentClass {
+  kUnknown,
+  kEquity,
+  kIndex,
+  kEtf,
+  kFund,
+  kDerivative,
+  kSme,
+  kOther,
+};
+
 struct Instrument {
   std::string symbol;
   std::string exchange = "NSE";
@@ -176,6 +187,7 @@ struct Instrument {
   double tick_size = 0.05;
   double freeze_quantity = 0.0;
   bool cas_eligible = false;
+  InstrumentClass instrument_class = InstrumentClass::kUnknown;
   bool eligible = false;
   std::string eligibility_reason;
 };
@@ -344,6 +356,13 @@ struct RiskDecision {
   std::string reason;
 };
 
+struct DailyRiskState {
+  std::string date;
+  Money starting_equity;
+  Money low_equity;
+  bool halted = false;
+};
+
 struct SizingInput {
   Money price;  // Intended executable price, not LTP.
   OrderSide side = OrderSide::kBuy;
@@ -369,12 +388,15 @@ SizingResult SizePosition(const Config& config, const Portfolio& portfolio,
 
 class RiskEngine {
  public:
-  explicit RiskEngine(Config config) : config_(std::move(config)) {}
+  explicit RiskEngine(Config config);
+  explicit RiskEngine(Config config, std::shared_ptr<DailyRiskState> state);
   RiskDecision Evaluate(const Signal& signal, const Quote& quote,
-                        const Portfolio& portfolio, int64_t now_ms) const;
+                        const Portfolio& portfolio, int64_t now_ms);
+  const DailyRiskState& daily_state() const { return *state_; }
 
  private:
   Config config_;
+  std::shared_ptr<DailyRiskState> state_;
 };
 
 // ---------------------------------------------------------------------------
@@ -451,12 +473,17 @@ class Journal {
   std::vector<Event> Replay(std::string* error) const;
   uint64_t next_sequence() const { return next_sequence_; }
   size_t size() const { return size_; }
+  bool healthy() const { return healthy_; }
+  void Close();
   const std::string& path() const { return path_; }
+  ~Journal();
 
  private:
   std::string path_;
   uint64_t next_sequence_ = 1;
   size_t size_ = 0;
+  bool healthy_ = false;
+  int lock_fd_ = -1;
 };
 
 // ---------------------------------------------------------------------------
@@ -590,9 +617,12 @@ bool IsStale(const Quote& quote, int64_t now_ms, int max_age_seconds);
 bool IsStaleProviderUpdate(const Quote& quote, int64_t now_ms,
                            int max_age_seconds);
 bool IsStaleTrade(const Quote& quote, int64_t now_ms, int max_age_seconds);
+bool ProviderFreshnessUnknown(const Quote& quote);
+bool TradeFreshnessUnknown(const Quote& quote);
 std::vector<Instrument> ApplyEligibility(
     std::vector<Instrument> instruments,
-    const std::vector<Instrument>& suspended, const Config& config);
+    const std::vector<Instrument>& suspended, bool status_data_available,
+    const Config& config);
 
 // ---------------------------------------------------------------------------
 // KDB-X / q time-series client. Data and analytics only: this class has no

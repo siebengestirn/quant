@@ -581,6 +581,12 @@ std::vector<Instrument> LoadUniverse(App& app, std::string* error) {
     instrument.tick_size = std::stod(fields[6]);
     instrument.cas_eligible = fields[7] == "true";
     instrument.eligible = fields[8] == "true";
+    if (fields.size() > 10) {
+      instrument.instrument_class =
+          static_cast<InstrumentClass>(std::stoi(fields[10]));
+    } else {
+      instrument.instrument_class = InstrumentClass::kEquity;
+    }
     instruments.push_back(instrument);
   }
   return instruments;
@@ -664,6 +670,7 @@ DailyReport BuildReport(App& app, bool* ok) {
     index.symbol = symbol;
     index.provider_key = key;
     index.exchange = "INDEX";
+    index.instrument_class = InstrumentClass::kIndex;
     candidates.push_back(index);
   }
 
@@ -708,15 +715,24 @@ DailyReport BuildReport(App& app, bool* ok) {
       index_it == history.end() ? 0.0 : RegimeScore(index_it->second);
 
   Portfolio paper(app.config.initial_capital);
+  RiskEngine risk(app.config);
   const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
                           std::chrono::system_clock::now().time_since_epoch())
                           .count();
   for (const Instrument& instrument : candidates) {
     auto quote_it = by_symbol.find(instrument.symbol);
-    if (quote_it == by_symbol.end() || instrument.exchange == "INDEX") {
+    if (quote_it == by_symbol.end() ||
+        instrument.instrument_class != InstrumentClass::kEquity) {
       continue;
     }
     const Quote& quote = quote_it->second;
+    const double traded_value = quote.last * quote.volume;
+    if (traded_value < app.config.min_traded_value_inr) {
+      report.rejections.push_back(instrument.symbol +
+                                  ": insufficient traded value (INR " +
+                                  std::to_string(traded_value) + ")");
+      continue;
+    }
     auto history_it = history.find(instrument.symbol);
     if (history_it == history.end() || history_it->second.size() < 130) {
       report.rejections.push_back(
@@ -749,11 +765,10 @@ DailyReport BuildReport(App& app, bool* ok) {
     signal.score = score;
     signal.features = features;
     signal.tradable = true;
-    const RiskDecision risk =
-        RiskEngine(app.config).Evaluate(signal, quote, paper, now);
-    if (!risk.approved) {
+    const RiskDecision decision = risk.Evaluate(signal, quote, paper, now);
+    if (!decision.approved) {
       report.rejections.push_back(instrument.symbol + ": risk rejected — " +
-                                  risk.reason);
+                                  decision.reason);
       continue;
     }
     CandidateReport candidate;
@@ -763,15 +778,17 @@ DailyReport BuildReport(App& app, bool* ok) {
     candidate.spread_bps = spread;
     candidate.score = score;
     candidate.strategy = signal.strategy;
-    candidate.quantity = risk.quantity;
-    candidate.notional = risk.notional;
+    candidate.quantity = decision.quantity;
+    candidate.notional = decision.notional;
     const CostBreakdown entry =
-        EstimateCosts(risk.notional, false, true, app.config.slippage_bps);
+        EstimateCosts(decision.notional, app.config.backtest_delivery, true,
+                      app.config.slippage_bps);
     const CostBreakdown exit_costs =
-        EstimateCosts(risk.notional, false, false, app.config.slippage_bps);
+        EstimateCosts(decision.notional, app.config.backtest_delivery, false,
+                      app.config.slippage_bps);
     candidate.total_cost = entry.total + exit_costs.total;
     candidate.break_even_bps =
-        BreakEvenMoveBps(risk.notional, entry, exit_costs);
+        BreakEvenMoveBps(decision.notional, entry, exit_costs);
     candidate.entry =
         "only above observed opening-range high with relative volume "
         "confirmation and verified live depth; never at market open";
