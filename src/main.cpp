@@ -1,12 +1,16 @@
 #include "quant.hpp"
 
 #include <fcntl.h>
+#include <netinet/in.h>
 #include <signal.h>
 #include <spawn.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <cctype>
+#include <array>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -82,6 +86,19 @@ void PrintHelp() {
       << "  report            print the most recent generated report\n";
 }
 
+std::string CaptureCommand(const std::string& command) {
+  std::array<char, 1024> buffer{};
+  std::string output;
+  FILE* pipe = popen(command.c_str(), "r");
+  if (pipe == nullptr) return "";
+  while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) !=
+         nullptr) {
+    output += buffer.data();
+  }
+  pclose(pipe);
+  return output;
+}
+
 std::string QBinary() {
   const char* qhome = std::getenv("QHOME");
   if (qhome != nullptr) {
@@ -102,6 +119,136 @@ bool QProcessAlive(const std::string& pid_path) {
   }
   if (text.empty()) return false;
   return std::system(("kill -0 " + text + " 2>/dev/null").c_str()) == 0;
+}
+
+struct IsolatedQ {
+  pid_t pid = -1;
+  KdbxConfig config;
+  std::string directory;
+  std::string instance_id;
+  bool owned = false;
+};
+
+int FreeLoopbackPort() {
+  const int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) return -1;
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = 0;
+  if (bind(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+    close(fd);
+    return -1;
+  }
+  sockaddr_in assigned{};
+  socklen_t length = sizeof(assigned);
+  const bool ok =
+      getsockname(fd, reinterpret_cast<sockaddr*>(&assigned), &length) == 0;
+  close(fd);
+  return ok ? ntohs(assigned.sin_port) : -1;
+}
+
+bool StartIsolatedQ(const Config& config, IsolatedQ* out, std::string* error) {
+  const int port = FreeLoopbackPort();
+  if (port < 1) {
+    *error = "cannot allocate a loopback port";
+    return false;
+  }
+  std::filesystem::create_directories(std::filesystem::path(config.data_dir) /
+                                      "db");
+  std::string pattern =
+      (std::filesystem::path(config.data_dir) / "db" / "test-XXXXXX").string();
+  std::vector<char> buffer(pattern.begin(), pattern.end());
+  buffer.push_back('\0');
+  if (mkdtemp(buffer.data()) == nullptr) {
+    *error = "cannot create isolated test directory";
+    return false;
+  }
+  out->directory = std::string(buffer.data());
+  out->config = config.kdbx;
+  out->config.port = port;
+  out->config.hdb_dir = out->directory + "/hdb";
+  out->instance_id =
+      "quant-test-" + std::to_string(getpid()) + "-" +
+      std::to_string(
+          std::chrono::steady_clock::now().time_since_epoch().count());
+  std::filesystem::create_directories(out->config.hdb_dir);
+
+  const std::string log_path = out->directory + "/q.log";
+  const int log_fd =
+      open(log_path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0600);
+  if (log_fd < 0) {
+    *error = "cannot open isolated q log";
+    return false;
+  }
+  posix_spawn_file_actions_t actions;
+  posix_spawn_file_actions_init(&actions);
+  posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0);
+  posix_spawn_file_actions_adddup2(&actions, log_fd, 1);
+  posix_spawn_file_actions_adddup2(&actions, log_fd, 2);
+  posix_spawn_file_actions_addclose(&actions, log_fd);
+
+  const std::string qbin = QBinary();
+  const std::string endpoint = out->config.host + ":" + std::to_string(port);
+  char* argv[] = {const_cast<char*>(qbin.data()),
+                  const_cast<char*>(config.kdbx.script.data()),
+                  const_cast<char*>("-p"),
+                  const_cast<char*>(endpoint.data()),
+                  const_cast<char*>("-instanceId"),
+                  const_cast<char*>(out->instance_id.data()),
+                  nullptr};
+  pid_t pid = 0;
+  const int spawn_error =
+      posix_spawn(&pid, qbin.c_str(), &actions, nullptr, argv, environ);
+  posix_spawn_file_actions_destroy(&actions);
+  close(log_fd);
+  if (spawn_error != 0) {
+    *error =
+        std::string("isolated q launch failed: ") + std::strerror(spawn_error);
+    return false;
+  }
+  out->pid = pid;
+  out->owned = true;
+
+  const std::string command =
+      CaptureCommand("ps -p " + std::to_string(pid) + " -o command=");
+  if (command.find(config.kdbx.script) == std::string::npos ||
+      command.find(endpoint) == std::string::npos ||
+      command.find(out->instance_id) == std::string::npos) {
+    *error = "isolated q process identity verification failed";
+    return false;
+  }
+
+  KdbxClient probe(out->config);
+  for (int attempt = 0; attempt < 100; ++attempt) {
+    if (probe.Connect(error)) break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+  if (!probe.connected()) return false;
+
+  std::string handshake;
+  if (!probe.QueryJson(".quant.instanceJson", &handshake, error)) return false;
+  Json parsed;
+  if (!Json::Parse(handshake, &parsed, error)) return false;
+  const Json* actual = parsed.Find("instanceId");
+  if (actual == nullptr || actual->as_string() != out->instance_id) {
+    *error = "isolated q instance id mismatch";
+    return false;
+  }
+  return true;
+}
+
+void StopIsolatedQ(IsolatedQ* isolated) {
+  if (isolated->pid > 0 && isolated->owned) {
+    kill(isolated->pid, SIGTERM);
+    int status = 0;
+    waitpid(isolated->pid, &status, 0);
+  }
+  if (!isolated->directory.empty()) {
+    std::filesystem::remove_all(isolated->directory);
+  }
+  isolated->pid = -1;
+  isolated->owned = false;
 }
 
 int CommandDb(App& app, const std::string& action) {
@@ -194,6 +341,15 @@ int CommandDb(App& app, const std::string& action) {
       std::cout << "no valid q pid file\n";
       return 0;
     }
+    const std::string command =
+        CaptureCommand("ps -p " + std::to_string(pid) + " -o command=");
+    const std::string expected_port =
+        ":" + std::to_string(app.config.kdbx.port);
+    if (command.find(app.config.kdbx.script) == std::string::npos ||
+        command.find(expected_port) == std::string::npos) {
+      std::cout << "refusing to signal unverified pid=" << pid << "\n";
+      return 1;
+    }
     if (kill(static_cast<pid_t>(pid), SIGTERM) != 0 && errno != ESRCH) {
       std::cout << "q stop failed\n";
     }
@@ -202,18 +358,29 @@ int CommandDb(App& app, const std::string& action) {
     return 0;
   }
   if (action == "verify" || action == "benchmark") {
-    KdbxClient client(app.config.kdbx);
     std::string error;
+    IsolatedQ isolated;
+    if (!StartIsolatedQ(app.config, &isolated, &error)) {
+      StopIsolatedQ(&isolated);
+      std::cout << "FAILED: " << error << "\n";
+      return 1;
+    }
+    const pid_t isolated_pid = isolated.pid;
+    const std::string instance_id = isolated.instance_id;
+    KdbxClient client(isolated.config);
     std::string report;
     const bool ok = action == "verify" ? client.SelfTest(&report, &error)
                                        : client.Benchmark(&report, &error);
+    StopIsolatedQ(&isolated);
     if (!ok) {
       std::cout << "FAILED: " << error << "\n";
       return 1;
     }
     std::cout << (action == "verify"
-                      ? "== VERIFIED: C++ to q round-trip ==\n"
-                      : "== VERIFIED: KDB-X integration benchmark ==\n")
+                      ? "== VERIFIED: isolated C++ to q round-trip ==\n"
+                      : "== VERIFIED: isolated KDB-X benchmark ==\n")
+              << "isolated_q_pid=" << isolated_pid
+              << " instance=" << instance_id << "\n"
               << report;
     return 0;
   }
@@ -414,6 +581,12 @@ std::vector<Instrument> LoadUniverse(App& app, std::string* error) {
     instrument.tick_size = std::stod(fields[6]);
     instrument.cas_eligible = fields[7] == "true";
     instrument.eligible = fields[8] == "true";
+    if (fields.size() > 10) {
+      instrument.instrument_class =
+          static_cast<InstrumentClass>(std::stoi(fields[10]));
+    } else {
+      instrument.instrument_class = InstrumentClass::kEquity;
+    }
     instruments.push_back(instrument);
   }
   return instruments;
@@ -497,6 +670,7 @@ DailyReport BuildReport(App& app, bool* ok) {
     index.symbol = symbol;
     index.provider_key = key;
     index.exchange = "INDEX";
+    index.instrument_class = InstrumentClass::kIndex;
     candidates.push_back(index);
   }
 
@@ -541,15 +715,24 @@ DailyReport BuildReport(App& app, bool* ok) {
       index_it == history.end() ? 0.0 : RegimeScore(index_it->second);
 
   Portfolio paper(app.config.initial_capital);
+  RiskEngine risk(app.config);
   const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
                           std::chrono::system_clock::now().time_since_epoch())
                           .count();
   for (const Instrument& instrument : candidates) {
     auto quote_it = by_symbol.find(instrument.symbol);
-    if (quote_it == by_symbol.end() || instrument.exchange == "INDEX") {
+    if (quote_it == by_symbol.end() ||
+        instrument.instrument_class != InstrumentClass::kEquity) {
       continue;
     }
     const Quote& quote = quote_it->second;
+    const double traded_value = quote.last * quote.volume;
+    if (traded_value < app.config.min_traded_value_inr) {
+      report.rejections.push_back(instrument.symbol +
+                                  ": insufficient traded value (INR " +
+                                  std::to_string(traded_value) + ")");
+      continue;
+    }
     auto history_it = history.find(instrument.symbol);
     if (history_it == history.end() || history_it->second.size() < 130) {
       report.rejections.push_back(
@@ -582,11 +765,10 @@ DailyReport BuildReport(App& app, bool* ok) {
     signal.score = score;
     signal.features = features;
     signal.tradable = true;
-    const RiskDecision risk =
-        RiskEngine(app.config).Evaluate(signal, quote, paper, now);
-    if (!risk.approved) {
+    const RiskDecision decision = risk.Evaluate(signal, quote, paper, now);
+    if (!decision.approved) {
       report.rejections.push_back(instrument.symbol + ": risk rejected — " +
-                                  risk.reason);
+                                  decision.reason);
       continue;
     }
     CandidateReport candidate;
@@ -596,15 +778,17 @@ DailyReport BuildReport(App& app, bool* ok) {
     candidate.spread_bps = spread;
     candidate.score = score;
     candidate.strategy = signal.strategy;
-    candidate.quantity = risk.quantity;
-    candidate.notional = risk.notional;
+    candidate.quantity = decision.quantity;
+    candidate.notional = decision.notional;
     const CostBreakdown entry =
-        EstimateCosts(risk.notional, false, true, app.config.slippage_bps);
+        EstimateCosts(decision.notional, app.config.backtest_delivery, true,
+                      app.config.slippage_bps);
     const CostBreakdown exit_costs =
-        EstimateCosts(risk.notional, false, false, app.config.slippage_bps);
+        EstimateCosts(decision.notional, app.config.backtest_delivery, false,
+                      app.config.slippage_bps);
     candidate.total_cost = entry.total + exit_costs.total;
     candidate.break_even_bps =
-        BreakEvenMoveBps(risk.notional, entry, exit_costs);
+        BreakEvenMoveBps(decision.notional, entry, exit_costs);
     candidate.entry =
         "only above observed opening-range high with relative volume "
         "confirmation and verified live depth; never at market open";

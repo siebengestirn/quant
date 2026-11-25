@@ -18,6 +18,19 @@
 
 namespace quant {
 namespace {
+const char* ProviderName(Provider provider) {
+  switch (provider) {
+    case Provider::kFyers:
+      return "FYERS";
+    case Provider::kUpstox:
+      return "UPSTOX";
+    case Provider::kZerodha:
+      return "ZERODHA";
+    case Provider::kSynthetic:
+      return "SYNTHETIC";
+  }
+  return "UNKNOWN";
+}
 
 #ifdef QUANT_HAS_KDBX
 
@@ -33,110 +46,7 @@ int DateToKxDays(const std::string& date) {
   return static_cast<int>((timegm(&tm) - 946684800) / 86400);
 }
 
-std::string KAtomToJson(K x) {
-  std::ostringstream oss;
-  switch (x->t) {
-    case KB:
-      oss << (kG(x)[0] ? "true" : "false");
-      break;
-    case KG:
-      oss << static_cast<int>(kG(x)[0]);
-      break;
-    case KH:
-      oss << kH(x)[0];
-      break;
-    case KI:
-      oss << kI(x)[0];
-      break;
-    case KJ:
-      oss << kJ(x)[0];
-      break;
-    case KE:
-      oss << kE(x)[0];
-      break;
-    case KF:
-      oss << kF(x)[0];
-      break;
-    case KC:
-      oss << '"';
-      for (size_t i = 0; i < static_cast<size_t>(x->n); ++i) {
-        const char c = kC(x)[i];
-        if (c == '"' || c == '\\') oss << '\\';
-        oss << c;
-      }
-      oss << '"';
-      break;
-    case KS:
-      oss << '"' << kS(x)[0] << '"';
-      break;
-    case KP:
-    case KM:
-    case KD:
-    case KN:
-    case KU:
-    case KV:
-    case KT:
-      oss << kJ(x)[0];
-      break;
-    default:
-      oss << "null";
-      break;
-  }
-  return oss.str();
-}
-
-std::string KToJson(K x) {
-  if (x == nullptr || x == static_cast<K>(0)) return "null";
-  if (x->t == XT) return KToJson(x->k);  // table -> dict of columns.
-  if (x->t == XD) {
-    const K keys = kK(x)[0];
-    const K values = kK(x)[1];
-    std::ostringstream oss;
-    oss << '{';
-    for (int64_t i = 0; i < keys->n; ++i) {
-      if (i > 0) oss << ',';
-      oss << '"' << kS(keys)[i] << "\":";
-      const K column = kK(values)[i];
-      if (column != nullptr && column->t > 0 && column->n == 1) {
-        oss << KAtomToJson(column);
-      } else {
-        oss << KToJson(column);
-      }
-    }
-    oss << '}';
-    return oss.str();
-  }
-  if (x->t > 0) return KAtomToJson(x);
-  std::ostringstream oss;
-  oss << '[';
-  for (int64_t i = 0; i < x->n; ++i) {
-    if (i > 0) oss << ',';
-    if (x->t == KB)
-      oss << (kG(x)[i] ? "true" : "false");
-    else if (x->t == KG)
-      oss << static_cast<int>(kG(x)[i]);
-    else if (x->t == KH)
-      oss << kH(x)[i];
-    else if (x->t == KI)
-      oss << kI(x)[i];
-    else if (x->t == KJ)
-      oss << kJ(x)[i];
-    else if (x->t == KE)
-      oss << kE(x)[i];
-    else if (x->t == KF)
-      oss << kF(x)[i];
-    else if (x->t == KS)
-      oss << '"' << kS(x)[i] << '"';
-    else if (x->t == KC)
-      oss << '"' << std::string(kC(x), kC(x) + x->n) << '"';
-    else
-      oss << "null";
-  }
-  oss << ']';
-  return oss.str();
-}
-
-#endif
+#endif  // QUANT_HAS_KDBX
 
 bool FileExists(const std::string& path) {
   return std::fopen(path.c_str(), "r") != nullptr;
@@ -325,25 +235,23 @@ bool KdbxClient::IngestQuote(const Quote& quote, uint64_t sequence,
                              const std::string& event_id, std::string* error) {
 #ifdef QUANT_HAS_KDBX
   if (!Connect(error)) return false;
-  Json::Object payload;
-  payload["seq"] = Json::Number(static_cast<double>(sequence));
-  payload["eventId"] = Json::String(event_id);
-  payload["symbol"] = Json::String(quote.symbol);
-  payload["source"] = Json::String("UPSTOX");
-  payload["exchangeNs"] = Json::Number(
-      static_cast<double>(UnixMsToKxNs(quote.exchange_timestamp_ms)));
-  payload["providerNs"] = Json::Number(
-      static_cast<double>(UnixMsToKxNs(quote.provider_timestamp_ms)));
-  payload["recvNs"] =
-      Json::Number(static_cast<double>(quote.receive_timestamp_ms));
-  payload["last"] = Json::Number(quote.last);
-  payload["bid"] = Json::Number(quote.bid);
-  payload["ask"] = Json::Number(quote.ask);
-  payload["volume"] = Json::Number(quote.volume);
-  payload["quality"] =
-      Json::String(quote.quality.empty() ? "ok" : quote.quality);
-  K argument = kp(const_cast<char*>(Json::ObjectValue(payload).Dump().c_str()));
-  return impl_->CallOk(".quant.ingestJson", argument, error);
+  // Typed KX IPC: 64-bit sequences and nanosecond timestamps remain integers.
+  // The JSON path is retained only for diagnostics and compatibility.
+  K args = knk(
+      13, kj(static_cast<long long>(sequence)),
+      ks(const_cast<char*>(event_id.c_str())),
+      ks(const_cast<char*>(quote.symbol.c_str())),
+      ks(const_cast<char*>(ProviderName(quote.source))),
+      kj(static_cast<long long>(UnixMsToKxNs(quote.exchange_timestamp_ms))),
+      kj(static_cast<long long>(UnixMsToKxNs(quote.provider_timestamp_ms))),
+      kj(static_cast<long long>(UnixMsToKxNs(
+          quote.last_trade_timestamp_ms > 0 ? quote.last_trade_timestamp_ms
+                                            : quote.exchange_timestamp_ms))),
+      kj(static_cast<long long>(quote.receive_timestamp_ms) * 1000000LL),
+      kf(quote.last), kf(quote.bid), kf(quote.ask), kf(quote.volume),
+      ks(const_cast<char*>(quote.quality.empty() ? "ok"
+                                                 : quote.quality.c_str())));
+  return impl_->CallOk(".quant.ingest", args, error);
 #else
   (void)quote;
   (void)sequence;
@@ -357,17 +265,11 @@ bool KdbxClient::IngestBar(const Candle& candle, const std::string& symbol,
                            std::string* error) {
 #ifdef QUANT_HAS_KDBX
   if (!Connect(error)) return false;
-  Json::Object payload;
-  payload["date"] =
-      Json::Number(static_cast<double>(DateToKxDays(candle.date)));
-  payload["symbol"] = Json::String(symbol);
-  payload["open"] = Json::Number(candle.open);
-  payload["high"] = Json::Number(candle.high);
-  payload["low"] = Json::Number(candle.low);
-  payload["close"] = Json::Number(candle.close);
-  payload["volume"] = Json::Number(candle.volume);
-  K argument = kp(const_cast<char*>(Json::ObjectValue(payload).Dump().c_str()));
-  return impl_->CallOk(".quant.ingestBarJson", argument, error);
+  K args =
+      knk(7, kj(static_cast<long long>(DateToKxDays(candle.date))),
+          ks(const_cast<char*>(symbol.c_str())), kf(candle.open),
+          kf(candle.high), kf(candle.low), kf(candle.close), kf(candle.volume));
+  return impl_->CallOk(".quant.ingestBar", args, error);
 #else
   (void)candle;
   (void)symbol;
@@ -379,8 +281,8 @@ bool KdbxClient::IngestBar(const Candle& candle, const std::string& symbol,
 bool KdbxClient::QueryJson(const std::string& function, std::string* out,
                            std::string* error) {
   static const std::set<std::string> kAllowed = {
-      ".quant.countsJson", ".quant.stateJson", ".quant.featuresJson",
-      ".quant.dbStatusJson", ".quant.historicalJson"};
+      ".quant.countsJson",   ".quant.stateJson",      ".quant.featuresJson",
+      ".quant.dbStatusJson", ".quant.historicalJson", ".quant.instanceJson"};
   if (kAllowed.count(function) == 0) {
     if (error) *error = "q function not whitelisted: " + function;
     return false;
@@ -388,7 +290,7 @@ bool KdbxClient::QueryJson(const std::string& function, std::string* out,
 #ifdef QUANT_HAS_KDBX
   if (!Connect(error)) return false;
   K argument = static_cast<K>(0);
-  if (function == ".quant.historicalJson") {
+  if (function == ".quant.historicalJson" || function == ".quant.recoverJson") {
     argument = ks(const_cast<char*>(impl_->config.hdb_dir.c_str()));
   }
   return impl_->CallJson(function, argument, out, error);

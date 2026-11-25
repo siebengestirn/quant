@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -75,10 +76,12 @@ Quote GoodQuote(double price = 100.0) {
   quote.ask = price + 0.05;
   quote.bid_qty = 1000;
   quote.ask_qty = 1000;
-  quote.exchange_timestamp_ms =
-      std::chrono::duration_cast<std::chrono::milliseconds>(
-          std::chrono::system_clock::now().time_since_epoch())
-          .count();
+  const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::system_clock::now().time_since_epoch())
+                          .count();
+  quote.exchange_timestamp_ms = now;
+  quote.provider_timestamp_ms = now;
+  quote.last_trade_timestamp_ms = now;
   return quote;
 }
 
@@ -95,7 +98,7 @@ Signal GoodSignal(const FeatureSet& features) {
 Config TestConfig() {
   Config config;
   config.initial_capital = Money::FromRupees(500.0);
-  config.risk_per_trade_fraction = 0.01;
+  config.risk_per_trade_fraction = 0.02;
   config.max_open_positions = 1;
   config.slippage_bps = 10.0;
   config.max_spread_bps = 35.0;
@@ -231,7 +234,7 @@ void TestAccounting() {
 
 void TestRisk() {
   const Config config = TestConfig();
-  const RiskEngine risk(config);
+  RiskEngine risk(config);
   const FeatureSet features = ComputeFeatures(SyntheticCandles(150));
   const Signal signal = GoodSignal(features);
   const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -242,7 +245,7 @@ void TestRisk() {
   Check(risk.Evaluate(signal, quote, portfolio, now).approved,
         "valid signal approved");
   Quote stale = quote;
-  stale.exchange_timestamp_ms = now - 600000;
+  stale.provider_timestamp_ms = now - 600000;
   Check(!risk.Evaluate(signal, stale, portfolio, now).approved,
         "stale data rejected");
   Quote wide = quote;
@@ -320,6 +323,7 @@ void TestJournal() {
         "journal payload roundtrip");
   Check(events[0].sequence == 1 && events[2].sequence == 3,
         "journal sequences");
+  journal.Close();
   Journal reopened;
   reopened.Open(path, &error);
   Check(reopened.next_sequence() == 4, "journal resumes sequence");
@@ -333,11 +337,45 @@ void TestJournal() {
   std::ofstream output(path);
   output << corrupted << "\n";
   output.close();
+  reopened.Close();
   Journal broken;
-  broken.Open(path, &error);
+  Check(!broken.Open(path, &error), "journal open rejects corrupt history");
   const auto replayed = broken.Replay(&error);
   Check(replayed.empty() && !error.empty(), "checksum mismatch detected");
   Check(Checksum("abc") != Checksum("abd"), "checksum differs");
+
+  const std::string lock_path = TempPath("journal_lock.jnl");
+  std::remove(lock_path.c_str());
+  Journal first_writer;
+  Check(first_writer.Open(lock_path, &error), "first writer acquires lock");
+  Journal second_writer;
+  Check(!second_writer.Open(lock_path, &error),
+        "second writer is rejected by exclusive lock");
+  first_writer.Close();
+
+  const std::string tail_path = TempPath("journal_tail.jnl");
+  std::remove(tail_path.c_str());
+  Journal tail;
+  Check(tail.Open(tail_path, &error), "tail journal opens");
+  Event tail_event;
+  tail_event.type = EventType::kHeartbeat;
+  tail_event.payload = "tail";
+  tail_event.timestamp_ms = 2000;
+  Check(tail.Append(&tail_event, &error), "tail journal append");
+  std::ifstream tail_input(tail_path, std::ios::binary);
+  std::string complete((std::istreambuf_iterator<char>(tail_input)),
+                       std::istreambuf_iterator<char>());
+  tail_input.close();
+  complete.pop_back();  // Simulate abrupt termination before the newline.
+  std::ofstream tail_output(tail_path, std::ios::binary | std::ios::trunc);
+  tail_output << complete;
+  tail_output.close();
+  tail.Close();
+  Journal truncated;
+  Check(!truncated.Open(tail_path, &error),
+        "truncated journal is rejected before append");
+  Check(error.find("incomplete trailing journal record") != std::string::npos,
+        "incomplete trailing record is explicit");
 }
 
 void TestJson() {
@@ -366,7 +404,7 @@ void TestNormalization() {
   std::string error;
   Check(Json::Parse(
             "{\"last_price\":100.5,\"volume\":1234,"
-            "\"last_trade_time\":1795400000000,"
+            "\"timestamp\":1795400000000,\"last_trade_time\":1795400000000,"
             "\"ohlc\":{\"open\":99,\"high\":101,\"low\":98,\"close\":100},"
             "\"depth\":{\"buy\":[{\"price\":100.4,\"quantity\":500}],"
             "\"sell\":[{\"price\":100.6,\"quantity\":400}]}}",
@@ -385,21 +423,39 @@ void TestNormalization() {
   std::vector<Instrument> instruments(3);
   instruments[0].symbol = "OK";
   instruments[0].security_type = "NORMAL";
+  instruments[0].instrument_class = InstrumentClass::kEquity;
   instruments[0].tick_size = 0.05;
   instruments[0].isin = "INE1";
   instruments[1].symbol = "SUSP";
   instruments[1].security_type = "NORMAL";
+  instruments[1].instrument_class = InstrumentClass::kEquity;
   instruments[1].tick_size = 0.05;
   instruments[1].isin = "INE2";
   instruments[2].symbol = "SME";
   instruments[2].security_type = "SME";
+  instruments[2].instrument_class = InstrumentClass::kSme;
   instruments[2].tick_size = 0.05;
   std::vector<Instrument> suspended(1);
   suspended[0].isin = "INE2";
-  const auto result = ApplyEligibility(instruments, suspended, TestConfig());
+  const auto result =
+      ApplyEligibility(instruments, suspended, true, TestConfig());
   Check(result[0].eligible, "normal instrument eligible");
   Check(!result[1].eligible, "suspended instrument excluded");
   Check(!result[2].eligible, "SME excluded");
+  const auto unknown_status =
+      ApplyEligibility(instruments, suspended, false, TestConfig());
+  Check(unknown_status[0].eligibility_reason.find(
+            "INELIGIBLE_PENDING_VERIFICATION") != std::string::npos,
+        "missing surveillance data fails closed");
+  Check(!unknown_status[0].eligible, "unknown status is not tradable");
+  Instrument index;
+  index.symbol = "NIFTYBANK";
+  index.instrument_class = InstrumentClass::kIndex;
+  index.security_type = "NORMAL";
+  index.tick_size = 0.05;
+  const auto with_index =
+      ApplyEligibility(std::vector<Instrument>{index}, {}, true, TestConfig());
+  Check(!with_index[0].eligible, "index instrument is not ordinary equity");
 }
 
 void TestOrders() {
@@ -483,6 +539,209 @@ void TestGunzip() {
   Check(Gunzip(bad, &error).empty(), "invalid gzip rejected");
 }
 
+void TestDailyRiskLimit() {
+  Config config = TestConfig();
+  config.max_daily_loss_fraction = 0.02;
+  auto state = std::make_shared<DailyRiskState>();
+  RiskEngine first(config, state);
+  Signal signal;
+  signal.tradable = true;
+  Portfolio opening(Money::FromRupees(1000.0));
+  const int64_t now = 1795400000000;  // 2026-11-23 UTC.
+  Check(first.Evaluate(signal, GoodQuote(50.0), opening, now).approved,
+        "daily risk baseline established");
+  Check(state->starting_equity.paise() == 100000,
+        "daily starting equity recorded");
+
+  Portfolio depleted(Money::FromRupees(970.0));  // 3% daily loss.
+  Portfolio same_day(Money::FromRupees(970.0));
+  RiskEngine restart(config, state);
+  const RiskDecision breach =
+      restart.Evaluate(signal, GoodQuote(50.0), same_day, now);
+  Check(
+      !breach.approved && breach.reason.find("daily loss") != std::string::npos,
+      "daily loss limit rejects new decisions");
+  Check(state->halted, "daily kill switch latches");
+
+  RiskEngine next_day(config, state);
+  Portfolio fresh(Money::FromRupees(970.0));
+  Check(next_day.Evaluate(signal, GoodQuote(50.0), fresh, now + 86400000)
+            .approved,
+        "new session resets daily baseline");
+  (void)depleted;
+}
+
+void TestFreshnessSemantics() {
+  const int64_t now = 1795400000000;
+  Quote quote;
+  quote.provider_timestamp_ms = now;
+  quote.last_trade_timestamp_ms = now - 600000;
+  Check(!IsStaleProviderUpdate(quote, now, 300),
+        "fresh provider update with old trade is fresh");
+  Check(IsStaleTrade(quote, now, 300), "old last trade is stale for trades");
+
+  quote.provider_timestamp_ms = now - 600000;
+  quote.last_trade_timestamp_ms = now;
+  Check(IsStaleProviderUpdate(quote, now, 300),
+        "old provider update is stale even with recent trade");
+  Check(!IsStaleTrade(quote, now, 300), "recent trade is fresh for trades");
+
+  quote.provider_timestamp_ms = 0;
+  Check(ProviderFreshnessUnknown(quote), "missing provider time is unknown");
+  quote.last_trade_timestamp_ms = 0;
+  Check(TradeFreshnessUnknown(quote), "missing last trade time is unknown");
+
+  Config config = TestConfig();
+  Portfolio portfolio(config.initial_capital);
+  Signal signal;
+  signal.tradable = true;
+  Quote unknown = GoodQuote();
+  unknown.provider_timestamp_ms = 0;
+  const int64_t risk_now =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count();
+  const RiskDecision decision =
+      RiskEngine(config).Evaluate(signal, unknown, portfolio, risk_now);
+  Check(!decision.approved &&
+            decision.reason.find("freshness unknown") != std::string::npos,
+        "risk rejects unknown feed freshness");
+}
+
+void TestDynamicSizing() {
+  const Config config = TestConfig();
+  SizingInput input;
+  input.price = Money::FromRupees(100.0);
+  input.volatility = 0.02;
+  input.available_depth = 1000;
+
+  Portfolio small(config.initial_capital);
+  const SizingResult small_result = SizePosition(config, small, input);
+  Check(small_result.quantity >= 1, "₹500 portfolio can size one share");
+
+  Portfolio large(Money::FromRupees(5000.0));
+  const SizingResult large_result = SizePosition(config, large, input);
+  Check(large_result.quantity > small_result.quantity,
+        "sizing uses current equity rather than initial capital");
+
+  Candle down;
+  down.date = "2026-11-25";
+  down.open = 100.0;
+  down.high = 100.0;
+  down.low = 80.0;
+  down.close = 80.0;
+  Check(large.Buy("DD", 10, Money::FromRupees(100.0),
+                  EstimateCosts(Money::FromRupees(1000.0), false, true, 0.0),
+                  nullptr),
+        "drawdown fixture position opened");
+  large.MarkToMarket("DD", Money::FromRupees(80.0));
+  const SizingResult after_drawdown = SizePosition(config, large, input);
+  Check(after_drawdown.quantity <= large_result.quantity,
+        "drawdown reduces position size");
+
+  Portfolio broke(Money::FromRupees(60.0));
+  const SizingResult broke_result = SizePosition(config, broke, input);
+  Check(broke_result.quantity == 0, "insufficient cash returns NO TRADE");
+  Check(broke_result.reason.find("budget") != std::string::npos,
+        "NO TRADE reason is explicit");
+}
+
+void TestSizingConstraints() {
+  const Config config = TestConfig();
+  Portfolio rich(Money::FromRupees(100000.0));
+  SizingInput input;
+  input.price = Money::FromRupees(80.0);  // Executable ask, not LTP.
+  input.stop_distance = 0.05;
+  input.available_depth = 500;
+  input.current_exposure = Money::FromRupees(0.0);
+  const SizingResult deep = SizePosition(config, rich, input);
+  Check(deep.quantity == 5, "ask depth participation caps quantity");
+
+  input.available_depth = 100000;
+  const SizingResult unrestricted = SizePosition(config, rich, input);
+  Check(unrestricted.quantity > deep.quantity,
+        "larger executable depth permits more quantity");
+  Check(unrestricted.notional.paise() ==
+            input.price.paise() * unrestricted.quantity,
+        "notional uses intended execution price");
+
+  input.stop_distance = 0.50;
+  const SizingResult wide_stop = SizePosition(config, rich, input);
+  Check(wide_stop.quantity < unrestricted.quantity,
+        "stop distance controls risk-based quantity");
+
+  Portfolio poor(Money::FromRupees(95.0));
+  SizingInput reserve_input;
+  reserve_input.price = Money::FromRupees(90.0);
+  reserve_input.stop_distance = 0.05;
+  reserve_input.available_depth = 1000;
+  const SizingResult reserved = SizePosition(config, poor, reserve_input);
+  Check(reserved.quantity == 0, "cash reserve is preserved after costs");
+
+  SizingInput tick_input = input;
+  tick_input.price = Money::FromRupees(80.01);
+  tick_input.tick_size = 1.0;
+  const SizingResult bad_tick = SizePosition(config, rich, tick_input);
+  Check(bad_tick.quantity == 0, "tick-size violation is rejected");
+
+  Portfolio exposed(Money::FromRupees(100000.0));
+  SizingInput exposure_input = input;
+  exposure_input.available_depth = 100000;
+  exposure_input.current_exposure = Money::FromRupees(79900.0);
+  const SizingResult capped = SizePosition(config, exposed, exposure_input);
+  Check(capped.quantity <= 1, "existing exposure reduces allowance");
+}
+
+void TestExecutionSemantics() {
+  Candle gap_stop;
+  gap_stop.date = "2026-11-25";
+  gap_stop.open = 100.0;
+  gap_stop.high = 101.0;
+  gap_stop.low = 90.0;
+  gap_stop.close = 99.0;
+  Check(ConservativeStopFill(100.0, gap_stop).paise() == 9500,
+        "stop crossing with recovery close fills at stop, not open");
+
+  Candle gap_down;
+  gap_down.date = "2026-11-26";
+  gap_down.open = 90.0;
+  gap_down.high = 92.0;
+  gap_down.low = 85.0;
+  gap_down.close = 88.0;
+  Check(ConservativeStopFill(100.0, gap_down).paise() == 9000,
+        "gap-down stop fills at the open");
+
+  std::vector<Candle> series;
+  for (const char* date : {"2026-01-01", "2026-01-02", "2026-01-05"}) {
+    Candle candle;
+    candle.date = date;
+    candle.open = 100.0;
+    candle.high = 101.0;
+    candle.low = 99.0;
+    candle.close = 100.0;
+    candle.volume = 1000.0;
+    series.push_back(candle);
+  }
+  Check(NextSessionIndex(series, "2026-01-01") == 1,
+        "next session uses the instrument's own calendar");
+  Check(NextSessionIndex(series, "2026-01-02") == 2,
+        "weekend gap is skipped correctly");
+  Check(NextSessionIndex(series, "2026-01-05") == series.size(),
+        "no session after final date");
+
+  std::vector<Candle> volumes;
+  for (int i = 0; i < 30; ++i) {
+    Candle candle;
+    candle.date = "2026-02-" + std::to_string(i + 1);
+    candle.volume = 1000.0;
+    volumes.push_back(candle);
+  }
+  volumes.push_back(volumes[29]);
+  volumes[30].volume = 100000000.0;  // Huge volume on the execution day.
+  Check(PriorAverageVolume(volumes, 30, 20) == 1000.0,
+        "execution-day volume does not leak into the decision");
+}
+
 void TestKdbxGate() {
   const KdbxStatus status = KdbxClient::Detect();
   Check(!status.detail.empty(), "kdbx detect returns a status");
@@ -534,6 +793,11 @@ int main() {
   TestBacktest();
   TestGunzip();
   TestCsv();
+  TestFreshnessSemantics();
+  TestDailyRiskLimit();
+  TestDynamicSizing();
+  TestSizingConstraints();
+  TestExecutionSemantics();
   TestKdbxGate();
   std::cout << "checks=" << g_checks << " failures=" << g_failures << "\n";
   return g_failures == 0 ? 0 : 1;

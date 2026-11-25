@@ -53,6 +53,13 @@ jobs:
           python3 -m pip install --quiet pytest
           python3 -m pytest tests/test_research.py tests/test_kdbx.py -q
 
+      - name: Single-file assurance gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 -m pip install --quiet black
+          python3 scripts/assurance.py check --allow-dirty
+
   sanitizers:
     name: ASan/UBSan
     runs-on: ubuntu-latest

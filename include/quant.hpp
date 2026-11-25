@@ -128,6 +128,10 @@ struct Config {
   double max_gross_exposure_fraction = 0.80;
   double cash_reserve_fraction = 0.10;
   double max_spread_bps = 35.0;
+  double max_participation_fraction = 0.01;
+  double stop_loss_fraction = 0.05;
+  bool backtest_delivery = true;
+  bool terminal_liquidation = false;
   double min_traded_value_inr = 5e6;
   double slippage_bps = 10.0;
   size_t history_days = 260;
@@ -161,6 +165,17 @@ Mode ParseMode(std::string_view text);
 // ---------------------------------------------------------------------------
 // Canonical domain models.
 // ---------------------------------------------------------------------------
+enum class InstrumentClass {
+  kUnknown,
+  kEquity,
+  kIndex,
+  kEtf,
+  kFund,
+  kDerivative,
+  kSme,
+  kOther,
+};
+
 struct Instrument {
   std::string symbol;
   std::string exchange = "NSE";
@@ -172,6 +187,7 @@ struct Instrument {
   double tick_size = 0.05;
   double freeze_quantity = 0.0;
   bool cas_eligible = false;
+  InstrumentClass instrument_class = InstrumentClass::kUnknown;
   bool eligible = false;
   std::string eligibility_reason;
 };
@@ -190,8 +206,9 @@ struct Quote {
   double high = 0.0;
   double low = 0.0;
   double close = 0.0;
-  int64_t exchange_timestamp_ms = 0;
-  int64_t provider_timestamp_ms = 0;
+  int64_t exchange_timestamp_ms = 0;    // Last exchange trade event time.
+  int64_t provider_timestamp_ms = 0;    // Provider feed update time.
+  int64_t last_trade_timestamp_ms = 0;  // Last trade time, kept distinct.
   int64_t receive_timestamp_ms =
       0;  // steady monotonic clock, never used as market time.
   uint64_t sequence = 0;
@@ -265,6 +282,7 @@ struct Ledger {
   Money unrealized_pnl;
   Money brokerage;
   Money statutory;
+  Money slippage;
   Money operating;
   Money estimated_tax;
   Money peak_equity;
@@ -306,7 +324,7 @@ class Portfolio {
   bool Sell(const std::string& symbol, int quantity, Money price,
             const CostBreakdown& costs, std::string* error);
   void MarkToMarket(const std::string& symbol, Money price);
-  void RecordOperatingExpense(Money amount);
+  bool RecordOperatingExpense(Money amount, std::string* error = nullptr);
   void RecordExternalFlow(Money amount, const std::string& reason);
 
   Money equity() const;
@@ -338,14 +356,47 @@ struct RiskDecision {
   std::string reason;
 };
 
+struct DailyRiskState {
+  std::string date;
+  Money starting_equity;
+  Money low_equity;
+  bool halted = false;
+};
+
+struct SizingInput {
+  Money price;  // Intended executable price, not LTP.
+  OrderSide side = OrderSide::kBuy;
+  double volatility = 0.0;      // Daily return standard deviation (fraction).
+  double stop_distance = 0.0;   // Explicit stop fraction; volatility if zero.
+  int64_t available_depth = 0;  // Side-specific executable depth.
+  double tick_size = 0.0;       // Instrument tick size when known.
+  double participation = 0.0;   // Optional override of the config cap.
+  Money current_exposure;       // Exposure already held by the portfolio.
+  bool delivery = false;        // Charge model used for the cash reserve.
+};
+
+struct SizingResult {
+  int quantity = 0;
+  Money notional;
+  std::string reason;
+};
+
+// Single authoritative sizing calculation shared by risk, backtest and paper.
+// Uses current verified equity, available cash, reserves, drawdown and costs.
+SizingResult SizePosition(const Config& config, const Portfolio& portfolio,
+                          const SizingInput& input);
+
 class RiskEngine {
  public:
-  explicit RiskEngine(Config config) : config_(std::move(config)) {}
+  explicit RiskEngine(Config config);
+  explicit RiskEngine(Config config, std::shared_ptr<DailyRiskState> state);
   RiskDecision Evaluate(const Signal& signal, const Quote& quote,
-                        const Portfolio& portfolio, int64_t now_ms) const;
+                        const Portfolio& portfolio, int64_t now_ms);
+  const DailyRiskState& daily_state() const { return *state_; }
 
  private:
   Config config_;
+  std::shared_ptr<DailyRiskState> state_;
 };
 
 // ---------------------------------------------------------------------------
@@ -368,13 +419,29 @@ struct BacktestMetrics {
   Money unrealized_pnl;
   Money brokerage;
   Money statutory;
+  Money slippage;
   Money max_drawdown;
+  bool terminal_liquidation = false;
+  std::vector<std::string> audit;
   double sharpe = 0.0;
   double sortino = 0.0;
   double profit_factor = 0.0;
   double cost_to_gross = 0.0;
   double final_equity = 0.0;
 };
+
+// Conservative long-stop fill: if the stop was crossed, assume the adverse
+// path occurred before any favourable move. A gap-down fills at the open.
+Money ConservativeStopFill(double entry_price, const Candle& candle,
+                           double stop_fraction = 0.05);
+
+// First session strictly after the given date, in an instrument's own series.
+size_t NextSessionIndex(const std::vector<Candle>& series,
+                        const std::string& date);
+
+// Average volume from observations strictly before the given index.
+double PriorAverageVolume(const std::vector<Candle>& series, size_t index,
+                          size_t window = 20);
 
 BacktestMetrics RunBacktest(
     const std::map<std::string, std::vector<Candle>>& history,
@@ -406,12 +473,17 @@ class Journal {
   std::vector<Event> Replay(std::string* error) const;
   uint64_t next_sequence() const { return next_sequence_; }
   size_t size() const { return size_; }
+  bool healthy() const { return healthy_; }
+  void Close();
   const std::string& path() const { return path_; }
+  ~Journal();
 
  private:
   std::string path_;
   uint64_t next_sequence_ = 1;
   size_t size_ = 0;
+  bool healthy_ = false;
+  int lock_fd_ = -1;
 };
 
 // ---------------------------------------------------------------------------
@@ -542,9 +614,15 @@ Quote NormalizeUpstoxQuote(const Json& item, const std::string& symbol,
                            const std::string& provider_key);
 double SpreadBps(const Quote& quote);
 bool IsStale(const Quote& quote, int64_t now_ms, int max_age_seconds);
+bool IsStaleProviderUpdate(const Quote& quote, int64_t now_ms,
+                           int max_age_seconds);
+bool IsStaleTrade(const Quote& quote, int64_t now_ms, int max_age_seconds);
+bool ProviderFreshnessUnknown(const Quote& quote);
+bool TradeFreshnessUnknown(const Quote& quote);
 std::vector<Instrument> ApplyEligibility(
     std::vector<Instrument> instruments,
-    const std::vector<Instrument>& suspended, const Config& config);
+    const std::vector<Instrument>& suspended, bool status_data_available,
+    const Config& config);
 
 // ---------------------------------------------------------------------------
 // KDB-X / q time-series client. Data and analytics only: this class has no
