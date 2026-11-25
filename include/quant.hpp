@@ -843,6 +843,77 @@ bool KdbxRecoveryPlan(const KdbxCheckpoint& checkpoint,
                       std::vector<Event>* replay,
                       std::string* error);
 
+// Paper execution is a local simulation. It never contacts a broker order
+// endpoint and never requires a live trading session.
+enum class PaperOrderState {
+  kIntent,
+  kRiskApproved,
+  kSubmitted,
+  kAcknowledged,
+  kWorking,
+  kPartiallyFilled,
+  kFilled,
+  kRejected,
+  kCancelled,
+  kExpired,
+  kAmbiguous,
+};
+const char* PaperOrderStateName(PaperOrderState state);
+
+struct PaperOrder {
+  std::string id;
+  std::string symbol;
+  OrderSide side = OrderSide::kBuy;
+  int quantity = 0;
+  int filled_quantity = 0;
+  Money limit_price;
+  Money average_fill;
+  PaperOrderState state = PaperOrderState::kIntent;
+  std::string reason;
+  std::vector<std::string> audit;
+};
+
+class PaperBroker {
+ public:
+  PaperBroker(Config config,
+              Journal* journal,
+              std::shared_ptr<Portfolio> portfolio);
+  PaperOrder* CreateIntent(const std::string& symbol,
+                           OrderSide side,
+                           int quantity,
+                           Money limit_price,
+                           std::string* error);
+  bool RiskApprove(const std::string& id, std::string* error);
+  bool Reject(const std::string& id,
+              const std::string& reason,
+              std::string* error);
+  bool Submit(const std::string& id, std::string* error);
+  bool Acknowledge(const std::string& id, std::string* error);
+  bool ApplyQuote(const std::string& id,
+                  const Quote& quote,
+                  int64_t now_ms,
+                  std::string* error);
+  bool Cancel(const std::string& id, std::string* error);
+  bool Expire(const std::string& id, std::string* error);
+  bool MarkAmbiguous(const std::string& id, std::string* error);
+  bool Reconcile(const std::string& id, std::string* error);
+  const PaperOrder* Find(const std::string& id) const;
+  size_t order_count() const {
+    return orders_.size();
+  }
+
+ private:
+  bool Transition(PaperOrder* order,
+                  PaperOrderState state,
+                  const std::string& reason,
+                  std::string* error);
+  Config config_;
+  Journal* journal_;
+  std::shared_ptr<Portfolio> portfolio_;
+  std::map<std::string, PaperOrder> orders_;
+  uint64_t next_id_ = 1;
+};
+
 // ---------------------------------------------------------------------------
 // Minimal JSON value + parser (no third-party dependency).
 // ---------------------------------------------------------------------------

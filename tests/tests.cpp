@@ -1088,6 +1088,92 @@ RiskSnapshot SnapshotFromState(const DailyRiskState& state) {
   return snapshot;
 }
 
+void TestPaperExecution() {
+  const std::string path = TempPath("paper_orders.jnl");
+  std::remove(path.c_str());
+  std::string error;
+  Journal journal;
+  Check(journal.Open(path, &error), "paper journal opens");
+  auto portfolio = std::make_shared<Portfolio>(Money::FromRupees(100000.0));
+  Config config = TestConfig();
+  config.max_participation_fraction = 0.5;
+  PaperBroker broker(config, &journal, portfolio);
+
+  PaperOrder* intent = broker.CreateIntent(
+      "AAA", OrderSide::kBuy, 4, Money::FromRupees(100.0), &error);
+  Check(intent != nullptr, "paper intent created");
+  Check(intent->state == PaperOrderState::kIntent, "intent starts at INTENT");
+  Check(broker.Submit(intent->id, &error) == false,
+        "unapproved intent cannot be submitted");
+  Check(broker.RiskApprove(intent->id, &error), "risk approves intent");
+  Check(broker.Submit(intent->id, &error), "approved order submitted");
+  Check(broker.Acknowledge(intent->id, &error), "submission acknowledged");
+
+  Quote above_limit = GoodQuote(100.0);
+  above_limit.symbol = "AAA";
+  above_limit.ask = 105.0;
+  Check(broker.ApplyQuote(intent->id, above_limit, 1000, &error),
+        "quote above limit is accepted without fill");
+  Check(intent->filled_quantity == 0, "no fill above limit");
+  Quote no_depth = above_limit;
+  no_depth.ask = 100.0;
+  no_depth.ask_qty = 0;
+  Check(broker.ApplyQuote(intent->id, no_depth, 1001, &error),
+        "touch without depth accepted");
+  Check(intent->filled_quantity == 0, "limit touch without depth is no fill");
+
+  Quote executable = no_depth;
+  executable.ask_qty = 6;
+  Check(broker.ApplyQuote(intent->id, executable, 1002, &error),
+        "executable quote processed");
+  Check(
+      intent->filled_quantity > 0 && intent->filled_quantity < intent->quantity,
+      "depth-capped partial fill");
+  Check(intent->state == PaperOrderState::kPartiallyFilled,
+        "partial fill state recorded");
+  Check(portfolio->open_position_count() == 0,
+        "fills are not posted before reconciliation");
+  Check(broker.ApplyQuote(intent->id, executable, 1003, &error),
+        "second quote processed");
+  Check(intent->state == PaperOrderState::kFilled, "order fully filled");
+  Check(broker.Reconcile(intent->id, &error), "fill reconciled to portfolio");
+  Check(portfolio->open_position_count() == 1,
+        "reconciliation posts one position");
+
+  PaperOrder* rejected = broker.CreateIntent(
+      "BBB", OrderSide::kBuy, 1, Money::FromRupees(10.0), &error);
+  Check(rejected != nullptr, "second intent created");
+  Check(broker.Reject(rejected->id, "test rejection", &error),
+        "order rejected");
+  Check(rejected->state == PaperOrderState::kRejected,
+        "rejected state recorded");
+  Check(broker.Submit(rejected->id, &error) == false,
+        "rejected order is terminal");
+
+  PaperOrder* cancelled = broker.CreateIntent(
+      "BBB", OrderSide::kBuy, 1, Money::FromRupees(10.0), &error);
+  Check(broker.RiskApprove(cancelled->id, &error) &&
+            broker.Submit(cancelled->id, &error) &&
+            broker.Acknowledge(cancelled->id, &error),
+        "cancel fixture working");
+  Check(broker.Cancel(cancelled->id, &error), "working order cancelled");
+  Check(cancelled->state == PaperOrderState::kCancelled,
+        "cancelled state recorded");
+
+  PaperOrder* ambiguous = broker.CreateIntent(
+      "BBB", OrderSide::kBuy, 1, Money::FromRupees(10.0), &error);
+  Check(broker.MarkAmbiguous(ambiguous->id, &error),
+        "ambiguous outcome recorded");
+  Check(!broker.Reconcile(ambiguous->id, &error),
+        "ambiguous order cannot be auto-reconciled");
+  Check(broker.Expire(ambiguous->id, &error), "expiry transition recorded");
+  Check(broker.order_count() == 4, "all paper orders retained");
+  Check(std::string(PaperOrderStateName(PaperOrderState::kAmbiguous)) ==
+            "AMBIGUOUS",
+        "state names are stable");
+  journal.Close();
+}
+
 void TestKdbxCheckpointContract() {
   const std::string path = TempPath("kdbx_checkpoint.json");
   std::remove(path.c_str());
@@ -1528,6 +1614,7 @@ int main() {
   TestExecutionSemantics();
   TestKdbxGate();
   TestKdbxCheckpointContract();
+  TestPaperExecution();
   std::cout << "checks=" << g_checks << " failures=" << g_failures << "\n";
   return g_failures == 0 ? 0 : 1;
 }
