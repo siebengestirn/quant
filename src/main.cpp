@@ -4,9 +4,11 @@
 #include <signal.h>
 #include <spawn.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <cctype>
+#include <array>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -82,6 +84,19 @@ void PrintHelp() {
       << "  report            print the most recent generated report\n";
 }
 
+std::string CaptureCommand(const std::string& command) {
+  std::array<char, 1024> buffer{};
+  std::string output;
+  FILE* pipe = popen(command.c_str(), "r");
+  if (pipe == nullptr) return "";
+  while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) !=
+         nullptr) {
+    output += buffer.data();
+  }
+  pclose(pipe);
+  return output;
+}
+
 std::string QBinary() {
   const char* qhome = std::getenv("QHOME");
   if (qhome != nullptr) {
@@ -102,6 +117,61 @@ bool QProcessAlive(const std::string& pid_path) {
   }
   if (text.empty()) return false;
   return std::system(("kill -0 " + text + " 2>/dev/null").c_str()) == 0;
+}
+
+pid_t StartIsolatedQ(const Config& config, KdbxConfig* test_config,
+                     std::string* error) {
+  *test_config = config.kdbx;
+  test_config->port = config.kdbx.port + 1;
+  test_config->hdb_dir =
+      (std::filesystem::path(config.data_dir) / "db" / "test_hdb").string();
+  const std::string log_path =
+      (std::filesystem::path(config.data_dir) / "db" / "q-test.log").string();
+  std::filesystem::create_directories(
+      std::filesystem::path(log_path).parent_path());
+  std::filesystem::create_directories(test_config->hdb_dir);
+
+  const int log_fd =
+      open(log_path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+  if (log_fd < 0) {
+    *error = "cannot open isolated q log";
+    return -1;
+  }
+  posix_spawn_file_actions_t actions;
+  posix_spawn_file_actions_init(&actions);
+  posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0);
+  posix_spawn_file_actions_adddup2(&actions, log_fd, 1);
+  posix_spawn_file_actions_adddup2(&actions, log_fd, 2);
+  posix_spawn_file_actions_addclose(&actions, log_fd);
+
+  const std::string qbin = QBinary();
+  const std::string endpoint =
+      test_config->host + ":" + std::to_string(test_config->port);
+  char* argv[] = {const_cast<char*>(qbin.data()),
+                  const_cast<char*>(config.kdbx.script.data()),
+                  const_cast<char*>("-p"), const_cast<char*>(endpoint.data()),
+                  nullptr};
+  pid_t pid = 0;
+  const int spawn_error =
+      posix_spawn(&pid, qbin.c_str(), &actions, nullptr, argv, environ);
+  posix_spawn_file_actions_destroy(&actions);
+  close(log_fd);
+  if (spawn_error != 0) {
+    *error =
+        std::string("isolated q launch failed: ") + std::strerror(spawn_error);
+    return -1;
+  }
+
+  KdbxClient probe(*test_config);
+  for (int attempt = 0; attempt < 100; ++attempt) {
+    if (probe.Connect(error)) break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+  if (!probe.connected()) {
+    kill(pid, SIGTERM);
+    return -1;
+  }
+  return pid;
 }
 
 int CommandDb(App& app, const std::string& action) {
@@ -194,6 +264,15 @@ int CommandDb(App& app, const std::string& action) {
       std::cout << "no valid q pid file\n";
       return 0;
     }
+    const std::string command =
+        CaptureCommand("ps -p " + std::to_string(pid) + " -o command=");
+    const std::string expected_port =
+        ":" + std::to_string(app.config.kdbx.port);
+    if (command.find(app.config.kdbx.script) == std::string::npos ||
+        command.find(expected_port) == std::string::npos) {
+      std::cout << "refusing to signal unverified pid=" << pid << "\n";
+      return 1;
+    }
     if (kill(static_cast<pid_t>(pid), SIGTERM) != 0 && errno != ESRCH) {
       std::cout << "q stop failed\n";
     }
@@ -202,18 +281,28 @@ int CommandDb(App& app, const std::string& action) {
     return 0;
   }
   if (action == "verify" || action == "benchmark") {
-    KdbxClient client(app.config.kdbx);
     std::string error;
+    KdbxConfig test_config;
+    const pid_t pid = StartIsolatedQ(app.config, &test_config, &error);
+    if (pid <= 0) {
+      std::cout << "FAILED: " << error << "\n";
+      return 1;
+    }
+    KdbxClient client(test_config);
     std::string report;
     const bool ok = action == "verify" ? client.SelfTest(&report, &error)
                                        : client.Benchmark(&report, &error);
+    kill(pid, SIGTERM);
+    int status = 0;
+    waitpid(pid, &status, 0);
     if (!ok) {
       std::cout << "FAILED: " << error << "\n";
       return 1;
     }
     std::cout << (action == "verify"
-                      ? "== VERIFIED: C++ to q round-trip ==\n"
-                      : "== VERIFIED: KDB-X integration benchmark ==\n")
+                      ? "== VERIFIED: isolated C++ to q round-trip ==\n"
+                      : "== VERIFIED: isolated KDB-X benchmark ==\n")
+              << "isolated_q_pid=" << pid << "\n"
               << report;
     return 0;
   }

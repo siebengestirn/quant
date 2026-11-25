@@ -14,7 +14,8 @@
 / point integer paise in C++ and is never recomputed here.
 / ---------------------------------------------------------------------------
 quotes:([]seq:`long$();eventId:`symbol$();symbol:`symbol$();source:`symbol$();
-  exchangeNs:`long$();providerNs:`long$();recvNs:`long$();
+  exchangeNs:`long$();providerNs:`long$();lastTradeNs:`long$();
+  recvNs:`long$();
   lastPx:`float$();bid:`float$();ask:`float$();volume:`float$();
   quality:`symbol$();outOfOrder:`boolean$())
 
@@ -43,7 +44,8 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
 / allows out-of-order events to be retained and flagged rather than silently
 / reordered.
 / ---------------------------------------------------------------------------
-.quant.seen:([seq:`long$()] flag:`boolean$())
+.quant.seen:([eventKey:`symbol$()] flag:`boolean$())
+.quant.eventKey:{[src;seq] `$((string src),":",string seq)}
 .quant.maxSeq:0
 .quant.duplicates:0
 .quant.outOfOrder:0
@@ -52,7 +54,7 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
   quotes::0#quotes; trades::0#trades; depth::0#depth; bars::0#bars;
   instruments::0#instruments; marketStatus::0#marketStatus;
   signals::0#signals; features::0#features;
-  .quant.seen:([seq:`long$()] flag:`boolean$());
+  .quant.seen:([eventKey:`symbol$()] flag:`boolean$());
   .quant.maxSeq:0; .quant.duplicates:0; .quant.outOfOrder:0;
   `reset}
 
@@ -62,31 +64,35 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
 .quant.ingest:{[x]
   seq:"j"$x 0; eid:.quant.asSymbol[x 1]; sym:.quant.asSymbol[x 2];
   src:.quant.asSymbol[x 3];
-  ets:"j"$x 4; pts:"j"$x 5; rns:"j"$x 6;
-  px:"f"$x 7; bid:"f"$x 8; ask:"f"$x 9; vol:"f"$x 10;
-  qual:.quant.asSymbol[x 11];
-  if[seq in key .quant.seen;
+  ets:"j"$x 4; pts:"j"$x 5; lts:"j"$x 6; rns:"j"$x 7;
+  px:"f"$x 8; bid:"f"$x 9; ask:"f"$x 10; vol:"f"$x 11;
+  qual:.quant.asSymbol[x 12];
+  ekey:.quant.eventKey[src;seq];
+  if[ekey in key .quant.seen;
      .quant.duplicates::.quant.duplicates+1;
      :`duplicate];
   ooo:seq<.quant.maxSeq;
   if[ooo; .quant.outOfOrder::.quant.outOfOrder+1];
   if[not ooo; .quant.maxSeq::seq];
-  .quant.seen[seq]:1b;
+  .quant.seen[ekey]:1b;
   quotes::quotes upsert ([]seq:enlist seq;eventId:enlist eid;symbol:enlist sym;
     source:enlist src;exchangeNs:enlist ets;providerNs:enlist pts;
-    recvNs:enlist rns;lastPx:enlist px;bid:enlist bid;ask:enlist ask;
+    lastTradeNs:enlist lts;recvNs:enlist rns;lastPx:enlist px;
+    bid:enlist bid;ask:enlist ask;
     volume:enlist vol;quality:enlist qual;outOfOrder:enlist ooo);
   `ok}
 
-.quant.ingestBar:{[d;sym;o;h;l;c;v]
-  d0:2000.01.01 + "j"$d;
+.quant.ingestBar:{[x]
+  d0:2000.01.01 + "j"$x 0;
+  sym:.quant.asSymbol[x 1];
+  o:"f"$x 2; h:"f"$x 3; l:"f"$x 4; c:"f"$x 5; v:"f"$x 6;
   bars::bars upsert ([]date:enlist d0;symbol:enlist sym;open:enlist o;
     high:enlist h;low:enlist l;close:enlist c;volume:enlist v);
   `ok}
 
 .quant.ingestStatus:{[ns;ex;st]
   marketStatus::marketStatus upsert
-    ([]ts:enlist `timestamp$(946684800000000000+ns);
+    ([]ts:enlist `timestamp$ns;
      exchange:enlist ex;status:enlist st);
   `ok}
 
@@ -96,13 +102,13 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
 .quant.ingestJson:{[s]
   d:.j.k s;
   .quant.ingest[((d`seq); `$d`eventId; `$d`symbol; `$d`source;
-    (d`exchangeNs); (d`providerNs); (d`recvNs); (d`last); (d`bid);
-    (d`ask); (d`volume); `$d`quality)]}
+    (d`exchangeNs); (d`providerNs); (d`lastTradeNs); (d`recvNs);
+    (d`last); (d`bid); (d`ask); (d`volume); `$d`quality)]}
 
 .quant.ingestBarJson:{[s]
   d:.j.k s;
-  .quant.ingestBar[2000.01.01 + "j"$(d`date); `$d`symbol;
-    (d`open); (d`high); (d`low); (d`close); (d`volume)]}
+  .quant.ingestBar[((d`date); `$d`symbol; (d`open); (d`high);
+    (d`low); (d`close); (d`volume))]}
 
 / ---------------------------------------------------------------------------
 / Auditable query surface. Only these functions are exposed over IPC; no
@@ -122,18 +128,53 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
 .quant.quoteRange:{[lo;hi] select from quotes where seq>=lo,seq<=hi}
 
 / q owns historical time-series feature generation (no Python reimplementation).
-.quant.featureTable:{[]
-  select date,symbol,
-    ret20:(close%mavg[20;close])-1,
-    ret60:(close%mavg[60;close])-1,
-    ret120:(close%mavg[120;close])-1,
-    vol20:mdev[20;close]%mavg[20;close],
-    volSurprise:(volume%mavg[20;volume])-1,
-    vwapDev:(close%mavg[20;(high+low+close)%3])-1
-  from bars}
+/ Returns use closing prices n sessions apart: P_t/P_(t-n)-1.
+/ Realized volatility is the standard deviation of daily simple returns.
+/ VWAP is volume-weighted price, not a moving average of typical price.
+.quant.safeRet:{[c;n;k]
+  if[n<=k; :0f];
+  base:c[(n-1)-k];
+  if[base<=0; :0f];
+  :((c[n-1])%base)-1}
 
-.quant.rollingVwap:{[sym;n]
-  select date,symbol,vwap:mavg[n;(high+low+close)%3] from bars where symbol=sym}
+.quant.symbolFeatures:{[sym]
+  b:select from bars where symbol=sym;
+  n:count b;
+  if[n<2; :()];
+  c:b`close; v:b`volume;
+  r:1_((c%prev c)-1);
+  avgv:$[n>=20; last mavg[20;v]; 0f];
+  vwv:$[n>=20; last mavg[20;c*v]; 0f];
+  vw:$[avgv>0; vwv%avgv; c[n-1]];
+  (`date`symbol`ret20`ret60`ret120`vol20`volSurprise`vwapDev)!
+    (last b`date; sym; .quant.safeRet[c;n;20];
+     .quant.safeRet[c;n;60]; .quant.safeRet[c;n;120];
+     dev r; $[avgv>0; ((last v)%avgv)-1; 0f];
+     $[vw>0; ((last c)%vw)-1; 0f])}
+
+.quant.featureTable:{[]
+  rows:.quant.symbolFeatures each distinct bars`symbol;
+  rows:rows where (count each rows)>0;
+  if[0=count rows; :()];
+  :raze {[row]
+    ([]date:enlist row`date; symbol:enlist row`symbol;
+      ret20:enlist row`ret20; ret60:enlist row`ret60;
+      ret120:enlist row`ret120; vol20:enlist row`vol20;
+      volSurprise:enlist row`volSurprise;
+      vwapDev:enlist row`vwapDev)} each rows}
+
+.quant.asofFeatures:{[]
+  q:select seq,symbol,ts:`timestamp$exchangeNs,lastPx from quotes;
+  f:.quant.featureTable[];
+  if[0=count q; :`no_data];
+  if[0=count f; :`no_data];
+  / Daily features are available only after the session close: timestamp them
+  / at the following session boundary so intraday quotes cannot see future data.
+  f2:select symbol,
+    ts:`timestamp$((`long$date+1)*86400000000000),
+    ret20,vol20 from f;
+  f2:`symbol`ts xasc f2;
+  :aj[`symbol`ts; q; f2]}
 
 / Market breadth proxy: fraction of symbols above their 20-session mean.
 .quant.breadth:{[]
@@ -141,14 +182,8 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
   if[0=count f; :`no_data];
   (`long$sum f`ret20>0)%count f}
 
-/ Simple as-of join of features to quotes, preserving source timestamps.
-.quant.asofFeatures:{[]
-  q:select seq,symbol,exchangeNs,lastPx from quotes;
-  f:select date,symbol,ret20,vol20 from .quant.featureTable[];
-  if[0=count q; :`no_data];
-  if[0=count f; :`no_data];
-  q aj.j from q}
-
+/ As-of join of features to quotes. Daily features are available only after
+/ the session close, so they are timestamped at the next session boundary.
 / ---------------------------------------------------------------------------
 / Historical persistence: date-partitioned on reconciled quote date.
 / HDB path is supplied by the caller; all writes are explicit and auditable.
@@ -162,6 +197,7 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
   (.quant.filePath[root;`quotes]) set quotes;
   (.quant.filePath[root;`bars]) set bars;
   (.quant.filePath[root;`features]) set .quant.featureTable[];
+  (.quant.filePath[root;`seen]) set .quant.seen;
   (.quant.filePath[root;`meta]) set (.quant.state[]; .quant.counts[]);
   `persisted}
 
@@ -171,7 +207,8 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
   hBars:get .quant.filePath[root;`bars];
   hFeatures:get .quant.filePath[root;`features];
   hMeta:get .quant.filePath[root;`meta];
-  `quotes`bars`features`meta!(hQuotes;hBars;hFeatures;hMeta)}
+  hSeen:get .quant.filePath[root;`seen];
+  `quotes`bars`features`seen`meta!(hQuotes;hBars;hFeatures;hSeen;hMeta)}
 
 .quant.dbStatus:{[]
   `version`schemaVersion`tables!(".quant.version";.quant.schemaVersion;

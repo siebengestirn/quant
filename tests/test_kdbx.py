@@ -55,14 +55,62 @@ def test_cpp_to_q_roundtrip(q_server):
 
 
 def test_pykx_reads_same_events(q_server):
-    code, out = run([str(QUANT), "db", "verify"], timeout=90)
+    script = """
+import json
+import pykx as kx
+
+def ingest(seq, seq_id, price):
+    with kx.SyncQConnection(host="127.0.0.1", port=5001) as q:
+        q(".quant.ingest", [seq, kx.SymbolAtom(seq_id),
+                            kx.SymbolAtom("TEST"), kx.SymbolAtom("UPSTOX"),
+                            946684800000000000, 946684800000000001,
+                            946684800000000000, 123, price, price - 0.05,
+                            price + 0.05, 1000.0, kx.SymbolAtom("ok")])
+
+with kx.SyncQConnection(host="127.0.0.1", port=5001) as q:
+    q(".quant.reset[]")
+ingest(1, "e1", 100.0)
+ingest(2, "e2", 101.0)
+ingest(0, "e0", 99.0)
+ingest(2, "e2", 101.0)
+with kx.SyncQConnection(host="127.0.0.1", port=5001) as q:
+    print(json.dumps({"state": q(".quant.state[]").py(),
+                      "counts": q(".quant.counts[]").py()}))
+"""
+    python = ROOT / "data" / "venv" / "bin" / "python"
+    code, out = run([str(python), "-c", script])
     assert code == 0, out
+    report = json.loads(out.strip().splitlines()[-1])
+    assert report["state"]["duplicates"] == 1
+    assert report["state"]["outOfOrder"] == 1
+    assert report["counts"]["quotes"] == 3
     code, out = run(["python3", str(RESEARCH), "--kdbx-check"], timeout=90)
     assert code == 0, out
-    report = json.loads(out[out.index("{") :])
-    assert all(item["status"] == "VERIFIED" for item in report.values())
-    state = report[".quant.state[]"]["value"]
-    assert state["duplicates"] == 1 and state["outOfOrder"] == 1
+    statuses = json.loads(out[out.index("{") :])
+    assert all(item["status"] == "VERIFIED" for item in statuses.values())
+
+
+def test_q_feature_math_matches_fixture(q_server):
+    script = """
+import json
+import pykx as kx
+
+with kx.SyncQConnection(host="127.0.0.1", port=5001) as q:
+    q(".quant.reset[]")
+    for i in range(21):
+        q(".quant.ingestBar", [9845 + i, kx.SymbolAtom("FIX"),
+                               100.0 + i, 101.0 + i, 99.0 + i,
+                               100.0 + i, 1000.0 + i])
+    rows = q(".quant.featureTable[]").py()
+    sys_out = {"ret20": rows["ret20"][0], "vwapDev": rows["vwapDev"][0]}
+    print(json.dumps(sys_out))
+"""
+    python = ROOT / "data" / "venv" / "bin" / "python"
+    code, out = run([str(python), "-c", script])
+    assert code == 0, out
+    values = json.loads(out.strip().splitlines()[-1])
+    assert abs(values["ret20"] - 0.2) < 1e-9
+    assert 0.0 <= values["vwapDev"] < 1.0
 
 
 def test_benchmark_records_latency(q_server):

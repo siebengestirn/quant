@@ -1,7 +1,8 @@
 # QUANT correctness sprint — GATE 0 baseline
 
 Date: 2026-11-25T08:45:07Z
-Commit: `48b3a95ebcefaab5333e85d932943527c75ad10e` (branch `main` at baseline; work continues on `correctness/gate0`)
+Commit: `48b3a95ebcefaab5333e85d932943527c75ad10e` (branch `main` at
+baseline; work continues on `correctness/gate0`)
 Working tree: clean apart from two untracked prompt-clipping backups, copied to
 `data/prompts/` (ignored) for session continuity.
 
@@ -44,7 +45,8 @@ Local KDB-X integration (macOS):
 - C++: domain, journal, accounting, risk, execution, event identity.
 - KDB-X/q: analytical time series only; reconstructible from journal.
 - Python: research only; no execution authority.
-- No live orders, no account changes, no paid services, no reset of production data.
+- No live orders, no account changes, no paid services, no reset of
+  production data.
 
 ## Task states
 

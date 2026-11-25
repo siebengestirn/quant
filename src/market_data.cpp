@@ -159,9 +159,12 @@ Quote NormalizeUpstoxQuote(const Json& item, const std::string& symbol,
   quote.last = last == nullptr ? 0.0 : last->as_double(0.0);
   const Json* volume = item.Find("volume");
   quote.volume = volume == nullptr ? 0.0 : volume->as_double(0.0);
-  const Json* time = item.Find("last_trade_time");
-  quote.exchange_timestamp_ms = time == nullptr ? 0 : time->as_int(0);
-  quote.provider_timestamp_ms = quote.exchange_timestamp_ms;
+  // Upstox provides distinct feed-update and last-trade times. Keep both.
+  const Json* update = item.Find("timestamp");
+  const Json* trade = item.Find("last_trade_time");
+  quote.provider_timestamp_ms = update == nullptr ? 0 : update->as_int(0);
+  quote.last_trade_timestamp_ms = trade == nullptr ? 0 : trade->as_int(0);
+  quote.exchange_timestamp_ms = quote.last_trade_timestamp_ms;
   if (const Json* ohlc = item.Find("ohlc")) {
     quote.open = ohlc->Find("open") != nullptr
                      ? ohlc->Find("open")->as_double(0.0)
@@ -211,10 +214,25 @@ double SpreadBps(const Quote& quote) {
                    : std::numeric_limits<double>::infinity();
 }
 
+bool IsStaleProviderUpdate(const Quote& quote, int64_t now_ms,
+                           int max_age_seconds) {
+  const int64_t reference = quote.provider_timestamp_ms > 0
+                                ? quote.provider_timestamp_ms
+                                : quote.exchange_timestamp_ms;
+  if (reference <= 0) return true;
+  return now_ms - reference > static_cast<int64_t>(max_age_seconds) * 1000;
+}
+
+bool IsStaleTrade(const Quote& quote, int64_t now_ms, int max_age_seconds) {
+  const int64_t reference = quote.last_trade_timestamp_ms > 0
+                                ? quote.last_trade_timestamp_ms
+                                : quote.exchange_timestamp_ms;
+  if (reference <= 0) return true;
+  return now_ms - reference > static_cast<int64_t>(max_age_seconds) * 1000;
+}
+
 bool IsStale(const Quote& quote, int64_t now_ms, int max_age_seconds) {
-  if (quote.exchange_timestamp_ms <= 0) return true;
-  return now_ms - quote.exchange_timestamp_ms >
-         static_cast<int64_t>(max_age_seconds) * 1000;
+  return IsStaleProviderUpdate(quote, now_ms, max_age_seconds);
 }
 
 std::vector<Instrument> ApplyEligibility(

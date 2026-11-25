@@ -81,6 +81,13 @@ data.
   batched IPC writes, multi-process TP/RDB/HDB deployment.
 - **REGULATORY/EXECUTION:** unchanged — Zerodha live orders remain locked.
 
+## Correctness sprint continuation (2026-11-25)
+
+- Baseline and reproduced P0 findings: `docs/correctness-baseline-2026-11-25.md`.
+- Fixes, evidence and remaining blockers: `docs/correctness-fixes-2026-11-25.md`.
+- Work continues on branch `correctness/gate0`; default branch and live execution
+  remain unchanged and locked.
+
 ## Label legend
 VERIFIED — directly observed. ESTIMATED — modelled. SIMULATED — synthetic/no
 live orders.

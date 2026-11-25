@@ -8,13 +8,16 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <iterator>
 #include <limits>
 #include <numeric>
 #include <set>
 #include <sstream>
+#include <unistd.h>
 
 namespace quant {
 namespace {
@@ -490,6 +493,7 @@ Portfolio::Portfolio(Money initial_capital) {
   ledger_.unrealized_pnl = Money::FromRupees(0.0);
   ledger_.brokerage = Money::FromRupees(0.0);
   ledger_.statutory = Money::FromRupees(0.0);
+  ledger_.slippage = Money::FromRupees(0.0);
   ledger_.operating = Money::FromRupees(0.0);
   ledger_.estimated_tax = Money::FromRupees(0.0);
   ledger_.peak_equity = initial_capital;
@@ -533,6 +537,7 @@ bool Portfolio::Buy(const std::string& symbol, int quantity, Money price,
   ledger_.brokerage += costs.brokerage;
   ledger_.statutory += costs.stt + costs.exchange_fee + costs.gst + costs.sebi +
                        costs.stamp + costs.dp;
+  ledger_.slippage += costs.slippage;
   ++ledger_.trade_count;
   audit_.push_back("BUY " + symbol + " qty=" + std::to_string(quantity) +
                    " price_paise=" + std::to_string(price.paise()) +
@@ -561,6 +566,7 @@ bool Portfolio::Sell(const std::string& symbol, int quantity, Money price,
   ledger_.brokerage += costs.brokerage;
   ledger_.statutory += costs.stt + costs.exchange_fee + costs.gst + costs.sebi +
                        costs.stamp + costs.dp;
+  ledger_.slippage += costs.slippage;
   ++ledger_.trade_count;
   it->second.quantity -= quantity;
   if (it->second.quantity == 0) {
@@ -589,10 +595,19 @@ void Portfolio::MarkToMarket(const std::string& symbol, Money price) {
   if (current > ledger_.peak_equity) ledger_.peak_equity = current;
 }
 
-void Portfolio::RecordOperatingExpense(Money amount) {
+bool Portfolio::RecordOperatingExpense(Money amount, std::string* error) {
+  if (amount < Money::FromRupees(0.0)) {
+    if (error) *error = "operating expense must be non-negative";
+    return false;
+  }
+  if (amount > ledger_.cash) {
+    if (error) *error = "operating expense exceeds available cash";
+    return false;
+  }
   ledger_.cash -= amount;
   ledger_.operating += amount;
   audit_.push_back("OPERATING_EXPENSE " + std::to_string(amount.paise()));
+  return true;
 }
 
 void Portfolio::RecordExternalFlow(Money amount, const std::string& reason) {
@@ -614,6 +629,69 @@ double Portfolio::drawdown_fraction() const {
   if (ledger_.peak_equity <= Money::FromRupees(0.0)) return 0.0;
   return static_cast<double>(drawdown().paise()) /
          static_cast<double>(ledger_.peak_equity.paise());
+}
+
+// ---------------------------------------------------------------------------
+// Shared position sizing. All consumers must use this function so simulated,
+// paper and future execution environments allocate capital identically.
+// ---------------------------------------------------------------------------
+SizingResult SizePosition(const Config& config, const Portfolio& portfolio,
+                          const SizingInput& input) {
+  SizingResult result;
+  result.notional = Money::FromRupees(0.0);
+  if (input.price <= Money::FromRupees(0.0)) {
+    result.reason = "invalid price";
+    return result;
+  }
+  const Money equity = portfolio.equity();
+  if (equity <= Money::FromRupees(0.0)) {
+    result.reason = "non-positive equity";
+    return result;
+  }
+  const double drawdown_scale =
+      std::max(0.0, 1.0 - portfolio.drawdown_fraction() /
+                              std::max(config.max_drawdown_fraction, 0.0001));
+  if (drawdown_scale <= 0.0) {
+    result.reason = "drawdown limit reached";
+    return result;
+  }
+  const double price = input.price.rupees();
+  const double risk_budget =
+      equity.rupees() * config.risk_per_trade_fraction * drawdown_scale;
+  const double risk_per_share = price * std::max(input.volatility, 0.005) * 2.0;
+  const double reserve = equity.rupees() * config.cash_reserve_fraction;
+  const double spendable =
+      std::max(0.0, portfolio.available_cash().rupees() - reserve);
+  const double exposure_cap =
+      equity.rupees() * config.max_gross_exposure_fraction / price;
+  const double participation = input.participation > 0.0
+                                   ? input.participation
+                                   : config.max_participation_fraction;
+  const double depth_cap =
+      input.available_depth > 0
+          ? static_cast<double>(input.available_depth) * participation
+          : std::numeric_limits<double>::infinity();
+
+  int quantity = static_cast<int>(
+      std::floor(std::min({risk_budget / risk_per_share, spendable / price,
+                           exposure_cap, depth_cap})));
+  while (quantity > 0) {
+    const Money notional =
+        Money::FromPaise(input.price.paise() * static_cast<int64_t>(quantity));
+    const CostBreakdown costs =
+        EstimateCosts(notional, input.delivery, true, config.slippage_bps);
+    if (notional + costs.total <= portfolio.available_cash()) break;
+    --quantity;
+  }
+  if (quantity < 1) {
+    result.reason = "minimum one share violates risk/cash/liquidity budget";
+    return result;
+  }
+  result.quantity = quantity;
+  result.notional =
+      Money::FromPaise(input.price.paise() * static_cast<int64_t>(quantity));
+  result.reason = "approved: current-equity sizing within all limits";
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -652,36 +730,17 @@ RiskDecision RiskEngine::Evaluate(const Signal& signal, const Quote& quote,
     return reject("maximum drawdown reached");
   }
 
-  const double price = quote.last;
-  const Money equity = portfolio.equity();
-  const Money reserve =
-      Money::FromRupees(equity.rupees() * config_.cash_reserve_fraction);
-  const double risk_budget = std::min(
-      config_.initial_capital.rupees() * config_.risk_per_trade_fraction,
-      equity.rupees() * config_.risk_per_trade_fraction);
-  const double vol = std::max(signal.features.vol20, 0.005);
-  const double risk_per_share = price * vol * 2.0;  // 2-sigma daily move.
-  if (!(risk_per_share > 0.0)) return reject("invalid volatility estimate");
-
-  const double risk_qty = std::floor(risk_budget / risk_per_share);
-  const double spendable =
-      std::max(0.0, portfolio.available_cash().rupees() - reserve.rupees());
-  const double cash_qty =
-      std::floor(spendable / (price * (1.0 + config_.slippage_bps / 10000.0)));
-  const double exposure_cap =
-      std::floor(equity.rupees() * config_.max_gross_exposure_fraction / price);
-  const double quantity =
-      std::min({risk_qty, cash_qty, exposure_cap,
-                static_cast<double>(quote.bid_qty > 0 ? quote.bid_qty : 0)});
-  if (!(quantity >= 1.0)) {
-    return reject("minimum one share violates risk/cash/liquidity budget");
-  }
+  SizingInput sizing;
+  sizing.price = Money::FromRupees(quote.last);
+  sizing.volatility = signal.features.vol20;
+  sizing.available_depth = quote.bid_qty;
+  const SizingResult sized = SizePosition(config_, portfolio, sizing);
+  if (sized.quantity < 1) return reject(sized.reason);
 
   decision.approved = true;
-  decision.quantity = static_cast<int>(quantity);
-  decision.notional = Money::FromRupees(price * decision.quantity);
-  decision.reason =
-      "approved: vol-adjusted qty within cash and exposure limits";
+  decision.quantity = sized.quantity;
+  decision.notional = sized.notional;
+  decision.reason = sized.reason;
   return decision;
 }
 
@@ -814,6 +873,22 @@ double EnsembleScore(const FeatureSet& f, double regime) {
 // ---------------------------------------------------------------------------
 // Deterministic event-driven backtester.
 // ---------------------------------------------------------------------------
+Money ConservativeStopFill(double entry_price, const Candle& candle) {
+  const double stop_price = entry_price * 0.95;
+  if (candle.low <= stop_price) {
+    return Money::FromRupees(std::min(candle.open, stop_price));
+  }
+  return Money::FromRupees(candle.open);
+}
+
+size_t NextSessionIndex(const std::vector<Candle>& series,
+                        const std::string& date) {
+  for (size_t i = 0; i < series.size(); ++i) {
+    if (series[i].date > date) return i;
+  }
+  return series.size();
+}
+
 BacktestMetrics RunBacktest(
     const std::map<std::string, std::vector<Candle>>& history,
     const Config& config) {
@@ -865,7 +940,8 @@ BacktestMetrics RunBacktest(
           if (current_index >=
                   entry_index + static_cast<size_t>(hold_sessions) ||
               stop) {
-            const Money exit_price = Money::FromRupees(candle.open);
+            const Money exit_price =
+                ConservativeStopFill(entry_price.rupees(), candle);
             auto position = portfolio.positions().find(open_symbol);
             if (position != portfolio.positions().end()) {
               const int qty = position->second.quantity;
@@ -922,46 +998,31 @@ BacktestMetrics RunBacktest(
     }
 
     if (!best_symbol.empty()) {
-      const std::string& execution_date = ordered_dates[day + 1];
       auto series_it = history.find(best_symbol);
-      double execution_price = 0.0;
-      size_t execution_index = 0;
-      if (series_it != history.end()) {
-        for (size_t i = 0; i < series_it->second.size(); ++i) {
-          if (series_it->second[i].date == execution_date) {
-            execution_price = series_it->second[i].open;
-            execution_index = i;
-            break;
-          }
-        }
-      }
-      if (execution_price > 0.0) {
-        const double risk_budget =
-            config.initial_capital.rupees() * config.risk_per_trade_fraction;
-        const auto features = ComputeFeatures([&] {
-          std::vector<Candle> window;
-          for (const Candle& candle : series_it->second) {
-            if (candle.date <= decision_date) window.push_back(candle);
-          }
-          return window;
-        }());
-        const double vol = std::max(features.vol20, 0.005);
-        const double qty_double = std::min(
-            risk_budget / (execution_price * vol * 2.0),
-            (portfolio.available_cash().rupees() * 0.85) / execution_price);
-        const int qty = static_cast<int>(std::floor(qty_double));
-        if (qty >= 1) {
-          const Money price = Money::FromRupees(execution_price);
+      const auto& series = series_it->second;
+      const size_t execution_index = NextSessionIndex(series, decision_date);
+      if (execution_index < series.size() &&
+          series[execution_index].open > 0.0) {
+        const Candle& execution_candle = series[execution_index];
+        std::vector<Candle> window(series.begin(),
+                                   series.begin() + execution_index);
+        const FeatureSet features = ComputeFeatures(window);
+        SizingInput sizing;
+        sizing.price = Money::FromRupees(execution_candle.open);
+        sizing.volatility = features.vol20;
+        sizing.available_depth = static_cast<int64_t>(execution_candle.volume);
+        const SizingResult sized = SizePosition(config, portfolio, sizing);
+        if (sized.quantity >= 1) {
+          const Money price = Money::FromRupees(execution_candle.open);
           const CostBreakdown costs =
-              EstimateCosts(Money::FromPaise(price.paise() * qty), false, true,
-                            config.slippage_bps);
+              EstimateCosts(sized.notional, false, true, config.slippage_bps);
           std::string error;
-          if (portfolio.Buy(best_symbol, qty, price, costs, &error)) {
+          if (portfolio.Buy(best_symbol, sized.quantity, price, costs,
+                            &error)) {
             open_symbol = best_symbol;
             entry_index = execution_index;
             entry_price = price;
             hold_sessions = 3;
-            metrics.net_pnl -= costs.total;
           }
         }
       }
@@ -984,18 +1045,21 @@ BacktestMetrics RunBacktest(
   metrics.unrealized_pnl = portfolio.ledger().unrealized_pnl;
   metrics.brokerage = portfolio.ledger().brokerage;
   metrics.statutory = portfolio.ledger().statutory;
+  metrics.slippage = portfolio.ledger().slippage;
   metrics.open_positions = portfolio.open_position_count();
+  metrics.audit = portfolio.audit();
   metrics.final_equity = portfolio.equity().rupees();
   metrics.profit_factor =
       gross_losses > 0
           ? static_cast<double>(gross_wins) / static_cast<double>(gross_losses)
           : (gross_wins > 0 ? 999.0 : 0.0);
   const double gross = std::abs(metrics.gross_pnl.rupees());
-  metrics.cost_to_gross =
-      gross > 0.0 ? std::abs(portfolio.ledger().brokerage.rupees() +
-                             portfolio.ledger().statutory.rupees()) /
-                        gross
-                  : 0.0;
+  metrics.cost_to_gross = gross > 0.0
+                              ? std::abs(portfolio.ledger().brokerage.rupees() +
+                                         portfolio.ledger().statutory.rupees() +
+                                         portfolio.ledger().slippage.rupees()) /
+                                    gross
+                              : 0.0;
   std::vector<double> returns;
   for (size_t i = 1; i < equity_curve.size(); ++i) {
     if (equity_curve[i - 1] > 0.0) {
@@ -1085,19 +1149,19 @@ bool Journal::Open(const std::string& path, std::string* error) {
     std::string directory = path_.substr(0, slash);
     std::filesystem::create_directories(directory);
   }
-  std::ifstream input(path_);
-  std::string line;
-  uint64_t maximum = 0;
-  while (std::getline(input, line)) {
-    if (!line.empty()) ++size_;
-    const size_t pipe = line.find('|');
-    if (pipe == std::string::npos) continue;
-    uint64_t sequence = 0;
-    if (ParseUnsigned64(line.substr(0, pipe), &sequence)) {
-      maximum = std::max(maximum, sequence);
+  if (std::filesystem::exists(path_)) {
+    std::string replay_error;
+    const std::vector<Event> existing = Replay(&replay_error);
+    if (!replay_error.empty()) {
+      if (error) *error = "journal validation failed: " + replay_error;
+      return false;
     }
+    size_ = existing.size();
+    next_sequence_ = existing.empty() ? 1 : existing.back().sequence + 1;
+  } else {
+    size_ = 0;
+    next_sequence_ = 1;
   }
-  next_sequence_ = maximum + 1;
   if (error) error->clear();
   return true;
 }
@@ -1121,19 +1185,35 @@ bool Journal::Append(Event* event, std::string* error) {
             << event->payload;
   event->checksum = ChecksumHex(canonical.str());
 
-  std::ofstream output(path_, std::ios::app);
-  if (!output.is_open()) {
+  // Durability boundary: the record is acknowledged only after fsync succeeds.
+  const std::string record =
+      std::to_string(event->sequence) + '|' + event->id + '|' +
+      std::to_string(static_cast<int>(event->type)) + '|' +
+      std::to_string(event->timestamp_ms) + '|' +
+      std::to_string(event->schema_version) + '|' + HexEncode(event->payload) +
+      '|' + event->checksum + '\n';
+  const int fd = open(path_.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+  if (fd < 0) {
     if (error) *error = "cannot open journal for append";
     return false;
   }
-  output << event->sequence << '|' << event->id << '|'
-         << static_cast<int>(event->type) << '|' << event->timestamp_ms << '|'
-         << event->schema_version << '|' << HexEncode(event->payload) << '|'
-         << event->checksum << '\n';
-  if (!output.good()) {
-    if (error) *error = "journal write failed";
+  size_t written = 0;
+  while (written < record.size()) {
+    const ssize_t count =
+        write(fd, record.data() + written, record.size() - written);
+    if (count <= 0) {
+      close(fd);
+      if (error) *error = "journal write failed";
+      return false;
+    }
+    written += static_cast<size_t>(count);
+  }
+  if (fsync(fd) != 0) {
+    close(fd);
+    if (error) *error = "journal fsync failed";
     return false;
   }
+  close(fd);
   ++size_;
   if (error) error->clear();
   return true;
@@ -1141,14 +1221,24 @@ bool Journal::Append(Event* event, std::string* error) {
 
 std::vector<Event> Journal::Replay(std::string* error) const {
   std::vector<Event> events;
-  std::ifstream input(path_);
+  std::ifstream input(path_, std::ios::binary);
   if (!input.is_open()) {
     if (error) *error = "cannot open journal for replay";
     return events;
   }
+  const std::string content((std::istreambuf_iterator<char>(input)),
+                            std::istreambuf_iterator<char>());
+  if (!content.empty() && content.back() != '\n') {
+    if (error) *error = "incomplete trailing journal record";
+    return {};
+  }
+  std::vector<std::string> lines;
   std::string line;
+  std::istringstream stream(content);
+  while (std::getline(stream, line)) lines.push_back(line);
   uint64_t expected = 1;
-  while (std::getline(input, line)) {
+  for (const std::string& record : lines) {
+    line = record;
     if (line.empty()) continue;
     std::vector<std::string> fields;
     std::stringstream ss(line);
