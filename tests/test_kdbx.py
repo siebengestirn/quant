@@ -54,10 +54,17 @@ class IsolatedQ:
     owned: bool = True
 
 
+def q_runtime_available() -> bool:
+    qhome = os.environ.get("QHOME", "")
+    return bool(qhome) and (Path(qhome) / "bin" / "q").exists()
+
+
 @pytest.fixture(scope="module")
 def isolated_q():
     qhome = os.environ.get("QHOME", "")
-    qbin = Path(qhome) / "bin" / "q" if qhome else Path()
+    if not qhome:
+        pytest.skip("KDB-X q runtime not available")
+    qbin = Path(qhome) / "bin" / "q"
     if not QUANT.exists():
         pytest.skip("build/quant not present; run cmake build first")
     if not qbin.exists():
@@ -126,6 +133,8 @@ with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
 
 
 def test_cpp_verify_uses_isolated_instance():
+    if not q_runtime_available():
+        pytest.skip("KDB-X q runtime not available")
     code, out = run([str(QUANT), "db", "verify"], timeout=90)
     assert code == 0, out
     assert "isolated C++ to q round-trip" in out
@@ -194,6 +203,8 @@ with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
 
 
 def test_production_service_unchanged():
+    if not q_runtime_available():
+        pytest.skip("KDB-X q runtime not available")
     code, before = run([str(QUANT), "db", "status"], timeout=30)
     if code != 0 or "connected=false" in before:
         pytest.skip("no production q instance to compare")
@@ -210,6 +221,8 @@ def test_production_service_unchanged():
 
 
 def test_benchmark_is_isolated():
+    if not q_runtime_available():
+        pytest.skip("KDB-X q runtime not available")
     code, out = run([str(QUANT), "db", "benchmark"], timeout=180)
     assert code == 0, out
     assert "instance=quant-test-" in out
