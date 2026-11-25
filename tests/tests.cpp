@@ -167,7 +167,19 @@ void TestCosts() {
       EstimateCosts(Money::FromRupees(100000.0), false, false, 0.0);
   Near(capped.brokerage.rupees(), 20.0, 0.01,
        "intraday brokerage capped at 20");
-  Near(intraday.stt.rupees(), 2.5, 0.01, "intraday sell STT 0.025%");
+  Near(intraday.stt.rupees(), 3.0, 0.01,
+       "intraday sell STT rounds 2.50 up to 3 rupees");
+  const CostBreakdown small_delivery =
+      EstimateCosts(Money::FromRupees(500.0), true, true, 0.0);
+  Near(small_delivery.stt.rupees(), 1.0, 0.01,
+       "₹500 delivery STT rounds 0.50 up to 1 rupee");
+  CostAggregator agg;
+  const CostBreakdown first =
+      agg.Estimate(Money::FromRupees(1000.0), true, false, 0.0, "X", "D1");
+  const CostBreakdown second =
+      agg.Estimate(Money::FromRupees(1000.0), true, false, 0.0, "X", "D1");
+  Near(first.dp.rupees(), 15.34, 0.01, "first delivery sell incurs DP");
+  Check(second.dp.paise() == 0, "second same-day sell has no DP charge");
   Check(intraday.stamp.paise() == 0, "no stamp on intraday sell");
   Check(intraday.dp.paise() == 0, "no DP on intraday sell");
   const CostBreakdown small =
@@ -608,6 +620,35 @@ void TestFreshnessSemantics() {
         "risk rejects unknown feed freshness");
 }
 
+void TestHighWaterAndMoneyBounds() {
+  Portfolio portfolio(Money::FromRupees(500.0));
+  std::string error;
+  Check(portfolio.Buy("X", 1, Money::FromRupees(100.0),
+                      EstimateCosts(Money::FromRupees(100.0), false, true, 0.0),
+                      &error),
+        "high-water fixture buy");
+  Check(portfolio.MarkToMarket("X", Money::FromRupees(120.0), &error),
+        "high-water fixture mark");
+  const Money peak_before = portfolio.ledger().peak_equity;
+  Check(portfolio.Sell(
+            "X", 1, Money::FromRupees(120.0),
+            EstimateCosts(Money::FromRupees(120.0), false, false, 0.0), &error),
+        "high-water fixture profitable close");
+  Check(portfolio.ledger().peak_equity >= peak_before,
+        "profitable close does not leave peak below equity");
+  Check(portfolio.drawdown().paise() >= 0, "drawdown is never negative");
+
+  Money parsed;
+  Check(Money::TryFromRupees(123.45, &parsed) && parsed.paise() == 12345,
+        "checked rupee conversion");
+  Check(
+      !Money::TryFromRupees(std::numeric_limits<double>::quiet_NaN(), &parsed),
+      "NaN money rejected");
+  Check(!Money::TryFromRupees(std::numeric_limits<double>::infinity(), &parsed),
+        "infinite money rejected");
+  Check(!Money::TryFromRupees(1e20, &parsed), "out-of-range money rejected");
+}
+
 void TestDynamicSizing() {
   const Config config = TestConfig();
   SizingInput input;
@@ -795,6 +836,7 @@ int main() {
   TestCsv();
   TestFreshnessSemantics();
   TestDailyRiskLimit();
+  TestHighWaterAndMoneyBounds();
   TestDynamicSizing();
   TestSizingConstraints();
   TestExecutionSemantics();

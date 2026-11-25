@@ -933,40 +933,58 @@ int CommandReplay(App& app) {
   return 0;
 }
 
-Portfolio RebuildPortfolio(App& app) {
+bool RebuildPortfolio(App& app, Portfolio* out, std::string* error) {
   Portfolio portfolio(app.config.initial_capital);
-  std::string error;
-  for (const Event& event : app.journal.Replay(&error)) {
+  const std::vector<Event> events = app.journal.Replay(error);
+  if (!error->empty()) return false;
+  for (const Event& event : events) {
     if (event.type != EventType::kAccounting) continue;
     Json payload;
-    if (!Json::Parse(event.payload, &payload, nullptr)) continue;
+    if (!Json::Parse(event.payload, &payload, error)) return false;
     const Json* action = payload.Find("action");
     const Json* symbol = payload.Find("symbol");
     const Json* qty = payload.Find("qty");
     const Json* price = payload.Find("price_paise");
     if (action == nullptr || symbol == nullptr || qty == nullptr ||
         price == nullptr) {
-      continue;
+      *error = "accounting event " + std::to_string(event.sequence) +
+               " is missing required fields";
+      return false;
     }
     const Money value = Money::FromPaise(price->as_int(0));
     const int quantity = static_cast<int>(qty->as_int(0));
+    bool posted = false;
     if (action->as_string() == "BUY") {
-      portfolio.Buy(symbol->as_string(), quantity, value,
-                    EstimateCosts(Money::FromPaise(value.paise() * quantity),
-                                  false, true, app.config.slippage_bps),
-                    nullptr);
+      const CostBreakdown costs =
+          EstimateCosts(Money::FromPaise(value.paise() * quantity), false, true,
+                        app.config.slippage_bps);
+      posted =
+          portfolio.Buy(symbol->as_string(), quantity, value, costs, error);
     } else if (action->as_string() == "SELL") {
-      portfolio.Sell(symbol->as_string(), quantity, value,
-                     EstimateCosts(Money::FromPaise(value.paise() * quantity),
-                                   false, false, app.config.slippage_bps),
-                     nullptr);
+      const CostBreakdown costs =
+          EstimateCosts(Money::FromPaise(value.paise() * quantity), false,
+                        false, app.config.slippage_bps);
+      posted =
+          portfolio.Sell(symbol->as_string(), quantity, value, costs, error);
     } else if (action->as_string() == "EXPENSE") {
-      portfolio.RecordOperatingExpense(value);
+      posted = portfolio.RecordOperatingExpense(value, error);
     } else if (action->as_string() == "FLOW") {
       portfolio.RecordExternalFlow(value, "external flow observed");
+      posted = true;
+    } else {
+      *error = "unknown accounting action at sequence " +
+               std::to_string(event.sequence);
+      return false;
+    }
+    if (!posted) {
+      *error = "accounting replay failed at sequence " +
+               std::to_string(event.sequence) + ": " + *error;
+      return false;
     }
   }
-  return portfolio;
+  *out = portfolio;
+  error->clear();
+  return true;
 }
 
 int CommandPaper(App& app) {
@@ -976,7 +994,12 @@ int CommandPaper(App& app) {
     std::cout << "PAPER: no action — " << report.decision_reason << "\n";
     return 2;
   }
-  Portfolio portfolio = RebuildPortfolio(app);
+  Portfolio portfolio;
+  std::string replay_error;
+  if (!RebuildPortfolio(app, &portfolio, &replay_error)) {
+    std::cout << "FAILED: portfolio replay — " << replay_error << "\n";
+    return 1;
+  }
   std::cout << "== SIMULATED: paper pass, no broker orders ==\n";
   std::cout << "market_status=" << report.market_status << "\n";
   if (report.candidates.empty()) {
@@ -1013,7 +1036,12 @@ int CommandPaper(App& app) {
 }
 
 int CommandPortfolio(App& app) {
-  const Portfolio portfolio = RebuildPortfolio(app);
+  Portfolio portfolio;
+  std::string replay_error;
+  if (!RebuildPortfolio(app, &portfolio, &replay_error)) {
+    std::cout << "FAILED: portfolio replay — " << replay_error << "\n";
+    return 1;
+  }
   const Ledger ledger = portfolio.ledger();
   std::cout << "== VERIFIED: event-sourced ledger (SIMULATED unless paper "
                "fills) ==\n";

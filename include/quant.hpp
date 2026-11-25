@@ -12,6 +12,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -28,6 +29,7 @@ class Money {
   constexpr Money() : paise_(0) {}
   static constexpr Money FromPaise(int64_t paise) { return Money(paise); }
   static Money FromRupees(double rupees);
+  static bool TryFromRupees(double rupees, Money* out);
   constexpr int64_t paise() const { return paise_; }
   double rupees() const { return static_cast<double>(paise_) / 100.0; }
 
@@ -308,7 +310,17 @@ struct CostBreakdown {
 // Transaction costs. C++ is authoritative for all financial arithmetic.
 // ---------------------------------------------------------------------------
 CostBreakdown EstimateCosts(Money turnover, bool delivery, bool is_buy,
-                            double slippage_bps);
+                            double slippage_bps, bool charge_dp = true);
+
+class CostAggregator {
+ public:
+  CostBreakdown Estimate(Money turnover, bool delivery, bool is_buy,
+                         double slippage_bps, const std::string& symbol,
+                         const std::string& session);
+
+ private:
+  std::set<std::string> dp_charged_;
+};
 double BreakEvenMoveBps(Money notional, const CostBreakdown& entry,
                         const CostBreakdown& exit_costs);
 std::string FormatCosts(const CostBreakdown& costs);
@@ -318,12 +330,14 @@ std::string FormatCosts(const CostBreakdown& costs);
 // ---------------------------------------------------------------------------
 class Portfolio {
  public:
+  Portfolio();
   explicit Portfolio(Money initial_capital);
   bool Buy(const std::string& symbol, int quantity, Money price,
            const CostBreakdown& costs, std::string* error);
   bool Sell(const std::string& symbol, int quantity, Money price,
             const CostBreakdown& costs, std::string* error);
-  void MarkToMarket(const std::string& symbol, Money price);
+  bool MarkToMarket(const std::string& symbol, Money price,
+                    std::string* error = nullptr);
   bool RecordOperatingExpense(Money amount, std::string* error = nullptr);
   void RecordExternalFlow(Money amount, const std::string& reason);
 
@@ -341,6 +355,8 @@ class Portfolio {
   const std::vector<std::string>& audit() const { return audit_; }
 
  private:
+  void UpdatePeakEquity();
+
   Ledger ledger_;
   std::map<std::string, Position> positions_;
   std::vector<std::string> audit_;
@@ -422,6 +438,7 @@ struct BacktestMetrics {
   Money slippage;
   Money max_drawdown;
   bool terminal_liquidation = false;
+  std::vector<std::string> warnings;
   std::vector<std::string> audit;
   double sharpe = 0.0;
   double sortino = 0.0;

@@ -96,8 +96,11 @@ def features(rows: list[dict[str, float]], index: int) -> dict[str, float]:
     ]
     vols = volume[-20:]
     avg_volume = statistics.fmean(vols) if vols else 0.0
-    vwap_window = list(zip(close[-20:], volume[-20:]))
-    weighted = sum(price * size for price, size in vwap_window)
+    vwap_window = window[-20:]
+    typical = [
+        (row["high"] + row["low"] + row["close"]) / 3.0 for row in vwap_window
+    ]
+    weighted = sum(price * size for price, size in zip(typical, volume[-20:]))
     daily_vwap = weighted / sum(vols) if sum(vols) > 0 else close[-1]
     sma20 = statistics.fmean(recent) if recent else 0.0
     sma60 = statistics.fmean(close[-60:]) if len(close) >= 60 else 0.0

@@ -1,0 +1,28 @@
+# QUANT financial-integrity remediation — 2026-11-26
+
+Branch: `fix/financial-integrity`. Baseline: merged `main` at `fccd5c9`.
+All statuses below are `TESTED`; implementing-agent evidence is not independent
+acceptance.
+
+| ID | Finding | Implementation | Verification | Status |
+|---|---|---|---|---|
+| F-001 | Peak equity was not updated after a profitable sale, allowing negative drawdown and oversized risk | Added `UpdatePeakEquity()` called after Buy, Sell, mark-to-market, expenses and external flows; `drawdown()` clamps to zero | `TestHighWaterAndMoneyBounds` checks profitable close, peak and non-negative drawdown | TESTED |
+| F-002 | Money conversion and multiplication were unchecked | Added `TryFromRupees`, `CheckedMultiply` and `CheckedAdd`; Buy, Sell and mark-to-market reject overflow | NaN, infinity, out-of-range and overflow tests | TESTED |
+| F-003a | STT rounded to paise instead of nearest rupee | Delivery and intraday STT rounded to the nearest rupee with 50 paise rounded up | ₹500 delivery STT = ₹1; ₹10,000 intraday sell STT = ₹3 | TESTED |
+| F-003b | DP charged on every delivery sell call | Added `CostAggregator` keyed by symbol and session; DP charged once per scrip per day | Two same-day sells of one symbol: DP once | TESTED |
+| F-004 | Ledger invariants were implicit | Equity identity, cost-basis separation and high-water update are now tested after every mutation path | Existing accounting tests plus high-water tests | TESTED |
+| F-005 | Event-sourced replay silently ignored malformed or failed postings | `RebuildPortfolio` now returns success/failure, propagates journal and JSON errors, and fails on an unknown or failed posting | `portfolio` CLI fails closed on replay error | TESTED |
+| B-004 | Terminal liquidation mutated the map while iterating; equity curve omitted terminal postings | Snapshot positions before liquidation; push terminal equity; collect warnings | Full C++ suite passes | TESTED |
+| D-001 | Research report embedded an older backtest result | Regenerated `backtest.json`, `backtest.md` and `research.md` from the same current run | Both report files now show 9 trades and net −₹10.56 | TESTED |
+| K-001 | Feature VWAP definitions diverged across C++, q and Python | Canonical daily VWAP proxy = volume-weighted typical price `(H+L+C)/3` over 20 sessions in all three implementations | q fixture loads and C++/Python tests pass | TESTED |
+
+## Remaining limitations
+
+- **BLOCKED:** F-006 durable daily-risk state across process restart.
+- **NOT IMPLEMENTED:** operational q startup recovery, real provider-to-q
+  ingestion, FYERS adapter, point-in-time universe, genuine paper execution.
+- **INCONCLUSIVE:** no alpha evidence. Current standalone backtest is
+  approximately −₹10.56 net after corrected STT/DP treatment; no strategy
+  acceptance is implied.
+- q tests may be skipped when the runtime is absent; a skip is not a pass.
+- Live execution remains locked. Current decision remains NO TRADE.

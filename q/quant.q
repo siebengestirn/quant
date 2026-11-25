@@ -154,11 +154,12 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
   if[base<=0; :0f];
   :((c[n-1])%base)-1}
 
-.quant.featureAt:{[c;v;dates;i;sym]
+.quant.featureAt:{[c;v;tp;dates;i;sym]
   cp:c[til i+1]; vp:v[til i+1]; n:i+1;
   r:1_((cp%prev cp)-1);
   avgv:$[n>=20; last mavg[20;vp]; 0f];
-  vwv:$[n>=20; last mavg[20;cp*vp]; 0f];
+  tpv:tp[til i+1];
+  vwv:$[n>=20; last mavg[20;tpv*vp]; 0f];
   vw:$[avgv>0; vwv%avgv; cp[n-1]];
   avail:$[n<count dates; dates[n]; dates[n-1]+1];
   featureTs:`timestamp$((`long$avail)*86400000000000);
@@ -176,6 +177,7 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
   if[n<2; :()];
   rows:(); i:0;
   do[n; rows:rows,enlist .quant.featureAt[exec close from b;exec volume from b;
+        (exec high from b)+(exec low from b)+(exec close from b)%3;
         exec date from b;i;sym];
       i:i+1];
   :rows}
