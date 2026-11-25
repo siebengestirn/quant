@@ -1088,6 +1088,104 @@ RiskSnapshot SnapshotFromState(const DailyRiskState& state) {
   return snapshot;
 }
 
+class RecordingPublisher : public MarketDataPublisher {
+ public:
+  bool PublishQuote(const Quote& quote,
+                    uint64_t sequence,
+                    const std::string& event_id,
+                    std::string* error) override {
+    if (fail_after >= 0 && quotes >= static_cast<size_t>(fail_after)) {
+      if (error)
+        *error = "injected publisher failure";
+      return false;
+    }
+    ++quotes;
+    last_sequence = sequence;
+    last_event_id = event_id;
+    last_symbol = quote.symbol;
+    return true;
+  }
+  bool PublishBar(const Candle& candle,
+                  const std::string& symbol,
+                  std::string* error) override {
+    if (fail_after >= 0 && bars >= static_cast<size_t>(fail_after)) {
+      if (error)
+        *error = "injected publisher failure";
+      return false;
+    }
+    ++bars;
+    last_symbol = symbol;
+    last_close = candle.close;
+    return true;
+  }
+  size_t quotes = 0;
+  size_t bars = 0;
+  int fail_after = -1;
+  uint64_t last_sequence = 0;
+  std::string last_event_id;
+  std::string last_symbol;
+  double last_close = 0.0;
+};
+
+void TestMarketDataPipeline() {
+  const std::string path = TempPath("market_pipeline.jnl");
+  std::remove(path.c_str());
+  std::string error;
+  Journal journal;
+  Check(journal.Open(path, &error), "pipeline journal opens");
+  MarketDataPipeline pipeline(&journal);
+
+  Quote invalid = GoodQuote(100.0);
+  invalid.bid = 0.0;
+  Check(!pipeline.IngestQuote(invalid, &error),
+        "canonical quote rejects missing depth");
+  Quote quote = GoodQuote(100.0);
+  quote.symbol = "AAA";
+  quote.provider_key = "UPSTOX:AAA";
+  quote.exchange_timestamp_ms = 1000;
+  quote.provider_timestamp_ms = 1001;
+  quote.receive_timestamp_ms = 1002;
+  Check(pipeline.IngestQuote(quote, &error), "canonical quote journalled");
+  Candle candle;
+  candle.date = "2026-11-26";
+  candle.open = 100.0;
+  candle.high = 102.0;
+  candle.low = 99.0;
+  candle.close = 101.0;
+  candle.volume = 1000.0;
+  Check(pipeline.IngestBar(candle, "AAA", &error), "canonical bar journalled");
+  Check(journal.Replay(&error).size() == 2,
+        "journal holds exactly the committed market events");
+
+  KdbxCheckpoint checkpoint;
+  checkpoint.journal_watermark = 0;
+  RecordingPublisher publisher;
+  const PipelineResult first = pipeline.Publish(checkpoint, &publisher, &error);
+  Check(first.status == PipelineStatus::kComplete,
+        "pipeline publishes committed events");
+  Check(publisher.quotes == 1 && publisher.bars == 1,
+        "one quote and one bar projected");
+  Check(publisher.last_sequence == 1 && !publisher.last_event_id.empty(),
+        "event identity and sequence survive projection");
+
+  checkpoint.journal_watermark = 2;
+  RecordingPublisher second_publisher;
+  const PipelineResult second =
+      pipeline.Publish(checkpoint, &second_publisher, &error);
+  Check(second.status == PipelineStatus::kComplete && second.published == 0,
+        "checkpoint watermark prevents duplicate publication");
+
+  RecordingPublisher failing;
+  failing.fail_after = 0;
+  const PipelineResult failed =
+      pipeline.Publish(KdbxCheckpoint(), &failing, &error);
+  Check(failed.status == PipelineStatus::kFailed,
+        "publisher failure propagates as FAILED");
+  Check(std::string(PipelineStatusName(PipelineStatus::kFailed)) == "FAILED",
+        "pipeline status names are stable");
+  journal.Close();
+}
+
 void TestPaperExecution() {
   const std::string path = TempPath("paper_orders.jnl");
   std::remove(path.c_str());
@@ -1615,6 +1713,7 @@ int main() {
   TestKdbxGate();
   TestKdbxCheckpointContract();
   TestPaperExecution();
+  TestMarketDataPipeline();
   std::cout << "checks=" << g_checks << " failures=" << g_failures << "\n";
   return g_failures == 0 ? 0 : 1;
 }

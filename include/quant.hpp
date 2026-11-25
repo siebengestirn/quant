@@ -843,6 +843,46 @@ bool KdbxRecoveryPlan(const KdbxCheckpoint& checkpoint,
                       std::vector<Event>* replay,
                       std::string* error);
 
+// Canonical market-data pipeline. Provider adapters produce validated domain
+// events; the journal is the durability boundary; a publisher projects those
+// committed events into KDB-X. No provider transport is implemented here.
+class MarketDataPublisher {
+ public:
+  virtual ~MarketDataPublisher() = default;
+  virtual bool PublishQuote(const Quote& quote,
+                            uint64_t sequence,
+                            const std::string& event_id,
+                            std::string* error) = 0;
+  virtual bool PublishBar(const Candle& candle,
+                          const std::string& symbol,
+                          std::string* error) = 0;
+};
+
+enum class PipelineStatus { kComplete, kPartial, kFailed, kBlocked };
+const char* PipelineStatusName(PipelineStatus status);
+
+struct PipelineResult {
+  PipelineStatus status = PipelineStatus::kBlocked;
+  size_t published = 0;
+  size_t skipped = 0;
+  std::string detail;
+};
+
+class MarketDataPipeline {
+ public:
+  explicit MarketDataPipeline(Journal* journal);
+  bool IngestQuote(const Quote& quote, std::string* error);
+  bool IngestBar(const Candle& candle,
+                 const std::string& symbol,
+                 std::string* error);
+  PipelineResult Publish(const KdbxCheckpoint& checkpoint,
+                         MarketDataPublisher* publisher,
+                         std::string* error);
+
+ private:
+  Journal* journal_;
+};
+
 // Paper execution is a local simulation. It never contacts a broker order
 // endpoint and never requires a live trading session.
 enum class PaperOrderState {
