@@ -1088,6 +1088,53 @@ RiskSnapshot SnapshotFromState(const DailyRiskState& state) {
   return snapshot;
 }
 
+void TestKdbxCheckpointContract() {
+  const std::string path = TempPath("kdbx_checkpoint.json");
+  std::remove(path.c_str());
+  std::string error;
+  KdbxCheckpoint checkpoint;
+  checkpoint.journal_watermark = 7;
+  checkpoint.quote_count = 12;
+  checkpoint.bar_count = 3;
+  checkpoint.feature_count = 2;
+  checkpoint.complete = true;
+  checkpoint.runtime_version = "q-4.2.0";
+  checkpoint.created_at_ms = 1000;
+  Check(SaveKdbxCheckpoint(path, checkpoint, &error),
+        "complete checkpoint saved");
+  KdbxCheckpoint loaded;
+  Check(LoadKdbxCheckpoint(path, &loaded, &error),
+        "checkpoint loads with valid checksum");
+  Check(loaded.journal_watermark == 7 && loaded.quote_count == 12,
+        "checkpoint fields round trip");
+  std::vector<Event> journal;
+  for (uint64_t sequence = 1; sequence <= 10; ++sequence) {
+    Event event;
+    event.sequence = sequence;
+    event.type = sequence % 2 == 0 ? EventType::kQuote : EventType::kCandle;
+    journal.push_back(event);
+  }
+  std::vector<Event> replay;
+  Check(KdbxRecoveryPlan(loaded, journal, &replay, &error),
+        "recovery plan built from checkpoint watermark");
+  Check(replay.size() == 3 && replay.front().sequence == 8,
+        "only post-watermark events are replayed");
+  KdbxCheckpoint ahead = loaded;
+  ahead.journal_watermark = 11;
+  Check(!KdbxRecoveryPlan(ahead, journal, &replay, &error),
+        "watermark beyond journal is rejected");
+  KdbxCheckpoint incomplete = loaded;
+  incomplete.complete = false;
+  Check(!SaveKdbxCheckpoint(path, incomplete, &error),
+        "incomplete checkpoint is never committed");
+  std::ofstream corrupt(path, std::ios::trunc);
+  corrupt << "garbage";
+  corrupt.close();
+  Check(!LoadKdbxCheckpoint(path, &loaded, &error),
+        "corrupt checkpoint is rejected");
+  std::remove(path.c_str());
+}
+
 void TestRiskPersistence() {
   const std::string journal_path = TempPath("risk_state.jnl");
   const std::string snapshot_path = TempPath("risk_state.snap");
@@ -1480,6 +1527,7 @@ int main() {
   TestSizingConstraints();
   TestExecutionSemantics();
   TestKdbxGate();
+  TestKdbxCheckpointContract();
   std::cout << "checks=" << g_checks << " failures=" << g_failures << "\n";
   return g_failures == 0 ? 0 : 1;
 }

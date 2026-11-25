@@ -817,6 +817,32 @@ class Journal {
   int lock_fd_ = -1;
 };
 
+// KDB-X is a materialised analytical projection of the C++ journal. A
+// checkpoint records the exact journal watermark it represents; recovery
+// replays only events committed after that watermark.
+struct KdbxCheckpoint {
+  uint64_t version = 1;
+  uint64_t journal_watermark = 0;
+  uint64_t quote_count = 0;
+  uint64_t bar_count = 0;
+  uint64_t feature_count = 0;
+  bool complete = false;
+  std::string runtime_version;
+  int64_t created_at_ms = 0;
+  std::string checksum;
+};
+std::string KdbxCheckpointCanonical(const KdbxCheckpoint& checkpoint);
+bool SaveKdbxCheckpoint(const std::string& path,
+                        const KdbxCheckpoint& checkpoint,
+                        std::string* error);
+bool LoadKdbxCheckpoint(const std::string& path,
+                        KdbxCheckpoint* checkpoint,
+                        std::string* error);
+bool KdbxRecoveryPlan(const KdbxCheckpoint& checkpoint,
+                      const std::vector<Event>& journal,
+                      std::vector<Event>* replay,
+                      std::string* error);
+
 // ---------------------------------------------------------------------------
 // Minimal JSON value + parser (no third-party dependency).
 // ---------------------------------------------------------------------------

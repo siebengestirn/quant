@@ -825,6 +825,173 @@ std::string FormatCosts(const CostBreakdown& costs) {
 }
 
 // ---------------------------------------------------------------------------
+// KDB-X checkpoint contract.
+// ---------------------------------------------------------------------------
+std::string KdbxCheckpointCanonical(const KdbxCheckpoint& checkpoint) {
+  std::ostringstream oss;
+  oss << checkpoint.version << '|' << checkpoint.journal_watermark << '|'
+      << checkpoint.quote_count << '|' << checkpoint.bar_count << '|'
+      << checkpoint.feature_count << '|' << (checkpoint.complete ? 1 : 0) << '|'
+      << checkpoint.runtime_version << '|' << checkpoint.created_at_ms;
+  return oss.str();
+}
+
+bool SaveKdbxCheckpoint(const std::string& path,
+                        const KdbxCheckpoint& checkpoint,
+                        std::string* error) {
+  if (path.empty() || checkpoint.version != 1 || !checkpoint.complete) {
+    if (error)
+      *error = "incomplete or unsupported KDB-X checkpoint";
+    return false;
+  }
+  KdbxCheckpoint committed = checkpoint;
+  committed.checksum = ChecksumHex(KdbxCheckpointCanonical(committed));
+  const std::string temporary = path + ".tmp";
+  const int fd =
+      open(temporary.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+  if (fd < 0) {
+    if (error)
+      *error = "cannot create KDB-X checkpoint";
+    return false;
+  }
+  const std::string payload =
+      Json::ObjectValue(
+          {{"version", Json::Number(committed.version)},
+           {"journal_watermark", Json::Number(committed.journal_watermark)},
+           {"quote_count", Json::Number(committed.quote_count)},
+           {"bar_count", Json::Number(committed.bar_count)},
+           {"feature_count", Json::Number(committed.feature_count)},
+           {"complete", Json::Bool(committed.complete)},
+           {"runtime_version", Json::String(committed.runtime_version)},
+           {"created_at_ms", Json::Number(committed.created_at_ms)},
+           {"checksum", Json::String(committed.checksum)}})
+          .Dump();
+  size_t written = 0;
+  while (written < payload.size()) {
+    const ssize_t count =
+        write(fd, payload.data() + written, payload.size() - written);
+    if (count < 0 && errno == EINTR)
+      continue;
+    if (count <= 0) {
+      close(fd);
+      if (error)
+        *error = "KDB-X checkpoint write failed";
+      return false;
+    }
+    written += static_cast<size_t>(count);
+  }
+  if (fsync(fd) != 0 || close(fd) != 0 ||
+      rename(temporary.c_str(), path.c_str()) != 0) {
+    close(fd);
+    if (error)
+      *error = "KDB-X checkpoint commit failed";
+    return false;
+  }
+  if (error)
+    error->clear();
+  return true;
+}
+
+bool LoadKdbxCheckpoint(const std::string& path,
+                        KdbxCheckpoint* checkpoint,
+                        std::string* error) {
+  if (checkpoint == nullptr) {
+    if (error)
+      *error = "checkpoint output is null";
+    return false;
+  }
+  std::ifstream input(path);
+  if (!input.is_open()) {
+    if (error)
+      *error = "KDB-X checkpoint not found";
+    return false;
+  }
+  const std::string content((std::istreambuf_iterator<char>(input)),
+                            std::istreambuf_iterator<char>());
+  Json parsed;
+  if (!Json::Parse(content, &parsed, error))
+    return false;
+  auto number = [&parsed](const char* key, uint64_t* out) {
+    const Json* value = parsed.Find(key);
+    if (value == nullptr || value->type() != Json::Type::kNumber)
+      return false;
+    const double raw = value->as_double(-1.0);
+    if (raw < 0.0 || raw > 9.0e15)
+      return false;
+    *out = static_cast<uint64_t>(raw);
+    return true;
+  };
+  const Json* complete = parsed.Find("complete");
+  const Json* version_text = parsed.Find("runtime_version");
+  const Json* checksum = parsed.Find("checksum");
+  if (complete == nullptr || complete->type() != Json::Type::kBool ||
+      version_text == nullptr || version_text->type() != Json::Type::kString ||
+      checksum == nullptr || checksum->type() != Json::Type::kString)
+    return false;
+  KdbxCheckpoint loaded;
+  if (!number("version", &loaded.version) ||
+      !number("journal_watermark", &loaded.journal_watermark) ||
+      !number("quote_count", &loaded.quote_count) ||
+      !number("bar_count", &loaded.bar_count) ||
+      !number("feature_count", &loaded.feature_count))
+    return false;
+  loaded.complete = complete->as_bool();
+  loaded.runtime_version = version_text->as_string();
+  loaded.checksum = checksum->as_string();
+  const Json* created = parsed.Find("created_at_ms");
+  if (created == nullptr || created->type() != Json::Type::kNumber)
+    return false;
+  loaded.created_at_ms = created->as_int(0);
+  if (loaded.version != 1 || !loaded.complete ||
+      loaded.runtime_version.empty() ||
+      loaded.checksum != ChecksumHex(KdbxCheckpointCanonical(loaded))) {
+    if (error)
+      *error = "KDB-X checkpoint failed validation";
+    return false;
+  }
+  *checkpoint = loaded;
+  if (error)
+    error->clear();
+  return true;
+}
+
+bool KdbxRecoveryPlan(const KdbxCheckpoint& checkpoint,
+                      const std::vector<Event>& journal,
+                      std::vector<Event>* replay,
+                      std::string* error) {
+  if (replay == nullptr) {
+    if (error)
+      *error = "replay output is null";
+    return false;
+  }
+  replay->clear();
+  if (!checkpoint.complete || checkpoint.version != 1) {
+    if (error)
+      *error = "checkpoint is incomplete";
+    return false;
+  }
+  uint64_t observed = 0;
+  for (const Event& event : journal)
+    observed = std::max(observed, event.sequence);
+  if (checkpoint.journal_watermark > observed) {
+    if (error)
+      *error = "checkpoint watermark exceeds journalled sequence";
+    return false;
+  }
+  for (const Event& event : journal) {
+    if (event.sequence <= checkpoint.journal_watermark)
+      continue;
+    if (event.type != EventType::kQuote && event.type != EventType::kCandle &&
+        event.type != EventType::kSignal)
+      continue;
+    replay->push_back(event);
+  }
+  if (error)
+    error->clear();
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Durable daily risk state. The journal is authoritative; snapshots are
 // checksummed recovery accelerators carrying a journal watermark.
 // ---------------------------------------------------------------------------
