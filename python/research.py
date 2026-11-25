@@ -23,8 +23,8 @@ import random
 import statistics
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 # Research constants (ESTIMATED). They are not trading parameters.
 KDBX_WHITELIST = (
@@ -100,7 +100,9 @@ def features(rows: list[dict[str, float]], index: int) -> dict[str, float]:
     typical = [
         (row["high"] + row["low"] + row["close"]) / 3.0 for row in vwap_window
     ]
-    weighted = sum(price * size for price, size in zip(typical, volume[-20:]))
+    weighted = sum(
+        price * size for price, size in zip(typical, volume[-20:], strict=False)
+    )
     daily_vwap = weighted / sum(vols) if sum(vols) > 0 else close[-1]
     sma20 = statistics.fmean(recent) if recent else 0.0
     sma60 = statistics.fmean(close[-60:]) if len(close) >= 60 else 0.0
@@ -116,9 +118,6 @@ def features(rows: list[dict[str, float]], index: int) -> dict[str, float]:
     low = min(row["low"] for row in last20)
     span = high - low
     breakout = (close[-1] - low) / span * 2 - 1 if span > 0 else 0.0
-    typical = statistics.fmean(
-        (row["high"] + row["low"] + row["close"]) / 3 for row in last20
-    )
     return {
         "ret5": ret(5),
         "ret20": ret(20),
@@ -130,7 +129,7 @@ def features(rows: list[dict[str, float]], index: int) -> dict[str, float]:
         ),
         "trend": bullish / checks,
         "breakout": max(-1.0, min(1.0, breakout)),
-        "vwap_dev": (close[-1] / typical - 1) if typical > 0 else 0.0,
+        "vwap_dev": (close[-1] / daily_vwap - 1) if daily_vwap > 0 else 0.0,
     }
 
 
@@ -212,7 +211,7 @@ def spearman(xs: list[float], ys: list[float]) -> float:
 
     rx, ry = ranks(xs), ranks(ys)
     mx, my = statistics.fmean(rx), statistics.fmean(ry)
-    numerator = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
+    numerator = sum((a - mx) * (b - my) for a, b in zip(rx, ry, strict=False))
     dx = math.sqrt(sum((a - mx) ** 2 for a in rx))
     dy = math.sqrt(sum((b - my) ** 2 for b in ry))
     return numerator / (dx * dy) if dx > 0 and dy > 0 else 0.0

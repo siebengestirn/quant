@@ -27,16 +27,25 @@ namespace quant {
 // ---------------------------------------------------------------------------
 class Money {
  public:
-  constexpr Money() : paise_(0) {}
-  static constexpr Money FromPaise(int64_t paise) { return Money(paise); }
+  constexpr Money() : paise_(0) {
+  }
+  static constexpr Money FromPaise(int64_t paise) {
+    return Money(paise);
+  }
   static Money FromRupees(double rupees);
   static bool TryFromRupees(double rupees, Money* out);
   static Money Invalid() {
     return FromPaise(std::numeric_limits<int64_t>::min());
   }
-  bool valid() const { return paise_ != std::numeric_limits<int64_t>::min(); }
-  constexpr int64_t paise() const { return paise_; }
-  double rupees() const { return static_cast<double>(paise_) / 100.0; }
+  bool valid() const {
+    return paise_ != std::numeric_limits<int64_t>::min();
+  }
+  constexpr int64_t paise() const {
+    return paise_;
+  }
+  double rupees() const {
+    return static_cast<double>(paise_) / 100.0;
+  }
 
   constexpr Money& operator+=(const Money& other) {
     paise_ += other.paise_;
@@ -48,18 +57,35 @@ class Money {
   }
 
  private:
-  explicit constexpr Money(int64_t paise) : paise_(paise) {}
+  explicit constexpr Money(int64_t paise) : paise_(paise) {
+  }
   int64_t paise_;
 };
 
-constexpr Money operator+(Money a, Money b) { return a += b; }
-constexpr Money operator-(Money a, Money b) { return a -= b; }
-constexpr bool operator==(Money a, Money b) { return a.paise() == b.paise(); }
-constexpr bool operator!=(Money a, Money b) { return !(a == b); }
-constexpr bool operator<(Money a, Money b) { return a.paise() < b.paise(); }
-constexpr bool operator>(Money a, Money b) { return b < a; }
-constexpr bool operator<=(Money a, Money b) { return !(b < a); }
-constexpr bool operator>=(Money a, Money b) { return !(a < b); }
+constexpr Money operator+(Money a, Money b) {
+  return a += b;
+}
+constexpr Money operator-(Money a, Money b) {
+  return a -= b;
+}
+constexpr bool operator==(Money a, Money b) {
+  return a.paise() == b.paise();
+}
+constexpr bool operator!=(Money a, Money b) {
+  return !(a == b);
+}
+constexpr bool operator<(Money a, Money b) {
+  return a.paise() < b.paise();
+}
+constexpr bool operator>(Money a, Money b) {
+  return b < a;
+}
+constexpr bool operator<=(Money a, Money b) {
+  return !(b < a);
+}
+constexpr bool operator>=(Money a, Money b) {
+  return !(a < b);
+}
 
 // ---------------------------------------------------------------------------
 // Enumerations and configuration.
@@ -162,7 +188,9 @@ struct Config {
 struct ConfigResult {
   Config config;
   std::vector<std::string> errors;
-  bool ok() const { return errors.empty(); }
+  bool ok() const {
+    return errors.empty();
+  }
 };
 
 ConfigResult LoadConfig(const std::string& path);
@@ -315,19 +343,26 @@ struct CostBreakdown {
 // ---------------------------------------------------------------------------
 // Transaction costs. C++ is authoritative for all financial arithmetic.
 // ---------------------------------------------------------------------------
-CostBreakdown EstimateCosts(Money turnover, bool delivery, bool is_buy,
-                            double slippage_bps, bool charge_dp = true);
+CostBreakdown EstimateCosts(Money turnover,
+                            bool delivery,
+                            bool is_buy,
+                            double slippage_bps,
+                            bool charge_dp = true);
 
 class CostAggregator {
  public:
-  CostBreakdown Estimate(Money turnover, bool delivery, bool is_buy,
-                         double slippage_bps, const std::string& symbol,
+  CostBreakdown Estimate(Money turnover,
+                         bool delivery,
+                         bool is_buy,
+                         double slippage_bps,
+                         const std::string& symbol,
                          const std::string& session);
 
  private:
   std::set<std::string> dp_charged_;
 };
-double BreakEvenMoveBps(Money notional, const CostBreakdown& entry,
+double BreakEvenMoveBps(Money notional,
+                        const CostBreakdown& entry,
                         const CostBreakdown& exit_costs);
 std::string FormatCosts(const CostBreakdown& costs);
 
@@ -338,11 +373,18 @@ class Portfolio {
  public:
   Portfolio();
   explicit Portfolio(Money initial_capital);
-  bool Buy(const std::string& symbol, int quantity, Money price,
-           const CostBreakdown& costs, std::string* error);
-  bool Sell(const std::string& symbol, int quantity, Money price,
-            const CostBreakdown& costs, std::string* error);
-  bool MarkToMarket(const std::string& symbol, Money price,
+  bool Buy(const std::string& symbol,
+           int quantity,
+           Money price,
+           const CostBreakdown& costs,
+           std::string* error);
+  bool Sell(const std::string& symbol,
+            int quantity,
+            Money price,
+            const CostBreakdown& costs,
+            std::string* error);
+  bool MarkToMarket(const std::string& symbol,
+                    Money price,
                     std::string* error = nullptr);
   bool RecordOperatingExpense(Money amount, std::string* error = nullptr);
   void RecordExternalFlow(Money amount, const std::string& reason);
@@ -358,8 +400,12 @@ class Portfolio {
   const std::map<std::string, Position>& positions() const {
     return positions_;
   }
-  Ledger ledger() const { return ledger_; }
-  const std::vector<std::string>& audit() const { return audit_; }
+  Ledger ledger() const {
+    return ledger_;
+  }
+  const std::vector<std::string>& audit() const {
+    return audit_;
+  }
 
  private:
   void UpdatePeakEquity();
@@ -408,16 +454,21 @@ struct SizingResult {
 
 // Single authoritative sizing calculation shared by risk, backtest and paper.
 // Uses current verified equity, available cash, reserves, drawdown and costs.
-SizingResult SizePosition(const Config& config, const Portfolio& portfolio,
+SizingResult SizePosition(const Config& config,
+                          const Portfolio& portfolio,
                           const SizingInput& input);
 
 class RiskEngine {
  public:
   explicit RiskEngine(Config config);
   explicit RiskEngine(Config config, std::shared_ptr<DailyRiskState> state);
-  RiskDecision Evaluate(const Signal& signal, const Quote& quote,
-                        const Portfolio& portfolio, int64_t now_ms);
-  const DailyRiskState& daily_state() const { return *state_; }
+  RiskDecision Evaluate(const Signal& signal,
+                        const Quote& quote,
+                        const Portfolio& portfolio,
+                        int64_t now_ms);
+  const DailyRiskState& daily_state() const {
+    return *state_;
+  }
 
  private:
   Config config_;
@@ -458,7 +509,8 @@ struct BacktestMetrics {
 
 // Conservative long-stop fill: if the stop was crossed, assume the adverse
 // path occurred before any favourable move. A gap-down fills at the open.
-Money ConservativeStopFill(double entry_price, const Candle& candle,
+Money ConservativeStopFill(double entry_price,
+                           const Candle& candle,
                            double stop_fraction = 0.05);
 
 // First session strictly after the given date, in an instrument's own series.
@@ -466,14 +518,16 @@ size_t NextSessionIndex(const std::vector<Candle>& series,
                         const std::string& date);
 
 // Average volume from observations strictly before the given index.
-double PriorAverageVolume(const std::vector<Candle>& series, size_t index,
+double PriorAverageVolume(const std::vector<Candle>& series,
+                          size_t index,
                           size_t window = 20);
 
 BacktestMetrics RunBacktest(
     const std::map<std::string, std::vector<Candle>>& history,
     const Config& config);
 std::vector<double> BootstrapSharpeCI(const std::vector<double>& returns,
-                                      uint64_t seed, size_t draws = 1000);
+                                      uint64_t seed,
+                                      size_t draws = 1000);
 double DeflatedSharpe(double sharpe, size_t trials, size_t observations);
 
 // ---------------------------------------------------------------------------
@@ -497,11 +551,19 @@ class Journal {
   bool Open(const std::string& path, std::string* error);
   bool Append(Event* event, std::string* error);
   std::vector<Event> Replay(std::string* error) const;
-  uint64_t next_sequence() const { return next_sequence_; }
-  size_t size() const { return size_; }
-  bool healthy() const { return healthy_; }
+  uint64_t next_sequence() const {
+    return next_sequence_;
+  }
+  size_t size() const {
+    return size_;
+  }
+  bool healthy() const {
+    return healthy_;
+  }
   void Close();
-  const std::string& path() const { return path_; }
+  const std::string& path() const {
+    return path_;
+  }
   ~Journal();
 
  private:
@@ -529,14 +591,22 @@ class Json {
   static Json ObjectValue(Object value);
   static bool Parse(std::string_view text, Json* out, std::string* error);
 
-  Type type() const { return type_; }
-  bool is_null() const { return type_ == Type::kNull; }
+  Type type() const {
+    return type_;
+  }
+  bool is_null() const {
+    return type_ == Type::kNull;
+  }
   bool as_bool(bool fallback = false) const;
   double as_double(double fallback = 0.0) const;
   int64_t as_int(int64_t fallback = 0) const;
   std::string as_string(std::string fallback = "") const;
-  const std::vector<Json>& array() const { return array_; }
-  const Object& object() const { return object_; }
+  const std::vector<Json>& array() const {
+    return array_;
+  }
+  const Object& object() const {
+    return object_;
+  }
   const Json* Find(std::string_view key) const;
   std::string Dump() const;
 
@@ -563,7 +633,8 @@ struct HttpResponse {
 class HttpClient {
  public:
   explicit HttpClient(int timeout_seconds = 30)
-      : timeout_seconds_(timeout_seconds) {}
+      : timeout_seconds_(timeout_seconds) {
+  }
   HttpResponse Get(
       const std::string& url,
       const std::vector<std::pair<std::string, std::string>>& headers) const;
@@ -590,7 +661,9 @@ struct CredentialStatus {
 
 struct Secret {
   std::string value;
-  ~Secret() { std::fill(value.begin(), value.end(), '\0'); }
+  ~Secret() {
+    std::fill(value.begin(), value.end(), '\0');
+  }
   Secret() = default;
   Secret(const Secret&) = delete;
   Secret& operator=(const Secret&) = delete;
@@ -627,7 +700,8 @@ class MarketDataService {
   bool SyncHistory(const std::vector<Instrument>& instruments,
                    std::string* error) const;
   bool FetchQuotes(const std::vector<Instrument>& instruments,
-                   std::vector<Quote>* quotes, std::string* error) const;
+                   std::vector<Quote>* quotes,
+                   std::string* error) const;
   bool MarketStatus(std::string* status, std::string* error) const;
   bool GlobalIndices(std::vector<Quote>* quotes, std::string* error) const;
 
@@ -636,18 +710,21 @@ class MarketDataService {
   Journal* journal_;
 };
 
-Quote NormalizeUpstoxQuote(const Json& item, const std::string& symbol,
+Quote NormalizeUpstoxQuote(const Json& item,
+                           const std::string& symbol,
                            const std::string& provider_key);
 double SpreadBps(const Quote& quote);
 bool IsStale(const Quote& quote, int64_t now_ms, int max_age_seconds);
-bool IsStaleProviderUpdate(const Quote& quote, int64_t now_ms,
+bool IsStaleProviderUpdate(const Quote& quote,
+                           int64_t now_ms,
                            int max_age_seconds);
 bool IsStaleTrade(const Quote& quote, int64_t now_ms, int max_age_seconds);
 bool ProviderFreshnessUnknown(const Quote& quote);
 bool TradeFreshnessUnknown(const Quote& quote);
 std::vector<Instrument> ApplyEligibility(
     std::vector<Instrument> instruments,
-    const std::vector<Instrument>& suspended, bool status_data_available,
+    const std::vector<Instrument>& suspended,
+    bool status_data_available,
     const Config& config);
 
 // ---------------------------------------------------------------------------
@@ -669,11 +746,15 @@ class KdbxClient {
   bool connected() const;
 
   bool Reset(std::string* error);
-  bool IngestQuote(const Quote& quote, uint64_t sequence,
-                   const std::string& event_id, std::string* error);
-  bool IngestBar(const Candle& candle, const std::string& symbol,
+  bool IngestQuote(const Quote& quote,
+                   uint64_t sequence,
+                   const std::string& event_id,
+                   std::string* error);
+  bool IngestBar(const Candle& candle,
+                 const std::string& symbol,
                  std::string* error);
-  bool QueryJson(const std::string& function, std::string* out,
+  bool QueryJson(const std::string& function,
+                 std::string* out,
                  std::string* error);
   bool Persist(std::string* error);
   bool LoadHistorical(std::string* out, std::string* error);
@@ -693,8 +774,12 @@ class OrderStateMachine {
  public:
   static bool IsValidTransition(OrderState from, OrderState to);
   bool Transition(OrderState to);
-  OrderState state() const { return state_; }
-  const std::vector<OrderState>& history() const { return history_; }
+  OrderState state() const {
+    return state_;
+  }
+  const std::vector<OrderState>& history() const {
+    return history_;
+  }
 
  private:
   OrderState state_ = OrderState::kNew;
@@ -748,7 +833,8 @@ struct DailyReport {
 
 std::string RenderReport(const DailyReport& report);
 std::string WriteTextFile(const std::string& path, const std::string& content);
-bool ReadCsvCandles(const std::string& path, std::vector<Candle>* candles,
+bool ReadCsvCandles(const std::string& path,
+                    std::vector<Candle>* candles,
                     std::string* error);
 
 int RunCli(int argc, char** argv);

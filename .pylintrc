@@ -1,0 +1,33 @@
+[MAIN]
+ignore=data,build,build-san,references
+jobs=0
+persistent=no
+suggestion-mode=no
+
+[MESSAGES CONTROL]
+disable=
+
+[FORMAT]
+max-line-length=80
+indent-string='    '
+expected-line-ending-format=LF
+
+[BASIC]
+good-names=i,j,k,n,ex,fd,id,ok
+argument-naming-style=snake_case
+variable-naming-style=snake_case
+function-naming-style=snake_case
+class-naming-style=PascalCase
+const-naming-style=UPPER_CASE
+
+[DESIGN]
+max-args=12
+max-locals=25
+max-branches=14
+max-statements=60
+max-attributes=12
+
+[REPORTS]
+output-format=text
+reports=no
+score=no

@@ -126,7 +126,7 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
 
 / ---------------------------------------------------------------------------
 / Auditable query surface. Only these functions are exposed over IPC; no
-/ arbitrary q expression evaluation is permitted by the C++/Python clients.
+/ arbitrary q source execution is permitted by the C++/Python clients.
 / ---------------------------------------------------------------------------
 .quant.counts:{[]
   `quotes`trades`depth`bars`instruments`marketStatus`signals`features!
@@ -163,7 +163,9 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
   vw:$[avgv>0; vwv%avgv; cp[n-1]];
   avail:$[n<count dates; dates[n]; dates[n-1]+1];
   featureTs:`timestamp$((`long$avail)*86400000000000);
-  (`date`symbol`featureTs`ret20`ret60`ret120`vol20`volSurprise`vwapDev`dailyVwapProxyDev)!
+  keys1:`date`symbol`featureTs`ret20`ret60`ret120;
+  keys2:`vol20`volSurprise`vwapDev`dailyVwapProxyDev;
+  (keys1,keys2)!
     (dates[n-1]; sym; featureTs; .quant.safeRet[cp;n;20];
      .quant.safeRet[cp;n;60]; .quant.safeRet[cp;n;120];
      $[n>=21; last mdev[20;r]; $[count r>0; dev r; 0f]];

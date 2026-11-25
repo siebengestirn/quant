@@ -29,7 +29,9 @@ void Check(bool condition, const std::string& name) {
   }
 }
 
-void Near(double actual, double expected, double tolerance,
+void Near(double actual,
+          double expected,
+          double tolerance,
           const std::string& name) {
   ++g_checks;
   if (std::abs(actual - expected) > tolerance) {
@@ -44,7 +46,8 @@ std::string TempPath(const std::string& name) {
       .string();
 }
 
-std::vector<Candle> SyntheticCandles(int count, double start = 100.0,
+std::vector<Candle> SyntheticCandles(int count,
+                                     double start = 100.0,
                                      double drift = 0.002) {
   std::vector<Candle> candles;
   double price = start;
@@ -161,17 +164,23 @@ void TestCosts() {
   Near(sell.stt.rupees(), 10.0, 0.01, "delivery sell STT");
   Near(sell.dp.rupees(), 15.34, 0.01, "DP charge on delivery sell");
   const CostBreakdown intraday = EstimateCosts(turnover, false, false, 0.0);
-  Near(intraday.brokerage.rupees(), 3.0, 0.01,
+  Near(intraday.brokerage.rupees(),
+       3.0,
+       0.01,
        "intraday brokerage 0.03% below cap");
   const CostBreakdown capped =
       EstimateCosts(Money::FromRupees(100000.0), false, false, 0.0);
-  Near(capped.brokerage.rupees(), 20.0, 0.01,
-       "intraday brokerage capped at 20");
-  Near(intraday.stt.rupees(), 3.0, 0.01,
+  Near(
+      capped.brokerage.rupees(), 20.0, 0.01, "intraday brokerage capped at 20");
+  Near(intraday.stt.rupees(),
+       3.0,
+       0.01,
        "intraday sell STT rounds 2.50 up to 3 rupees");
   const CostBreakdown small_delivery =
       EstimateCosts(Money::FromRupees(500.0), true, true, 0.0);
-  Near(small_delivery.stt.rupees(), 1.0, 0.01,
+  Near(small_delivery.stt.rupees(),
+       1.0,
+       0.01,
        "₹500 delivery STT rounds 0.50 up to 1 rupee");
   CostAggregator agg;
   const CostBreakdown first =
@@ -221,7 +230,9 @@ void TestAccounting() {
   Check(portfolio.equity().rupees() > 500.0, "net profit after costs");
 
   Portfolio broke(Money::FromRupees(5.0));
-  Check(!broke.Buy("X", 1, Money::FromRupees(100.0),
+  Check(!broke.Buy("X",
+                   1,
+                   Money::FromRupees(100.0),
                    EstimateCosts(Money::FromRupees(100.0), false, true, 0.0),
                    &error),
         "insufficient funds rejected");
@@ -275,7 +286,9 @@ void TestRisk() {
         "upstream rejection respected");
 
   Portfolio full(config.initial_capital);
-  Check(full.Buy("Y", 1, Money::FromRupees(100.0),
+  Check(full.Buy("Y",
+                 1,
+                 Money::FromRupees(100.0),
                  EstimateCosts(Money::FromRupees(100.0), false, true, 0.0),
                  nullptr),
         "seed position for limit test");
@@ -420,7 +433,8 @@ void TestNormalization() {
             "\"ohlc\":{\"open\":99,\"high\":101,\"low\":98,\"close\":100},"
             "\"depth\":{\"buy\":[{\"price\":100.4,\"quantity\":500}],"
             "\"sell\":[{\"price\":100.6,\"quantity\":400}]}}",
-            &item, &error),
+            &item,
+            &error),
         "quote json parses");
   const Quote quote = NormalizeUpstoxQuote(item, "X", "NSE_EQ|ABC");
   Near(quote.last, 100.5, 1e-9, "normalised last price");
@@ -525,7 +539,11 @@ void TestBacktest() {
 
 std::vector<uint8_t> GzipCompress(const std::string& input) {
   z_stream stream{};
-  deflateInit2(&stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 15 + 16, 8,
+  deflateInit2(&stream,
+               Z_DEFAULT_COMPRESSION,
+               Z_DEFLATED,
+               15 + 16,
+               8,
                Z_DEFAULT_STRATEGY);
   stream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(input.data()));
   stream.avail_in = static_cast<uInt>(input.size());
@@ -632,24 +650,40 @@ void TestMarkedSaleAndCostBoundaries() {
   Check(portfolio.Sell("Z", 1, Money::FromRupees(120.0), zero, &error),
         "zero-cost sale");
   Near(portfolio.ledger().cash.rupees(), 520.0, 0.01, "cash after sale");
-  Near(portfolio.ledger().invested.rupees(), 0.0, 0.01,
+  Near(portfolio.ledger().invested.rupees(),
+       0.0,
+       0.01,
        "cost basis after full sale");
-  Near(portfolio.ledger().unrealized_pnl.rupees(), 0.0, 0.01,
+  Near(portfolio.ledger().unrealized_pnl.rupees(),
+       0.0,
+       0.01,
        "unrealized P&L after full sale");
   Near(portfolio.equity().rupees(), 520.0, 0.01, "equity after full sale");
-  Near(portfolio.ledger().peak_equity.rupees(), 520.0, 0.01,
+  Near(portfolio.ledger().peak_equity.rupees(),
+       520.0,
+       0.01,
        "peak after full sale");
 
   Near(EstimateCosts(Money::FromRupees(10.0), true, true, 0.0).stt.rupees(),
-       0.0, 0.01, "raw STT 0.01 rounds to zero");
+       0.0,
+       0.01,
+       "raw STT 0.01 rounds to zero");
   Near(EstimateCosts(Money::FromRupees(490.0), true, true, 0.0).stt.rupees(),
-       0.0, 0.01, "raw STT 0.49 rounds to zero");
+       0.0,
+       0.01,
+       "raw STT 0.49 rounds to zero");
   Near(EstimateCosts(Money::FromRupees(500.0), true, true, 0.0).stt.rupees(),
-       1.0, 0.01, "raw STT 0.50 rounds up");
+       1.0,
+       0.01,
+       "raw STT 0.50 rounds up");
   Near(EstimateCosts(Money::FromRupees(1400.0), true, true, 0.0).stt.rupees(),
-       1.0, 0.01, "raw STT 1.40 rounds down");
+       1.0,
+       0.01,
+       "raw STT 1.40 rounds down");
   Near(EstimateCosts(Money::FromRupees(1500.0), true, true, 0.0).stt.rupees(),
-       2.0, 0.01, "raw STT 1.50 rounds up");
+       2.0,
+       0.01,
+       "raw STT 1.50 rounds up");
 
   Config config = TestConfig();
   SizingInput missing;
@@ -671,17 +705,22 @@ void TestMarkedSaleAndCostBoundaries() {
 void TestHighWaterAndMoneyBounds() {
   Portfolio portfolio(Money::FromRupees(500.0));
   std::string error;
-  Check(portfolio.Buy("X", 1, Money::FromRupees(100.0),
+  Check(portfolio.Buy("X",
+                      1,
+                      Money::FromRupees(100.0),
                       EstimateCosts(Money::FromRupees(100.0), false, true, 0.0),
                       &error),
         "high-water fixture buy");
   Check(portfolio.MarkToMarket("X", Money::FromRupees(120.0), &error),
         "high-water fixture mark");
   const Money peak_before = portfolio.ledger().peak_equity;
-  Check(portfolio.Sell(
-            "X", 1, Money::FromRupees(120.0),
-            EstimateCosts(Money::FromRupees(120.0), false, false, 0.0), &error),
-        "high-water fixture profitable close");
+  Check(
+      portfolio.Sell("X",
+                     1,
+                     Money::FromRupees(120.0),
+                     EstimateCosts(Money::FromRupees(120.0), false, false, 0.0),
+                     &error),
+      "high-water fixture profitable close");
   Check(portfolio.ledger().peak_equity >= peak_before,
         "profitable close does not leave peak below equity");
   Check(portfolio.drawdown().paise() >= 0, "drawdown is never negative");
@@ -719,7 +758,9 @@ void TestDynamicSizing() {
   down.high = 100.0;
   down.low = 80.0;
   down.close = 80.0;
-  Check(large.Buy("DD", 10, Money::FromRupees(100.0),
+  Check(large.Buy("DD",
+                  10,
+                  Money::FromRupees(100.0),
                   EstimateCosts(Money::FromRupees(1000.0), false, true, 0.0),
                   nullptr),
         "drawdown fixture position opened");

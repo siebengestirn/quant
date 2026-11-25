@@ -68,10 +68,13 @@ bool ParseArray(std::string_view text, std::vector<std::string>* out) {
                                   inner[pos] == '\n' || inner[pos] == '\t')) {
       ++pos;
     }
-    if (pos >= inner.size()) break;
-    if (inner[pos] != '"') return false;
+    if (pos >= inner.size())
+      break;
+    if (inner[pos] != '"')
+      return false;
     const size_t quote_end = inner.find('"', pos + 1);
-    if (quote_end == std::string::npos) return false;
+    if (quote_end == std::string::npos)
+      return false;
     out->push_back(std::string(inner.substr(pos + 1, quote_end - pos - 1)));
     pos = quote_end + 1;
   }
@@ -89,7 +92,8 @@ std::string UtcSessionDate(int64_t now_ms) {
 
 bool CheckedMultiply(int64_t left, int64_t right, int64_t* out) {
   if (out == nullptr || right == 0) {
-    if (out != nullptr) *out = 0;
+    if (out != nullptr)
+      *out = 0;
     return out != nullptr;
   }
   if (left > std::numeric_limits<int64_t>::max() / right ||
@@ -101,7 +105,8 @@ bool CheckedMultiply(int64_t left, int64_t right, int64_t* out) {
 }
 
 bool CheckedAdd(int64_t left, int64_t right, int64_t* out) {
-  if (out == nullptr) return false;
+  if (out == nullptr)
+    return false;
   if ((right > 0 && left > std::numeric_limits<int64_t>::max() - right) ||
       (right < 0 && left < std::numeric_limits<int64_t>::min() - right)) {
     return false;
@@ -111,21 +116,25 @@ bool CheckedAdd(int64_t left, int64_t right, int64_t* out) {
 }
 
 bool ParseInteger64(const std::string& text, int64_t* out) {
-  if (text.empty()) return false;
+  if (text.empty())
+    return false;
   errno = 0;
   char* end = nullptr;
   const long long value = std::strtoll(text.c_str(), &end, 10);
-  if (errno == ERANGE || end != text.c_str() + text.size()) return false;
+  if (errno == ERANGE || end != text.c_str() + text.size())
+    return false;
   *out = static_cast<int64_t>(value);
   return true;
 }
 
 bool ParseUnsigned64(const std::string& text, uint64_t* out) {
-  if (text.empty() || text.front() == '-') return false;
+  if (text.empty() || text.front() == '-')
+    return false;
   errno = 0;
   char* end = nullptr;
   const unsigned long long value = std::strtoull(text.c_str(), &end, 10);
-  if (errno == ERANGE || end != text.c_str() + text.size()) return false;
+  if (errno == ERANGE || end != text.c_str() + text.size())
+    return false;
   *out = static_cast<uint64_t>(value);
   return true;
 }
@@ -142,41 +151,50 @@ bool ParseInteger32(const std::string& text, int32_t* out) {
 }
 
 bool ParseFloating(const std::string& text, double* out) {
-  if (text.empty()) return false;
+  if (text.empty())
+    return false;
   errno = 0;
   char* end = nullptr;
   const double value = std::strtod(text.c_str(), &end);
-  if (errno == ERANGE || end != text.c_str() + text.size()) return false;
+  if (errno == ERANGE || end != text.c_str() + text.size())
+    return false;
   *out = value;
   return true;
 }
 
 int64_t IntegerOr(const std::map<std::string, std::string>& values,
-                  const std::string& key, int64_t fallback) {
+                  const std::string& key,
+                  int64_t fallback) {
   const auto it = values.find(key);
-  if (it == values.end()) return fallback;
+  if (it == values.end())
+    return fallback;
   int64_t value = 0;
   return ParseInteger64(it->second, &value) ? value : fallback;
 }
 
 double DoubleOr(const std::map<std::string, std::string>& values,
-                const std::string& key, double fallback) {
+                const std::string& key,
+                double fallback) {
   const auto it = values.find(key);
-  if (it == values.end()) return fallback;
+  if (it == values.end())
+    return fallback;
   double value = 0.0;
   return ParseFloating(it->second, &value) ? value : fallback;
 }
 
 std::string StringOr(const std::map<std::string, std::string>& values,
-                     const std::string& key, const std::string& fallback) {
+                     const std::string& key,
+                     const std::string& fallback) {
   const auto it = values.find(key);
   return it == values.end() ? fallback : it->second;
 }
 
 bool BoolOr(const std::map<std::string, std::string>& values,
-            const std::string& key, bool fallback) {
+            const std::string& key,
+            bool fallback) {
   const auto it = values.find(key);
-  if (it == values.end()) return fallback;
+  if (it == values.end())
+    return fallback;
   bool value = fallback;
   return ParseBool(it->second, &value) ? value : fallback;
 }
@@ -194,16 +212,20 @@ std::string HexEncode(std::string_view input) {
 
 std::string HexDecode(std::string_view input) {
   auto nibble = [](char c) -> int {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    if (c >= '0' && c <= '9')
+      return c - '0';
+    if (c >= 'a' && c <= 'f')
+      return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F')
+      return c - 'A' + 10;
     return -1;
   };
   std::string out;
   for (size_t i = 0; i + 1 < input.size(); i += 2) {
     const int hi = nibble(input[i]);
     const int lo = nibble(input[i + 1]);
-    if (hi < 0 || lo < 0) return "";
+    if (hi < 0 || lo < 0)
+      return "";
     out.push_back(static_cast<char>((hi << 4) | lo));
   }
   return out;
@@ -223,13 +245,15 @@ size_t CurlWrite(void* contents, size_t size, size_t nmemb, void* userdata) {
 }
 
 double Mean(const std::vector<double>& values) {
-  if (values.empty()) return 0.0;
+  if (values.empty())
+    return 0.0;
   return std::accumulate(values.begin(), values.end(), 0.0) /
          static_cast<double>(values.size());
 }
 
 double StdDev(const std::vector<double>& values) {
-  if (values.size() < 2) return 0.0;
+  if (values.size() < 2)
+    return 0.0;
   const double mean = Mean(values);
   double sum = 0.0;
   for (double value : values) {
@@ -249,18 +273,22 @@ double Clamp(double value, double low, double high) {
 // Money.
 // ---------------------------------------------------------------------------
 bool Money::TryFromRupees(double rupees, Money* out) {
-  if (out == nullptr || !std::isfinite(rupees)) return false;
+  if (out == nullptr || !std::isfinite(rupees))
+    return false;
   constexpr double kMaxRupees = 9.0e16;
-  if (std::abs(rupees) > kMaxRupees) return false;
+  if (std::abs(rupees) > kMaxRupees)
+    return false;
   const long long paise = std::llround(rupees * 100.0);
-  if (paise == std::numeric_limits<long long>::min()) return false;
+  if (paise == std::numeric_limits<long long>::min())
+    return false;
   *out = FromPaise(static_cast<int64_t>(paise));
   return true;
 }
 
 Money Money::FromRupees(double rupees) {
   Money result;
-  if (!TryFromRupees(rupees, &result)) return Invalid();
+  if (!TryFromRupees(rupees, &result))
+    return Invalid();
   return result;
 }
 
@@ -284,10 +312,14 @@ std::string_view ModeName(Mode mode) {
 }
 
 Mode ParseMode(std::string_view text) {
-  if (text == "BACKTEST") return Mode::kBacktest;
-  if (text == "PAPER") return Mode::kPaper;
-  if (text == "READ_ONLY_BROKER") return Mode::kReadOnlyBroker;
-  if (text == "LIVE") return Mode::kLive;
+  if (text == "BACKTEST")
+    return Mode::kBacktest;
+  if (text == "PAPER")
+    return Mode::kPaper;
+  if (text == "READ_ONLY_BROKER")
+    return Mode::kReadOnlyBroker;
+  if (text == "LIVE")
+    return Mode::kLive;
   return Mode::kDisabled;
 }
 
@@ -305,10 +337,12 @@ ConfigResult LoadConfig(const std::string& path) {
   std::string pending;
   while (std::getline(input, line)) {
     std::string cleaned = Trim(StripComment(line));
-    if (cleaned.empty()) continue;
+    if (cleaned.empty())
+      continue;
     if (!pending.empty()) {
       pending += "\n" + cleaned;
-      if (cleaned.find(']') == std::string::npos) continue;
+      if (cleaned.find(']') == std::string::npos)
+        continue;
       cleaned = pending;
       pending.clear();
     }
@@ -317,7 +351,8 @@ ConfigResult LoadConfig(const std::string& path) {
       continue;
     }
     const size_t equals = cleaned.find('=');
-    if (equals == std::string::npos) continue;
+    if (equals == std::string::npos)
+      continue;
     std::string key = Trim(cleaned.substr(0, equals));
     std::string value = Trim(cleaned.substr(equals + 1));
     if (value.find('[') != std::string::npos &&
@@ -397,7 +432,8 @@ ConfigResult LoadConfig(const std::string& path) {
   auto find_array = [&values](const std::string& key) {
     std::vector<std::string> out;
     const auto it = values.find(key);
-    if (it != values.end()) ParseArray(it->second, &out);
+    if (it != values.end())
+      ParseArray(it->second, &out);
     return out;
   };
   c.seed_symbols = find_array(uni + "SEED_SYMBOLS");
@@ -473,10 +509,14 @@ std::vector<std::string> ValidateConfig(const Config& config) {
 // VERIFIED against https://zerodha.com/charges/ on 2026-11-25.
 // ESTIMATED where the schedule varies by account/segment (DP, stamp cap).
 // ---------------------------------------------------------------------------
-CostBreakdown EstimateCosts(Money turnover, bool delivery, bool is_buy,
-                            double slippage_bps, bool charge_dp) {
+CostBreakdown EstimateCosts(Money turnover,
+                            bool delivery,
+                            bool is_buy,
+                            double slippage_bps,
+                            bool charge_dp) {
   CostBreakdown result;
-  if (turnover <= Money::FromRupees(0.0) || slippage_bps < 0.0) return result;
+  if (turnover <= Money::FromRupees(0.0) || slippage_bps < 0.0)
+    return result;
 
   const double value = turnover.rupees();
   const double brokerage_rate = delivery ? 0.0 : 0.0003;
@@ -518,19 +558,24 @@ CostBreakdown EstimateCosts(Money turnover, bool delivery, bool is_buy,
   return result;
 }
 
-CostBreakdown CostAggregator::Estimate(Money turnover, bool delivery,
-                                       bool is_buy, double slippage_bps,
+CostBreakdown CostAggregator::Estimate(Money turnover,
+                                       bool delivery,
+                                       bool is_buy,
+                                       double slippage_bps,
                                        const std::string& symbol,
                                        const std::string& session) {
   const std::string key = session + "|" + symbol;
   const bool first_sell = dp_charged_.find(key) == dp_charged_.end();
-  if (delivery && !is_buy && first_sell) dp_charged_.insert(key);
+  if (delivery && !is_buy && first_sell)
+    dp_charged_.insert(key);
   return EstimateCosts(turnover, delivery, is_buy, slippage_bps, first_sell);
 }
 
-double BreakEvenMoveBps(Money notional, const CostBreakdown& entry,
+double BreakEvenMoveBps(Money notional,
+                        const CostBreakdown& entry,
                         const CostBreakdown& exit_costs) {
-  if (notional <= Money::FromRupees(0.0)) return 0.0;
+  if (notional <= Money::FromRupees(0.0))
+    return 0.0;
   const double total =
       static_cast<double>(entry.total.paise() + exit_costs.total.paise());
   return total / static_cast<double>(notional.paise()) * 10000.0;
@@ -551,7 +596,8 @@ std::string FormatCosts(const CostBreakdown& costs) {
 // ---------------------------------------------------------------------------
 // Portfolio accounting.
 // ---------------------------------------------------------------------------
-Portfolio::Portfolio() : Portfolio(Money::FromRupees(0.0)) {}
+Portfolio::Portfolio() : Portfolio(Money::FromRupees(0.0)) {
+}
 
 Portfolio::Portfolio(Money initial_capital) {
   ledger_.initial_capital = initial_capital;
@@ -572,7 +618,8 @@ Portfolio::Portfolio(Money initial_capital) {
 
 void Portfolio::UpdatePeakEquity() {
   const Money current = equity();
-  if (current > ledger_.peak_equity) ledger_.peak_equity = current;
+  if (current > ledger_.peak_equity)
+    ledger_.peak_equity = current;
 }
 
 bool Portfolio::RecomputeUnrealized() {
@@ -581,7 +628,8 @@ bool Portfolio::RecomputeUnrealized() {
     int64_t contribution = 0;
     if (!CheckedMultiply(
             position.last_price.paise() - position.avg_price.paise(),
-            static_cast<int64_t>(position.quantity), &contribution) ||
+            static_cast<int64_t>(position.quantity),
+            &contribution) ||
         !CheckedAdd(unrealized, contribution, &unrealized)) {
       return false;
     }
@@ -595,29 +643,36 @@ Money Portfolio::market_value() const {
   return ledger_.invested + ledger_.unrealized_pnl;
 }
 
-bool Portfolio::Buy(const std::string& symbol, int quantity, Money price,
-                    const CostBreakdown& costs, std::string* error) {
+bool Portfolio::Buy(const std::string& symbol,
+                    int quantity,
+                    Money price,
+                    const CostBreakdown& costs,
+                    std::string* error) {
   if (quantity <= 0 || price <= Money::FromRupees(0.0)) {
-    if (error) *error = "invalid buy quantity or price";
+    if (error)
+      *error = "invalid buy quantity or price";
     return false;
   }
   int64_t notional_paise = 0;
-  if (!CheckedMultiply(price.paise(), static_cast<int64_t>(quantity),
-                       &notional_paise)) {
-    if (error) *error = "buy notional overflow";
+  if (!CheckedMultiply(
+          price.paise(), static_cast<int64_t>(quantity), &notional_paise)) {
+    if (error)
+      *error = "buy notional overflow";
     return false;
   }
   const Money notional = Money::FromPaise(notional_paise);
   int64_t required_paise = 0;
   if (!CheckedAdd(notional.paise(), costs.total.paise(), &required_paise)) {
-    if (error) *error = "buy requirement overflow";
+    if (error)
+      *error = "buy requirement overflow";
     return false;
   }
   const Money required = Money::FromPaise(required_paise);
   const Ledger prior_ledger = ledger_;
   const auto prior_positions = positions_;
   if (required > ledger_.cash) {
-    if (error) *error = "insufficient cash: required exceeds available";
+    if (error)
+      *error = "insufficient cash: required exceeds available";
     return false;
   }
   auto it = positions_.find(symbol);
@@ -634,11 +689,13 @@ bool Portfolio::Buy(const std::string& symbol, int quantity, Money price,
     int64_t right = 0;
     int64_t weighted = 0;
     if (!CheckedMultiply(it->second.avg_price.paise(),
-                         static_cast<int64_t>(it->second.quantity), &left) ||
-        !CheckedMultiply(price.paise(), static_cast<int64_t>(quantity),
-                         &right) ||
+                         static_cast<int64_t>(it->second.quantity),
+                         &left) ||
+        !CheckedMultiply(
+            price.paise(), static_cast<int64_t>(quantity), &right) ||
         !CheckedAdd(left, right, &weighted)) {
-      if (error) *error = "weighted cost overflow";
+      if (error)
+        *error = "weighted cost overflow";
       return false;
     }
     it->second.avg_price = Money::FromPaise(weighted / total);
@@ -656,7 +713,8 @@ bool Portfolio::Buy(const std::string& symbol, int quantity, Money price,
   if (!RecomputeUnrealized()) {
     ledger_ = prior_ledger;
     positions_ = prior_positions;
-    if (error) *error = "buy position-state overflow";
+    if (error)
+      *error = "buy position-state overflow";
     return false;
   }
   UpdatePeakEquity();
@@ -666,25 +724,32 @@ bool Portfolio::Buy(const std::string& symbol, int quantity, Money price,
   return true;
 }
 
-bool Portfolio::Sell(const std::string& symbol, int quantity, Money price,
-                     const CostBreakdown& costs, std::string* error) {
+bool Portfolio::Sell(const std::string& symbol,
+                     int quantity,
+                     Money price,
+                     const CostBreakdown& costs,
+                     std::string* error) {
   auto it = positions_.find(symbol);
   if (it == positions_.end() || it->second.quantity < quantity ||
       quantity <= 0) {
-    if (error) *error = "sell quantity exceeds position";
+    if (error)
+      *error = "sell quantity exceeds position";
     return false;
   }
   if (price <= Money::FromRupees(0.0)) {
-    if (error) *error = "invalid sell price";
+    if (error)
+      *error = "invalid sell price";
     return false;
   }
   int64_t notional_paise = 0;
   int64_t basis_paise = 0;
-  if (!CheckedMultiply(price.paise(), static_cast<int64_t>(quantity),
-                       &notional_paise) ||
+  if (!CheckedMultiply(
+          price.paise(), static_cast<int64_t>(quantity), &notional_paise) ||
       !CheckedMultiply(it->second.avg_price.paise(),
-                       static_cast<int64_t>(quantity), &basis_paise)) {
-    if (error) *error = "sell notional overflow";
+                       static_cast<int64_t>(quantity),
+                       &basis_paise)) {
+    if (error)
+      *error = "sell notional overflow";
     return false;
   }
   const Money notional = Money::FromPaise(notional_paise);
@@ -709,7 +774,8 @@ bool Portfolio::Sell(const std::string& symbol, int quantity, Money price,
   if (!RecomputeUnrealized()) {
     ledger_ = prior_ledger;
     positions_ = prior_positions;
-    if (error) *error = "sell position-state overflow";
+    if (error)
+      *error = "sell position-state overflow";
     return false;
   }
   UpdatePeakEquity();
@@ -719,11 +785,13 @@ bool Portfolio::Sell(const std::string& symbol, int quantity, Money price,
   return true;
 }
 
-bool Portfolio::MarkToMarket(const std::string& symbol, Money price,
+bool Portfolio::MarkToMarket(const std::string& symbol,
+                             Money price,
                              std::string* error) {
   auto it = positions_.find(symbol);
   if (it == positions_.end()) {
-    if (error) *error = "mark-to-market unknown symbol";
+    if (error)
+      *error = "mark-to-market unknown symbol";
     return false;
   }
   const Ledger prior_ledger = ledger_;
@@ -732,7 +800,8 @@ bool Portfolio::MarkToMarket(const std::string& symbol, Money price,
   if (!RecomputeUnrealized()) {
     ledger_ = prior_ledger;
     positions_ = prior_positions;
-    if (error) *error = "mark-to-market overflow";
+    if (error)
+      *error = "mark-to-market overflow";
     return false;
   }
   UpdatePeakEquity();
@@ -741,11 +810,13 @@ bool Portfolio::MarkToMarket(const std::string& symbol, Money price,
 
 bool Portfolio::RecordOperatingExpense(Money amount, std::string* error) {
   if (amount < Money::FromRupees(0.0)) {
-    if (error) *error = "operating expense must be non-negative";
+    if (error)
+      *error = "operating expense must be non-negative";
     return false;
   }
   if (amount > ledger_.cash) {
-    if (error) *error = "operating expense exceeds available cash";
+    if (error)
+      *error = "operating expense exceeds available cash";
     return false;
   }
   ledger_.cash -= amount;
@@ -767,7 +838,9 @@ Money Portfolio::equity() const {
   return ledger_.cash + ledger_.invested + ledger_.unrealized_pnl;
 }
 
-Money Portfolio::available_cash() const { return ledger_.cash; }
+Money Portfolio::available_cash() const {
+  return ledger_.cash;
+}
 
 Money Portfolio::drawdown() const {
   const Money loss = ledger_.peak_equity - equity();
@@ -775,7 +848,8 @@ Money Portfolio::drawdown() const {
 }
 
 double Portfolio::drawdown_fraction() const {
-  if (ledger_.peak_equity <= Money::FromRupees(0.0)) return 0.0;
+  if (ledger_.peak_equity <= Money::FromRupees(0.0))
+    return 0.0;
   return static_cast<double>(drawdown().paise()) /
          static_cast<double>(ledger_.peak_equity.paise());
 }
@@ -784,7 +858,8 @@ double Portfolio::drawdown_fraction() const {
 // Shared position sizing. All consumers must use this function so simulated,
 // paper and future execution environments allocate capital identically.
 // ---------------------------------------------------------------------------
-SizingResult SizePosition(const Config& config, const Portfolio& portfolio,
+SizingResult SizePosition(const Config& config,
+                          const Portfolio& portfolio,
                           const SizingInput& input) {
   SizingResult result;
   result.notional = Money::FromRupees(0.0);
@@ -805,8 +880,9 @@ SizingResult SizePosition(const Config& config, const Portfolio& portfolio,
     return result;
   }
   const double drawdown_scale =
-      std::max(0.0, 1.0 - portfolio.drawdown_fraction() /
-                              std::max(config.max_drawdown_fraction, 0.0001));
+      std::max(0.0,
+               1.0 - portfolio.drawdown_fraction() /
+                         std::max(config.max_drawdown_fraction, 0.0001));
   if (drawdown_scale <= 0.0) {
     result.reason = "drawdown limit reached";
     return result;
@@ -822,8 +898,9 @@ SizingResult SizePosition(const Config& config, const Portfolio& portfolio,
   const double spendable =
       std::max(0.0, portfolio.available_cash().rupees() - reserve);
   const double exposure_cap =
-      std::max(0.0, equity.rupees() * config.max_gross_exposure_fraction -
-                        input.current_exposure.rupees()) /
+      std::max(0.0,
+               equity.rupees() * config.max_gross_exposure_fraction -
+                   input.current_exposure.rupees()) /
       price;
   const double participation = input.participation > 0.0
                                    ? input.participation
@@ -837,15 +914,18 @@ SizingResult SizePosition(const Config& config, const Portfolio& portfolio,
           ? static_cast<double>(input.available_depth) * participation
           : std::numeric_limits<double>::infinity();
 
-  int quantity = static_cast<int>(
-      std::floor(std::min({risk_budget / risk_per_share, spendable / price,
-                           exposure_cap, depth_cap})));
+  int quantity =
+      static_cast<int>(std::floor(std::min({risk_budget / risk_per_share,
+                                            spendable / price,
+                                            exposure_cap,
+                                            depth_cap})));
   while (quantity > 0) {
     const Money notional =
         Money::FromPaise(input.price.paise() * static_cast<int64_t>(quantity));
     const CostBreakdown costs =
         EstimateCosts(notional, input.delivery, true, config.slippage_bps);
-    if (notional + costs.total <= Money::FromRupees(spendable)) break;
+    if (notional + costs.total <= Money::FromRupees(spendable))
+      break;
     --quantity;
   }
   if (quantity < 1) {
@@ -863,13 +943,17 @@ SizingResult SizePosition(const Config& config, const Portfolio& portfolio,
 // Central risk engine.
 // ---------------------------------------------------------------------------
 RiskEngine::RiskEngine(Config config)
-    : config_(std::move(config)), state_(std::make_shared<DailyRiskState>()) {}
+    : config_(std::move(config)), state_(std::make_shared<DailyRiskState>()) {
+}
 
 RiskEngine::RiskEngine(Config config, std::shared_ptr<DailyRiskState> state)
-    : config_(std::move(config)), state_(std::move(state)) {}
+    : config_(std::move(config)), state_(std::move(state)) {
+}
 
-RiskDecision RiskEngine::Evaluate(const Signal& signal, const Quote& quote,
-                                  const Portfolio& portfolio, int64_t now_ms) {
+RiskDecision RiskEngine::Evaluate(const Signal& signal,
+                                  const Quote& quote,
+                                  const Portfolio& portfolio,
+                                  int64_t now_ms) {
   RiskDecision decision;
   decision.notional = Money::FromRupees(0.0);
   auto reject = [&decision](const std::string& reason) {
@@ -889,7 +973,8 @@ RiskDecision RiskEngine::Evaluate(const Signal& signal, const Quote& quote,
   } else if (equity < state_->low_equity) {
     state_->low_equity = equity;
   }
-  if (state_->halted) return reject("daily kill switch active");
+  if (state_->halted)
+    return reject("daily kill switch active");
   const double loss_fraction =
       state_->starting_equity > Money::FromRupees(0.0)
           ? static_cast<double>(
@@ -935,7 +1020,8 @@ RiskDecision RiskEngine::Evaluate(const Signal& signal, const Quote& quote,
   if (sizing.available_depth <= 0)
     return reject("missing executable ask depth");
   const SizingResult sized = SizePosition(config_, portfolio, sizing);
-  if (sized.quantity < 1) return reject(sized.reason);
+  if (sized.quantity < 1)
+    return reject(sized.reason);
 
   decision.approved = true;
   decision.quantity = sized.quantity;
@@ -949,9 +1035,11 @@ RiskDecision RiskEngine::Evaluate(const Signal& signal, const Quote& quote,
 // ---------------------------------------------------------------------------
 FeatureSet ComputeFeatures(const std::vector<Candle>& candles) {
   FeatureSet features;
-  if (candles.size() < 21) return features;
+  if (candles.size() < 21)
+    return features;
   auto return_over = [&candles](size_t periods) {
-    if (candles.size() <= periods) return 0.0;
+    if (candles.size() <= periods)
+      return 0.0;
     const double base = candles[candles.size() - 1 - periods].close;
     return base > 0.0 ? candles.back().close / base - 1.0 : 0.0;
   };
@@ -991,14 +1079,17 @@ FeatureSet ComputeFeatures(const std::vector<Candle>& candles) {
   }
   int bullish = 0;
   int checks = 1;
-  if (candles.back().close > sma20) ++bullish;
+  if (candles.back().close > sma20)
+    ++bullish;
   if (candles.size() >= 60) {
     ++checks;
-    if (sma20 > sma60) ++bullish;
+    if (sma20 > sma60)
+      ++bullish;
   }
   if (candles.size() >= 120) {
     ++checks;
-    if (sma20 > sma120) ++bullish;
+    if (sma20 > sma120)
+      ++bullish;
   }
   features.trend = static_cast<double>(bullish) / static_cast<double>(checks);
 
@@ -1010,9 +1101,10 @@ FeatureSet ComputeFeatures(const std::vector<Candle>& candles) {
   }
   const double range = highest - lowest;
   features.breakout =
-      range > 0.0 ? Clamp((candles.back().close - lowest) / range * 2.0 - 1.0,
-                          -1.0, 1.0)
-                  : 0.0;
+      range > 0.0
+          ? Clamp(
+                (candles.back().close - lowest) / range * 2.0 - 1.0, -1.0, 1.0)
+          : 0.0;
 
   double weighted_typical = 0.0;
   double total_volume = 0.0;
@@ -1032,7 +1124,8 @@ FeatureSet ComputeFeatures(const std::vector<Candle>& candles) {
 }
 
 double CrossSectionalMomentumScore(const FeatureSet& f) {
-  if (!f.valid) return 0.0;
+  if (!f.valid)
+    return 0.0;
   const double vol_adjust = 1.0 / std::max(f.vol20, 0.005);
   const double raw =
       0.15 * f.ret5 + 0.25 * f.ret20 + 0.35 * f.ret60 + 0.25 * f.ret120;
@@ -1040,25 +1133,30 @@ double CrossSectionalMomentumScore(const FeatureSet& f) {
 }
 
 double TimeSeriesMomentumScore(const FeatureSet& f) {
-  if (!f.valid) return 0.0;
+  if (!f.valid)
+    return 0.0;
   return Clamp((f.trend - 0.5) * 2.0 + f.breakout * 0.3, -1.0, 1.0);
 }
 
 double VolumeBreakoutScore(const FeatureSet& f) {
-  if (!f.valid) return 0.0;
+  if (!f.valid)
+    return 0.0;
   return Clamp(f.breakout * 0.6 + Clamp(f.volume_surprise, -1.0, 2.0) * 0.2 +
                    Clamp(f.vwap_dev * 20.0, -1.0, 1.0) * 0.2,
-               -1.0, 1.0);
+               -1.0,
+               1.0);
 }
 
 double RegimeScore(const std::vector<Candle>& index_candles) {
-  if (index_candles.size() < 21) return 0.0;
+  if (index_candles.size() < 21)
+    return 0.0;
   const FeatureSet f = ComputeFeatures(index_candles);
   const double vol_penalty = Clamp(0.02 / std::max(f.vol20, 0.002), 0.25, 1.5);
   return Clamp((0.6 * f.ret20 / std::max(f.vol20, 0.002) * 0.05 +
                 0.4 * (f.trend - 0.5) * 2.0) *
                    vol_penalty,
-               -1.0, 1.0);
+               -1.0,
+               1.0);
 }
 
 double EnsembleScore(const FeatureSet& f, double regime) {
@@ -1079,7 +1177,8 @@ double EnsembleScore(const FeatureSet& f, double regime) {
 // ---------------------------------------------------------------------------
 // Deterministic event-driven backtester.
 // ---------------------------------------------------------------------------
-Money ConservativeStopFill(double entry_price, const Candle& candle,
+Money ConservativeStopFill(double entry_price,
+                           const Candle& candle,
                            double stop_fraction) {
   const double stop_price = entry_price * (1.0 - stop_fraction);
   if (candle.low <= stop_price) {
@@ -1091,17 +1190,21 @@ Money ConservativeStopFill(double entry_price, const Candle& candle,
 size_t NextSessionIndex(const std::vector<Candle>& series,
                         const std::string& date) {
   for (size_t i = 0; i < series.size(); ++i) {
-    if (series[i].date > date) return i;
+    if (series[i].date > date)
+      return i;
   }
   return series.size();
 }
 
-double PriorAverageVolume(const std::vector<Candle>& series, size_t index,
+double PriorAverageVolume(const std::vector<Candle>& series,
+                          size_t index,
                           size_t window) {
-  if (index == 0 || window == 0) return 0.0;
+  if (index == 0 || window == 0)
+    return 0.0;
   const size_t start = index > window ? index - window : 0;
   double total = 0.0;
-  for (size_t i = start; i < index; ++i) total += series[i].volume;
+  for (size_t i = start; i < index; ++i)
+    total += series[i].volume;
   return total / static_cast<double>(index - start);
 }
 
@@ -1121,9 +1224,11 @@ BacktestMetrics RunBacktest(
   std::set<std::string> dates;
   for (const auto& [symbol, candles] : history) {
     (void)symbol;
-    for (const Candle& candle : candles) dates.insert(candle.date);
+    for (const Candle& candle : candles)
+      dates.insert(candle.date);
   }
-  if (dates.size() < 130) return metrics;
+  if (dates.size() < 130)
+    return metrics;
 
   auto index_it = history.find("NIFTY 50");
   const std::vector<Candle> empty;
@@ -1173,9 +1278,11 @@ BacktestMetrics RunBacktest(
             auto position = portfolio.positions().find(open_symbol);
             if (position != portfolio.positions().end()) {
               const int qty = position->second.quantity;
-              const CostBreakdown costs = EstimateCosts(
-                  Money::FromPaise(exit_price.paise() * qty),
-                  config.backtest_delivery, false, config.slippage_bps);
+              const CostBreakdown costs =
+                  EstimateCosts(Money::FromPaise(exit_price.paise() * qty),
+                                config.backtest_delivery,
+                                false,
+                                config.slippage_bps);
               const Money basis = position->second.avg_price;  // per share.
               const int64_t trade_gross = (exit_price.paise() - basis.paise()) *
                                           static_cast<int64_t>(qty);
@@ -1185,14 +1292,15 @@ BacktestMetrics RunBacktest(
               else
                 gross_losses -= trade_gross;
               std::string sell_error;
-              if (!portfolio.Sell(open_symbol, qty, exit_price, costs,
-                                  &sell_error)) {
+              if (!portfolio.Sell(
+                      open_symbol, qty, exit_price, costs, &sell_error)) {
                 metrics.warnings.push_back("sell failed: " + sell_error);
                 open_symbol.clear();
                 continue;
               }
               ++metrics.trades;
-              if (exit_price > basis) ++metrics.wins;
+              if (exit_price > basis)
+                ++metrics.wins;
             }
             open_symbol.clear();
           }
@@ -1202,7 +1310,8 @@ BacktestMetrics RunBacktest(
 
     std::vector<Candle> index_window;
     for (const Candle& candle : index) {
-      if (candle.date <= decision_date) index_window.push_back(candle);
+      if (candle.date <= decision_date)
+        index_window.push_back(candle);
     }
     const double regime = RegimeScore(index_window);
     if (regime < -0.2 ||
@@ -1216,14 +1325,18 @@ BacktestMetrics RunBacktest(
     double best_score = 0.35;
     std::string best_symbol;
     for (const auto& [symbol, candles] : history) {
-      if (symbol == "NIFTY 50" || symbol == "INDIA VIX") continue;
+      if (symbol == "NIFTY 50" || symbol == "INDIA VIX")
+        continue;
       std::vector<Candle> window;
       for (const Candle& candle : candles) {
-        if (candle.date <= decision_date) window.push_back(candle);
+        if (candle.date <= decision_date)
+          window.push_back(candle);
       }
-      if (window.size() < 130) continue;
+      if (window.size() < 130)
+        continue;
       const FeatureSet features = ComputeFeatures(window);
-      if (!features.valid) continue;
+      if (!features.valid)
+        continue;
       const double score = EnsembleScore(features, regime);
       if (score > best_score) {
         best_score = score;
@@ -1251,12 +1364,13 @@ BacktestMetrics RunBacktest(
         const SizingResult sized = SizePosition(config, portfolio, sizing);
         if (sized.quantity >= 1) {
           const Money price = Money::FromRupees(execution_candle.open);
-          const CostBreakdown costs =
-              EstimateCosts(sized.notional, config.backtest_delivery, true,
-                            config.slippage_bps);
+          const CostBreakdown costs = EstimateCosts(sized.notional,
+                                                    config.backtest_delivery,
+                                                    true,
+                                                    config.slippage_bps);
           std::string error;
-          if (portfolio.Buy(best_symbol, sized.quantity, price, costs,
-                            &error)) {
+          if (portfolio.Buy(
+                  best_symbol, sized.quantity, price, costs, &error)) {
             open_symbol = best_symbol;
             entry_index = execution_index;
             entry_price = price;
@@ -1278,13 +1392,17 @@ BacktestMetrics RunBacktest(
     }
     for (const auto& [symbol, qty] : terminal_positions) {
       auto series_it = history.find(symbol);
-      if (series_it == history.end() || series_it->second.empty()) continue;
+      if (series_it == history.end() || series_it->second.empty())
+        continue;
       const Money price = Money::FromRupees(series_it->second.back().close);
       const CostBreakdown costs =
           EstimateCosts(Money::FromPaise(price.paise() * qty),
-                        config.backtest_delivery, false, config.slippage_bps);
+                        config.backtest_delivery,
+                        false,
+                        config.slippage_bps);
       const auto position_it = portfolio.positions().find(symbol);
-      if (position_it == portfolio.positions().end()) continue;
+      if (position_it == portfolio.positions().end())
+        continue;
       metrics.gross_pnl += Money::FromPaise(
           (price.paise() - position_it->second.avg_price.paise()) *
           static_cast<int64_t>(qty));
@@ -1298,7 +1416,8 @@ BacktestMetrics RunBacktest(
     }
     for (const std::string& symbol : symbols) {
       auto series_it = history.find(symbol);
-      if (series_it == history.end() || series_it->second.empty()) continue;
+      if (series_it == history.end() || series_it->second.empty())
+        continue;
       const Money price = Money::FromRupees(series_it->second.back().close);
       std::string error;
       if (!portfolio.MarkToMarket(symbol, price, &error)) {
@@ -1340,7 +1459,8 @@ BacktestMetrics RunBacktest(
   metrics.sharpe = sigma > 0.0 ? mean / sigma * std::sqrt(252.0) : 0.0;
   double downside = 0.0;
   for (double value : returns) {
-    if (value < 0.0) downside += value * value;
+    if (value < 0.0)
+      downside += value * value;
   }
   const double downside_sigma =
       returns.empty()
@@ -1352,8 +1472,10 @@ BacktestMetrics RunBacktest(
 }
 
 std::vector<double> BootstrapSharpeCI(const std::vector<double>& returns,
-                                      uint64_t seed, size_t draws) {
-  if (returns.empty() || draws == 0) return {0.0, 0.0, 0.0};
+                                      uint64_t seed,
+                                      size_t draws) {
+  if (returns.empty() || draws == 0)
+    return {0.0, 0.0, 0.0};
   uint64_t state = seed == 0 ? 0x9e3779b97f4a7c15ULL : seed;
   auto next = [&state]() {
     state ^= state << 13;
@@ -1384,9 +1506,11 @@ std::vector<double> BootstrapSharpeCI(const std::vector<double>& returns,
 double DeflatedSharpe(double sharpe, size_t trials, size_t observations) {
   // ESTIMATED: transparent conservative multiple-testing haircut, not the full
   // Bailey-Lopez de Prado DSR (which needs the full trial return distribution).
-  if (observations < 3) return 0.0;
+  if (observations < 3)
+    return 0.0;
   const double denominator = std::log(static_cast<double>(observations) + 1.0);
-  if (denominator <= 0.0) return 0.0;
+  if (denominator <= 0.0)
+    return 0.0;
   const double factor = std::sqrt(std::max(
       0.0, 1.0 - std::log(static_cast<double>(trials) + 1.0) / denominator));
   return sharpe * factor;
@@ -1422,16 +1546,19 @@ bool Journal::Open(const std::string& path, std::string* error) {
   lock_fd_ =
       open((path_ + ".lock").c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
   if (lock_fd_ < 0 || flock(lock_fd_, LOCK_EX | LOCK_NB) != 0) {
-    if (lock_fd_ >= 0) close(lock_fd_);
+    if (lock_fd_ >= 0)
+      close(lock_fd_);
     lock_fd_ = -1;
-    if (error) *error = "journal writer lock unavailable";
+    if (error)
+      *error = "journal writer lock unavailable";
     return false;
   }
   if (std::filesystem::exists(path_)) {
     std::string replay_error;
     const std::vector<Event> existing = Replay(&replay_error);
     if (!replay_error.empty()) {
-      if (error) *error = "journal validation failed: " + replay_error;
+      if (error)
+        *error = "journal validation failed: " + replay_error;
       return false;
     }
     size_ = existing.size();
@@ -1441,7 +1568,8 @@ bool Journal::Open(const std::string& path, std::string* error) {
     next_sequence_ = 1;
   }
   healthy_ = true;
-  if (error) error->clear();
+  if (error)
+    error->clear();
   return true;
 }
 
@@ -1462,15 +1590,18 @@ Journal::~Journal() {
 
 bool Journal::Append(Event* event, std::string* error) {
   if (!healthy_) {
-    if (error) *error = "journal unhealthy; recovery required";
+    if (error)
+      *error = "journal unhealthy; recovery required";
     return false;
   }
   if (path_.empty()) {
-    if (error) *error = "journal not opened";
+    if (error)
+      *error = "journal not opened";
     return false;
   }
   event->sequence = next_sequence_++;
-  if (event->id.empty()) event->id = EventId(event->sequence, event->payload);
+  if (event->id.empty())
+    event->id = EventId(event->sequence, event->payload);
   event->timestamp_ms =
       event->timestamp_ms == 0
           ? std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1493,18 +1624,21 @@ bool Journal::Append(Event* event, std::string* error) {
   const int fd =
       open(path_.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
   if (fd < 0) {
-    if (error) *error = "cannot open journal for append";
+    if (error)
+      *error = "cannot open journal for append";
     return false;
   }
   size_t written = 0;
   while (written < record.size()) {
     const ssize_t count =
         write(fd, record.data() + written, record.size() - written);
-    if (count < 0 && errno == EINTR) continue;
+    if (count < 0 && errno == EINTR)
+      continue;
     if (count <= 0) {
       close(fd);
       healthy_ = false;
-      if (error) *error = "journal write failed";
+      if (error)
+        *error = "journal write failed";
       return false;
     }
     written += static_cast<size_t>(count);
@@ -1512,12 +1646,14 @@ bool Journal::Append(Event* event, std::string* error) {
   if (fchmod(fd, 0600) != 0 || fsync(fd) != 0) {
     close(fd);
     healthy_ = false;
-    if (error) *error = "journal synchronization failed";
+    if (error)
+      *error = "journal synchronization failed";
     return false;
   }
   close(fd);
   ++size_;
-  if (error) error->clear();
+  if (error)
+    error->clear();
   return true;
 }
 
@@ -1526,7 +1662,8 @@ std::vector<Event> Journal::Replay(std::string* error) const {
   std::ifstream input(path_, std::ios::binary);
   if (!input.is_open()) {
     if (std::filesystem::exists(path_)) {
-      if (error) *error = "cannot open journal for replay";
+      if (error)
+        *error = "cannot open journal for replay";
     } else if (error) {
       error->clear();
     }
@@ -1535,23 +1672,28 @@ std::vector<Event> Journal::Replay(std::string* error) const {
   const std::string content((std::istreambuf_iterator<char>(input)),
                             std::istreambuf_iterator<char>());
   if (!content.empty() && content.back() != '\n') {
-    if (error) *error = "incomplete trailing journal record";
+    if (error)
+      *error = "incomplete trailing journal record";
     return {};
   }
   std::vector<std::string> lines;
   std::string line;
   std::istringstream stream(content);
-  while (std::getline(stream, line)) lines.push_back(line);
+  while (std::getline(stream, line))
+    lines.push_back(line);
   uint64_t expected = 1;
   for (const std::string& record : lines) {
     line = record;
-    if (line.empty()) continue;
+    if (line.empty())
+      continue;
     std::vector<std::string> fields;
     std::stringstream ss(line);
     std::string field;
-    while (std::getline(ss, field, '|')) fields.push_back(field);
+    while (std::getline(ss, field, '|'))
+      fields.push_back(field);
     if (fields.size() != 7) {
-      if (error) *error = "malformed journal line";
+      if (error)
+        *error = "malformed journal line";
       return {};
     }
     Event event;
@@ -1561,7 +1703,8 @@ std::vector<Event> Journal::Replay(std::string* error) const {
         !ParseInteger32(fields[2], &type) ||
         !ParseInteger64(fields[3], &event.timestamp_ms) ||
         !ParseInteger32(fields[4], &schema)) {
-      if (error) *error = "non-numeric journal field";
+      if (error)
+        *error = "non-numeric journal field";
       return {};
     }
     event.type = static_cast<EventType>(type);
@@ -1587,7 +1730,8 @@ std::vector<Event> Journal::Replay(std::string* error) const {
     ++expected;
     events.push_back(event);
   }
-  if (error) error->clear();
+  if (error)
+    error->clear();
   return events;
 }
 
@@ -1596,12 +1740,14 @@ std::vector<Event> Journal::Replay(std::string* error) const {
 // ---------------------------------------------------------------------------
 class JsonParser {
  public:
-  explicit JsonParser(std::string_view text) : text_(text) {}
+  explicit JsonParser(std::string_view text) : text_(text) {
+  }
 
   bool Parse(Json* out, std::string* error) {
     SkipSpace();
     if (!Value(out)) {
-      if (error) *error = "JSON parse error at offset " + std::to_string(pos_);
+      if (error)
+        *error = "JSON parse error at offset " + std::to_string(pos_);
       return false;
     }
     SkipSpace();
@@ -1619,13 +1765,17 @@ class JsonParser {
 
   bool Value(Json* out) {
     SkipSpace();
-    if (pos_ >= text_.size()) return false;
+    if (pos_ >= text_.size())
+      return false;
     const char c = text_[pos_];
-    if (c == '{') return Object(out);
-    if (c == '[') return Array(out);
+    if (c == '{')
+      return Object(out);
+    if (c == '[')
+      return Array(out);
     if (c == '"') {
       std::string value;
-      if (!String(&value)) return false;
+      if (!String(&value))
+        return false;
       *out = Json::String(value);
       return true;
     }
@@ -1648,17 +1798,20 @@ class JsonParser {
   }
 
   bool String(std::string* out) {
-    if (text_[pos_] != '"') return false;
+    if (text_[pos_] != '"')
+      return false;
     ++pos_;
     out->clear();
     while (pos_ < text_.size()) {
       const char c = text_[pos_++];
-      if (c == '"') return true;
+      if (c == '"')
+        return true;
       if (c != '\\') {
         out->push_back(c);
         continue;
       }
-      if (pos_ >= text_.size()) return false;
+      if (pos_ >= text_.size())
+        return false;
       const char escape = text_[pos_++];
       switch (escape) {
         case 'n':
@@ -1680,7 +1833,8 @@ class JsonParser {
           out->push_back('/');
           break;
         case 'u': {
-          if (pos_ + 4 > text_.size()) return false;
+          if (pos_ + 4 > text_.size())
+            return false;
           const unsigned code = static_cast<unsigned>(
               std::stoul(std::string(text_.substr(pos_, 4)), nullptr, 16));
           pos_ += 4;
@@ -1712,10 +1866,12 @@ class JsonParser {
            ((text_[pos_] >= '0' && text_[pos_] <= '9') || text_[pos_] == '.' ||
             text_[pos_] == 'e' || text_[pos_] == 'E' || text_[pos_] == '-' ||
             text_[pos_] == '+')) {
-      if (text_[pos_] >= '0' && text_[pos_] <= '9') digits = true;
+      if (text_[pos_] >= '0' && text_[pos_] <= '9')
+        digits = true;
       ++pos_;
     }
-    if (!digits) return false;
+    if (!digits)
+      return false;
     double value = 0.0;
     if (!ParseFloating(std::string(text_.substr(start, pos_ - start)),
                        &value)) {
@@ -1736,10 +1892,12 @@ class JsonParser {
     }
     while (pos_ < text_.size()) {
       Json value;
-      if (!Value(&value)) return false;
+      if (!Value(&value))
+        return false;
       values.push_back(value);
       SkipSpace();
-      if (pos_ >= text_.size()) return false;
+      if (pos_ >= text_.size())
+        return false;
       if (text_[pos_] == ',') {
         ++pos_;
         continue;
@@ -1766,15 +1924,19 @@ class JsonParser {
     while (pos_ < text_.size()) {
       SkipSpace();
       std::string key;
-      if (!String(&key)) return false;
+      if (!String(&key))
+        return false;
       SkipSpace();
-      if (pos_ >= text_.size() || text_[pos_] != ':') return false;
+      if (pos_ >= text_.size() || text_[pos_] != ':')
+        return false;
       ++pos_;
       Json value;
-      if (!Value(&value)) return false;
+      if (!Value(&value))
+        return false;
       values[key] = value;
       SkipSpace();
-      if (pos_ >= text_.size()) return false;
+      if (pos_ >= text_.size())
+        return false;
       if (text_[pos_] == ',') {
         ++pos_;
         continue;
@@ -1793,7 +1955,9 @@ class JsonParser {
   size_t pos_ = 0;
 };
 
-Json Json::Null() { return Json(); }
+Json Json::Null() {
+  return Json();
+}
 Json Json::Bool(bool value) {
   Json json;
   json.type_ = Type::kBool;
@@ -1840,7 +2004,8 @@ std::string Json::as_string(std::string fallback) const {
   return type_ == Type::kString ? string_ : std::move(fallback);
 }
 const Json* Json::Find(std::string_view key) const {
-  if (type_ != Type::kObject) return nullptr;
+  if (type_ != Type::kObject)
+    return nullptr;
   const auto it = object_.find(std::string(key));
   return it == object_.end() ? nullptr : &it->second;
 }
@@ -1857,7 +2022,8 @@ std::string Json::Dump() const {
     case Type::kArray: {
       std::string out = "[";
       for (size_t i = 0; i < array_.size(); ++i) {
-        if (i > 0) out += ",";
+        if (i > 0)
+          out += ",";
         out += array_[i].Dump();
       }
       return out + "]";
@@ -1866,7 +2032,8 @@ std::string Json::Dump() const {
       std::string out = "{";
       bool first = true;
       for (const auto& [key, value] : object_) {
-        if (!first) out += ",";
+        if (!first)
+          out += ",";
         first = false;
         out += "\"" + key + "\":" + value.Dump();
       }
@@ -1959,7 +2126,8 @@ std::vector<uint8_t> Gunzip(const std::vector<uint8_t>& input,
   std::vector<uint8_t> output;
   z_stream stream{};
   if (inflateInit2(&stream, 15 + 32) != Z_OK) {
-    if (error) *error = "zlib initialisation failed";
+    if (error)
+      *error = "zlib initialisation failed";
     return output;
   }
   stream.next_in = const_cast<Bytef*>(input.data());
@@ -1972,15 +2140,18 @@ std::vector<uint8_t> Gunzip(const std::vector<uint8_t>& input,
     status = inflate(&stream, Z_NO_FLUSH);
     const size_t produced = buffer.size() - stream.avail_out;
     output.insert(output.end(), buffer.begin(), buffer.begin() + produced);
-    if (status == Z_STREAM_END) break;
-    if (status != Z_OK && status != Z_BUF_ERROR) break;
+    if (status == Z_STREAM_END)
+      break;
+    if (status != Z_OK && status != Z_BUF_ERROR)
+      break;
   }
   inflateEnd(&stream);
   if (status != Z_STREAM_END && error) {
     *error = "gzip decompression failed";
     return {};
   }
-  if (error) error->clear();
+  if (error)
+    error->clear();
   return output;
 }
 
@@ -1993,17 +2164,20 @@ std::string WriteTextFile(const std::string& path, const std::string& content) {
     std::filesystem::create_directories(path.substr(0, slash));
   }
   std::ofstream output(path);
-  if (!output.is_open()) return "cannot write " + path;
+  if (!output.is_open())
+    return "cannot write " + path;
   output << content;
   return output.good() ? "" : "write failed for " + path;
 }
 
-bool ReadCsvCandles(const std::string& path, std::vector<Candle>* candles,
+bool ReadCsvCandles(const std::string& path,
+                    std::vector<Candle>* candles,
                     std::string* error) {
   candles->clear();
   std::ifstream input(path);
   if (!input.is_open()) {
-    if (error) *error = "cannot open " + path;
+    if (error)
+      *error = "cannot open " + path;
     return false;
   }
   std::string line;
@@ -2012,8 +2186,10 @@ bool ReadCsvCandles(const std::string& path, std::vector<Candle>* candles,
     std::vector<std::string> fields;
     std::stringstream ss(line);
     std::string field;
-    while (std::getline(ss, field, ',')) fields.push_back(field);
-    if (fields.size() < 6) continue;
+    while (std::getline(ss, field, ','))
+      fields.push_back(field);
+    if (fields.size() < 6)
+      continue;
     Candle candle;
     candle.date = fields[0];
     if (!ParseFloating(fields[1], &candle.open) ||
@@ -2021,12 +2197,14 @@ bool ReadCsvCandles(const std::string& path, std::vector<Candle>* candles,
         !ParseFloating(fields[3], &candle.low) ||
         !ParseFloating(fields[4], &candle.close) ||
         !ParseFloating(fields[5], &candle.volume)) {
-      if (error) *error = "malformed candle row in " + path;
+      if (error)
+        *error = "malformed candle row in " + path;
       return false;
     }
     candles->push_back(candle);
   }
-  std::sort(candles->begin(), candles->end(),
+  std::sort(candles->begin(),
+            candles->end(),
             [](const Candle& a, const Candle& b) { return a.date < b.date; });
   return true;
 }
@@ -2070,7 +2248,8 @@ std::string RenderReport(const DailyReport& report) {
     }
   }
   oss << "## Rejections\n\n";
-  for (const std::string& line : report.rejections) oss << "- " << line << "\n";
+  for (const std::string& line : report.rejections)
+    oss << "- " << line << "\n";
   oss << "\n## Labels\n\n";
   oss << "VERIFIED = directly observed; ESTIMATED = modelled; SIMULATED = no "
          "real "

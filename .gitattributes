@@ -1,0 +1,16 @@
+* text=auto eol=lf
+*.cpp text eol=lf
+*.hpp text eol=lf
+*.py text eol=lf
+*.q text eol=lf
+*.toml text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.txt text eol=lf
+*.html text eol=lf
+*.png binary
+*.jpg binary
+*.zip binary
+*.o binary
+*.a binary

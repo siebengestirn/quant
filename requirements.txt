@@ -1,0 +1,6 @@
+black==26.10.1
+pre-commit==4.5.1
+pykx==4.2.0
+pylint==3.3.9
+pytest==9.2.0
+ruff==0.17.6

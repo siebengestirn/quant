@@ -25,6 +25,7 @@ import shutil
 import subprocess
 import sys
 import time
+import tomllib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -287,6 +288,40 @@ def check_generated_paths() -> bool:
     return not bad
 
 
+def check_q_style() -> bool:
+    rules = tomllib.loads((ROOT / "q" / "qstyle.toml").read_text())
+    text = (ROOT / "q" / "quant.q").read_text(encoding="utf-8")
+    lines = text.splitlines()
+    ok = True
+    over = [
+        n
+        for n, line in enumerate(lines, 1)
+        if len(line) > rules["max_line_length"]
+    ]
+    if over:
+        print(f"q lines exceed {rules['max_line_length']}: {over[:10]}")
+        ok = False
+    if rules["required_namespace"] not in text:
+        print("q namespace missing")
+        ok = False
+    for table in rules["required_tables"]:
+        if not re.search(rf"\b{re.escape(table)}\s*:", text):
+            print(f"q table missing: {table}")
+            ok = False
+    for function in rules["required_functions"]:
+        if function not in text:
+            print(f"q function missing: {function}")
+            ok = False
+    for token in rules["forbidden_tokens"]:
+        if token in text:
+            print(f"q forbidden token present: {token}")
+            ok = False
+    if not re.search(r"bars:\(\[date:", text):
+        print("bars table is not keyed")
+        ok = False
+    return ok
+
+
 def check_secrets() -> bool:
     services = [
         "NIRNAY_FYERS_APP_ID",
@@ -404,7 +439,6 @@ def apply_format() -> bool:
             [
                 "clang-format",
                 "-i",
-                "--style=" + CLANG_STYLE,
                 *[str(p) for p in CPP_FILES],
             ]
         )
@@ -428,6 +462,7 @@ def apply_format() -> bool:
 def run_checks(gate: Gate, allow_dirty: bool) -> None:
     gate.run("style reference integrity", check_style_references)
     gate.run("generated-path policy", check_generated_paths)
+    gate.run("q style contract", check_q_style)
     gate.run("git policy", lambda: check_git_policy(allow_dirty))
     if shutil.which("clang-format"):
         gate.run(
@@ -437,7 +472,6 @@ def run_checks(gate: Gate, allow_dirty: bool) -> None:
                     "clang-format",
                     "--dry-run",
                     "--Werror",
-                    "--style=" + CLANG_STYLE,
                     *[str(p) for p in CPP_FILES],
                 ]
             ).returncode
