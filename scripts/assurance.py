@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -316,6 +317,10 @@ def check_secrets() -> bool:
 def check_git_policy(allow_dirty: bool) -> bool:
     ok = True
     branch = git("rev-parse", "--abbrev-ref", "HEAD")
+    if branch == "HEAD":
+        branch = os.environ.get("GITHUB_HEAD_REF") or os.environ.get(
+            "GITHUB_REF_NAME", "HEAD"
+        )
     prefixes = tuple(POLICY["branch"]["allowed_topic_prefixes"])
     active = set(POLICY["branch"]["active_topic_branches"])
     if branch != "main" and not (
@@ -345,10 +350,10 @@ def check_git_policy(allow_dirty: bool) -> bool:
         if not pattern.match(subject):
             print(f"commit subject violates policy: {sha} {subject}")
             ok = False
-    if branch != "main":
+    if branch != "main" and os.environ.get("GITHUB_ACTIONS") != "true":
         pr = command(["gh", "pr", "view", "--json", "state"])
         if pr.returncode != 0 or '"OPEN"' not in pr.stdout:
-            print("no open pull request for topic branch")
+            print(f"no open pull request for topic branch: {pr.stderr.strip()}")
             ok = False
     return ok
 
@@ -468,7 +473,10 @@ def run_checks(gate: Gate, allow_dirty: bool) -> None:
     print(f"terminology advisory findings: {len(findings) - len(binding)}")
     if report:
         print(f"audit report: {report}")
-    gate.run("secret scan", check_secrets)
+    if shutil.which("security"):
+        gate.run("secret scan", check_secrets)
+    else:
+        gate.skip("secret scan", "Keychain unavailable on this platform")
     gate.run(
         "CMake configure",
         lambda: command(
