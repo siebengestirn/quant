@@ -314,6 +314,84 @@ def walk_forward_ic(
     return output
 
 
+def dataset_quality(
+    rows: list[dict[str, float]], expected_sessions: list[str]
+) -> dict:
+    """Dataset completeness with explicit status; malformed bars are counted.
+
+    Numeric conversion failures are recorded, never converted into zero.
+    """
+    invalid = 0
+    seen: set[str] = set()
+    duplicates = 0
+    valid_dates: set[str] = set()
+    for row in rows:
+        date = str(row.get("date", ""))
+        if not date:
+            invalid += 1
+            continue
+        if date in seen:
+            duplicates += 1
+        seen.add(date)
+        values = [
+            row.get(field)
+            for field in ("open", "high", "low", "close", "volume")
+        ]
+        if not all(
+            isinstance(value, (int, float))
+            and math.isfinite(float(value))
+            and float(value) >= 0
+            for value in values
+        ):
+            invalid += 1
+            continue
+        if float(row["close"]) <= 0 or float(row["high"]) < float(row["low"]):
+            invalid += 1
+            continue
+        valid_dates.add(date)
+    expected = set(expected_sessions)
+    missing = sorted(expected - valid_dates)
+    if invalid or duplicates or missing:
+        status = "PARTIAL"
+    elif valid_dates == expected and expected:
+        status = "COMPLETE"
+    else:
+        status = "BLOCKED"
+    return {
+        "status": status,
+        "expected_sessions": len(expected),
+        "observed_sessions": len(valid_dates),
+        "missing_sessions": missing,
+        "duplicate_count": duplicates,
+        "invalid_bar_count": invalid,
+    }
+
+
+def point_in_time_universe(
+    instrument_status: list[dict], as_of: str
+) -> list[str]:
+    """Eligibility using only status records effective on or before as_of.
+
+    A later surveillance or delisting record cannot change a prior decision.
+    """
+    eligible: set[str] = set()
+    for record in instrument_status:
+        effective_from = str(record.get("effective_from", ""))
+        effective_to = str(record.get("effective_to", ""))
+        if effective_from and effective_from > as_of:
+            continue
+        if effective_to and effective_to < as_of:
+            continue
+        symbol = str(record.get("symbol", ""))
+        if not symbol:
+            continue
+        if bool(record.get("eligible", False)):
+            eligible.add(symbol)
+        else:
+            eligible.discard(symbol)
+    return sorted(eligible)
+
+
 def forward_label(
     rows: list[dict[str, float]], index: int, sessions: int
 ) -> float | None:
