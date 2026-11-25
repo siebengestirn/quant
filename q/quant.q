@@ -4,6 +4,19 @@
 / order-submission capability.
 / IPC is bound by the launcher to loopback (see `quant db start`).
 
+/ Runtime identity handshake. An isolated test process receives a unique id on
+/ its command line; clients must verify this before issuing write operations.
+.quant.cliArg:{[name]
+  hits:where .z.x ~\: name;
+  if[0=count hits; :""];
+  i:hits[0];
+  if[i+1>=count .z.x; :""];
+  :.z.x[i+1]}
+
+.quant.instanceId:.quant.cliArg["-instanceId"]
+.quant.instanceJson:{[]
+  .j.j `instanceId`schemaVersion!(.quant.instanceId;.quant.schemaVersion)}
+
 .quant.version:1
 .quant.schemaVersion:1
 
@@ -146,10 +159,14 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
   avgv:$[n>=20; last mavg[20;v]; 0f];
   vwv:$[n>=20; last mavg[20;c*v]; 0f];
   vw:$[avgv>0; vwv%avgv; c[n-1]];
-  (`date`symbol`ret20`ret60`ret120`vol20`volSurprise`vwapDev)!
+  / vol20 uses a 20-observation rolling sample convention (q mdev).
+  / vwapDev is a daily OHLCV volume-weighted proxy, not intraday trade VWAP.
+  (`date`symbol`ret20`ret60`ret120`vol20`volSurprise`vwapDev`dailyVwapProxyDev)!
     (last b`date; sym; .quant.safeRet[c;n;20];
      .quant.safeRet[c;n;60]; .quant.safeRet[c;n;120];
-     dev r; $[avgv>0; ((last v)%avgv)-1; 0f];
+     $[n>=21; last mdev[20;r]; dev r];
+     $[avgv>0; ((last v)%avgv)-1; 0f];
+     $[vw>0; ((last c)%vw)-1; 0f];
      $[vw>0; ((last c)%vw)-1; 0f])}
 
 .quant.featureTable:{[]
@@ -161,7 +178,8 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
       ret20:enlist row`ret20; ret60:enlist row`ret60;
       ret120:enlist row`ret120; vol20:enlist row`vol20;
       volSurprise:enlist row`volSurprise;
-      vwapDev:enlist row`vwapDev)} each rows}
+      vwapDev:enlist row`vwapDev;
+      dailyVwapProxyDev:enlist row`dailyVwapProxyDev)} each rows}
 
 .quant.asofFeatures:{[]
   q:select seq,symbol,ts:`timestamp$exchangeNs,lastPx from quotes;

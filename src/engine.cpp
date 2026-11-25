@@ -338,6 +338,11 @@ ConfigResult LoadConfig(const std::string& path) {
   c.keychain_prefix = StringOr(values, dat + "KEYCHAIN_PREFIX", "NIRNAY_");
 
   c.max_spread_bps = DoubleOr(values, exe + "MAX_SPREAD_BPS", 35.0);
+  c.max_participation_fraction =
+      DoubleOr(values, exe + "MAX_PARTICIPATION_FRACTION", 0.01);
+  c.stop_loss_fraction = DoubleOr(values, exe + "STOP_LOSS_FRACTION", 0.05);
+  c.backtest_delivery = BoolOr(values, exe + "BACKTEST_DELIVERY", true);
+  c.terminal_liquidation = BoolOr(values, exe + "TERMINAL_LIQUIDATION", false);
   c.min_traded_value_inr = DoubleOr(values, exe + "MIN_TRADED_VALUE_INR", 5e6);
   c.slippage_bps = DoubleOr(values, exe + "SLIPPAGE_BPS", 10.0);
   c.queue_capacity =
@@ -643,6 +648,13 @@ SizingResult SizePosition(const Config& config, const Portfolio& portfolio,
     result.reason = "invalid price";
     return result;
   }
+  if (input.tick_size > 0.0) {
+    const double ticks = input.price.rupees() / input.tick_size;
+    if (std::abs(ticks - std::round(ticks)) > 1e-6) {
+      result.reason = "price violates tick size";
+      return result;
+    }
+  }
   const Money equity = portfolio.equity();
   if (equity <= Money::FromRupees(0.0)) {
     result.reason = "non-positive equity";
@@ -658,12 +670,17 @@ SizingResult SizePosition(const Config& config, const Portfolio& portfolio,
   const double price = input.price.rupees();
   const double risk_budget =
       equity.rupees() * config.risk_per_trade_fraction * drawdown_scale;
-  const double risk_per_share = price * std::max(input.volatility, 0.005) * 2.0;
+  const double stop_fraction = input.stop_distance > 0.0
+                                   ? input.stop_distance
+                                   : std::max(input.volatility, 0.005) * 2.0;
+  const double risk_per_share = price * stop_fraction;
   const double reserve = equity.rupees() * config.cash_reserve_fraction;
   const double spendable =
       std::max(0.0, portfolio.available_cash().rupees() - reserve);
   const double exposure_cap =
-      equity.rupees() * config.max_gross_exposure_fraction / price;
+      std::max(0.0, equity.rupees() * config.max_gross_exposure_fraction -
+                        input.current_exposure.rupees()) /
+      price;
   const double participation = input.participation > 0.0
                                    ? input.participation
                                    : config.max_participation_fraction;
@@ -680,7 +697,7 @@ SizingResult SizePosition(const Config& config, const Portfolio& portfolio,
         Money::FromPaise(input.price.paise() * static_cast<int64_t>(quantity));
     const CostBreakdown costs =
         EstimateCosts(notional, input.delivery, true, config.slippage_bps);
-    if (notional + costs.total <= portfolio.available_cash()) break;
+    if (notional + costs.total <= Money::FromRupees(spendable)) break;
     --quantity;
   }
   if (quantity < 1) {
@@ -731,9 +748,14 @@ RiskDecision RiskEngine::Evaluate(const Signal& signal, const Quote& quote,
   }
 
   SizingInput sizing;
-  sizing.price = Money::FromRupees(quote.last);
+  sizing.side = OrderSide::kBuy;
+  sizing.price = Money::FromRupees(quote.ask);  // Executable ask for a buy.
   sizing.volatility = signal.features.vol20;
-  sizing.available_depth = quote.bid_qty;
+  sizing.stop_distance = config_.stop_loss_fraction;
+  sizing.available_depth = quote.ask_qty;  // Side-specific depth.
+  sizing.current_exposure = portfolio.ledger().invested;
+  if (sizing.available_depth <= 0)
+    return reject("missing executable ask depth");
   const SizingResult sized = SizePosition(config_, portfolio, sizing);
   if (sized.quantity < 1) return reject(sized.reason);
 
@@ -873,8 +895,9 @@ double EnsembleScore(const FeatureSet& f, double regime) {
 // ---------------------------------------------------------------------------
 // Deterministic event-driven backtester.
 // ---------------------------------------------------------------------------
-Money ConservativeStopFill(double entry_price, const Candle& candle) {
-  const double stop_price = entry_price * 0.95;
+Money ConservativeStopFill(double entry_price, const Candle& candle,
+                           double stop_fraction) {
+  const double stop_price = entry_price * (1.0 - stop_fraction);
   if (candle.low <= stop_price) {
     return Money::FromRupees(std::min(candle.open, stop_price));
   }
@@ -887,6 +910,15 @@ size_t NextSessionIndex(const std::vector<Candle>& series,
     if (series[i].date > date) return i;
   }
   return series.size();
+}
+
+double PriorAverageVolume(const std::vector<Candle>& series, size_t index,
+                          size_t window) {
+  if (index == 0 || window == 0) return 0.0;
+  const size_t start = index > window ? index - window : 0;
+  double total = 0.0;
+  for (size_t i = start; i < index; ++i) total += series[i].volume;
+  return total / static_cast<double>(index - start);
 }
 
 BacktestMetrics RunBacktest(
@@ -936,12 +968,13 @@ BacktestMetrics RunBacktest(
         if (current_index < series.size()) {
           const Candle& candle = series[current_index];
           portfolio.MarkToMarket(open_symbol, Money::FromRupees(candle.close));
-          const bool stop = candle.low <= entry_price.rupees() * 0.95;
+          const bool stop = candle.low <= entry_price.rupees() *
+                                              (1.0 - config.stop_loss_fraction);
           if (current_index >=
                   entry_index + static_cast<size_t>(hold_sessions) ||
               stop) {
-            const Money exit_price =
-                ConservativeStopFill(entry_price.rupees(), candle);
+            const Money exit_price = ConservativeStopFill(
+                entry_price.rupees(), candle, config.stop_loss_fraction);
             auto position = portfolio.positions().find(open_symbol);
             if (position != portfolio.positions().end()) {
               const int qty = position->second.quantity;
@@ -1015,7 +1048,8 @@ BacktestMetrics RunBacktest(
         if (sized.quantity >= 1) {
           const Money price = Money::FromRupees(execution_candle.open);
           const CostBreakdown costs =
-              EstimateCosts(sized.notional, false, true, config.slippage_bps);
+              EstimateCosts(sized.notional, config.backtest_delivery, true,
+                            config.slippage_bps);
           std::string error;
           if (portfolio.Buy(best_symbol, sized.quantity, price, costs,
                             &error)) {
@@ -1032,13 +1066,30 @@ BacktestMetrics RunBacktest(
     equity_curve.push_back(portfolio.equity().rupees());
   }
 
-  for (const auto& [symbol, position] : portfolio.positions()) {
-    (void)position;
-    auto series_it = history.find(symbol);
-    if (series_it == history.end() || series_it->second.empty()) continue;
-    const Money price = Money::FromRupees(series_it->second.back().close);
-    portfolio.MarkToMarket(symbol, price);
+  if (config.terminal_liquidation) {
+    for (const auto& [symbol, position] : portfolio.positions()) {
+      const int qty = position.quantity;
+      auto series_it = history.find(symbol);
+      if (series_it == history.end() || series_it->second.empty()) continue;
+      const Money price = Money::FromRupees(series_it->second.back().close);
+      const CostBreakdown costs =
+          EstimateCosts(Money::FromPaise(price.paise() * qty),
+                        config.backtest_delivery, false, config.slippage_bps);
+      metrics.gross_pnl +=
+          Money::FromPaise((price.paise() - position.avg_price.paise()) *
+                           static_cast<int64_t>(qty));
+      portfolio.Sell(symbol, qty, price, costs, nullptr);
+    }
+  } else {
+    for (const auto& [symbol, position] : portfolio.positions()) {
+      (void)position;
+      auto series_it = history.find(symbol);
+      if (series_it == history.end() || series_it->second.empty()) continue;
+      const Money price = Money::FromRupees(series_it->second.back().close);
+      portfolio.MarkToMarket(symbol, price);
+    }
   }
+  metrics.terminal_liquidation = config.terminal_liquidation;
 
   metrics.net_pnl = portfolio.equity() - config.initial_capital;
   metrics.realized_pnl = portfolio.ledger().realized_pnl;

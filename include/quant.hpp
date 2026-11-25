@@ -129,6 +129,9 @@ struct Config {
   double cash_reserve_fraction = 0.10;
   double max_spread_bps = 35.0;
   double max_participation_fraction = 0.01;
+  double stop_loss_fraction = 0.05;
+  bool backtest_delivery = true;
+  bool terminal_liquidation = false;
   double min_traded_value_inr = 5e6;
   double slippage_bps = 10.0;
   size_t history_days = 260;
@@ -342,10 +345,14 @@ struct RiskDecision {
 };
 
 struct SizingInput {
-  Money price;
+  Money price;  // Intended executable price, not LTP.
+  OrderSide side = OrderSide::kBuy;
   double volatility = 0.0;      // Daily return standard deviation (fraction).
-  int64_t available_depth = 0;  // Shares available at the decision price.
+  double stop_distance = 0.0;   // Explicit stop fraction; volatility if zero.
+  int64_t available_depth = 0;  // Side-specific executable depth.
+  double tick_size = 0.0;       // Instrument tick size when known.
   double participation = 0.0;   // Optional override of the config cap.
+  Money current_exposure;       // Exposure already held by the portfolio.
   bool delivery = false;        // Charge model used for the cash reserve.
 };
 
@@ -392,6 +399,7 @@ struct BacktestMetrics {
   Money statutory;
   Money slippage;
   Money max_drawdown;
+  bool terminal_liquidation = false;
   std::vector<std::string> audit;
   double sharpe = 0.0;
   double sortino = 0.0;
@@ -402,11 +410,16 @@ struct BacktestMetrics {
 
 // Conservative long-stop fill: if the stop was crossed, assume the adverse
 // path occurred before any favourable move. A gap-down fills at the open.
-Money ConservativeStopFill(double entry_price, const Candle& candle);
+Money ConservativeStopFill(double entry_price, const Candle& candle,
+                           double stop_fraction = 0.05);
 
 // First session strictly after the given date, in an instrument's own series.
 size_t NextSessionIndex(const std::vector<Candle>& series,
                         const std::string& date);
+
+// Average volume from observations strictly before the given index.
+double PriorAverageVolume(const std::vector<Candle>& series, size_t index,
+                          size_t window = 20);
 
 BacktestMetrics RunBacktest(
     const std::map<std::string, std::vector<Candle>>& history,

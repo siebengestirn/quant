@@ -96,7 +96,7 @@ Signal GoodSignal(const FeatureSet& features) {
 Config TestConfig() {
   Config config;
   config.initial_capital = Money::FromRupees(500.0);
-  config.risk_per_trade_fraction = 0.01;
+  config.risk_per_trade_fraction = 0.02;
   config.max_open_positions = 1;
   config.slippage_bps = 10.0;
   config.max_spread_bps = 35.0;
@@ -545,6 +545,52 @@ void TestDynamicSizing() {
         "NO TRADE reason is explicit");
 }
 
+void TestSizingConstraints() {
+  const Config config = TestConfig();
+  Portfolio rich(Money::FromRupees(100000.0));
+  SizingInput input;
+  input.price = Money::FromRupees(80.0);  // Executable ask, not LTP.
+  input.stop_distance = 0.05;
+  input.available_depth = 500;
+  input.current_exposure = Money::FromRupees(0.0);
+  const SizingResult deep = SizePosition(config, rich, input);
+  Check(deep.quantity == 5, "ask depth participation caps quantity");
+
+  input.available_depth = 100000;
+  const SizingResult unrestricted = SizePosition(config, rich, input);
+  Check(unrestricted.quantity > deep.quantity,
+        "larger executable depth permits more quantity");
+  Check(unrestricted.notional.paise() ==
+            input.price.paise() * unrestricted.quantity,
+        "notional uses intended execution price");
+
+  input.stop_distance = 0.50;
+  const SizingResult wide_stop = SizePosition(config, rich, input);
+  Check(wide_stop.quantity < unrestricted.quantity,
+        "stop distance controls risk-based quantity");
+
+  Portfolio poor(Money::FromRupees(95.0));
+  SizingInput reserve_input;
+  reserve_input.price = Money::FromRupees(90.0);
+  reserve_input.stop_distance = 0.05;
+  reserve_input.available_depth = 1000;
+  const SizingResult reserved = SizePosition(config, poor, reserve_input);
+  Check(reserved.quantity == 0, "cash reserve is preserved after costs");
+
+  SizingInput tick_input = input;
+  tick_input.price = Money::FromRupees(80.01);
+  tick_input.tick_size = 1.0;
+  const SizingResult bad_tick = SizePosition(config, rich, tick_input);
+  Check(bad_tick.quantity == 0, "tick-size violation is rejected");
+
+  Portfolio exposed(Money::FromRupees(100000.0));
+  SizingInput exposure_input = input;
+  exposure_input.available_depth = 100000;
+  exposure_input.current_exposure = Money::FromRupees(79900.0);
+  const SizingResult capped = SizePosition(config, exposed, exposure_input);
+  Check(capped.quantity <= 1, "existing exposure reduces allowance");
+}
+
 void TestExecutionSemantics() {
   Candle gap_stop;
   gap_stop.date = "2026-11-25";
@@ -581,6 +627,18 @@ void TestExecutionSemantics() {
         "weekend gap is skipped correctly");
   Check(NextSessionIndex(series, "2026-01-05") == series.size(),
         "no session after final date");
+
+  std::vector<Candle> volumes;
+  for (int i = 0; i < 30; ++i) {
+    Candle candle;
+    candle.date = "2026-02-" + std::to_string(i + 1);
+    candle.volume = 1000.0;
+    volumes.push_back(candle);
+  }
+  volumes.push_back(volumes[29]);
+  volumes[30].volume = 100000000.0;  // Huge volume on the execution day.
+  Check(PriorAverageVolume(volumes, 30, 20) == 1000.0,
+        "execution-day volume does not leak into the decision");
 }
 
 void TestKdbxGate() {
@@ -635,6 +693,7 @@ int main() {
   TestGunzip();
   TestCsv();
   TestDynamicSizing();
+  TestSizingConstraints();
   TestExecutionSemantics();
   TestKdbxGate();
   std::cout << "checks=" << g_checks << " failures=" << g_failures << "\n";

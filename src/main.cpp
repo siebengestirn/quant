@@ -1,8 +1,10 @@
 #include "quant.hpp"
 
 #include <fcntl.h>
+#include <netinet/in.h>
 #include <signal.h>
 #include <spawn.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -119,23 +121,65 @@ bool QProcessAlive(const std::string& pid_path) {
   return std::system(("kill -0 " + text + " 2>/dev/null").c_str()) == 0;
 }
 
-pid_t StartIsolatedQ(const Config& config, KdbxConfig* test_config,
-                     std::string* error) {
-  *test_config = config.kdbx;
-  test_config->port = config.kdbx.port + 1;
-  test_config->hdb_dir =
-      (std::filesystem::path(config.data_dir) / "db" / "test_hdb").string();
-  const std::string log_path =
-      (std::filesystem::path(config.data_dir) / "db" / "q-test.log").string();
-  std::filesystem::create_directories(
-      std::filesystem::path(log_path).parent_path());
-  std::filesystem::create_directories(test_config->hdb_dir);
+struct IsolatedQ {
+  pid_t pid = -1;
+  KdbxConfig config;
+  std::string directory;
+  std::string instance_id;
+  bool owned = false;
+};
 
+int FreeLoopbackPort() {
+  const int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) return -1;
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = 0;
+  if (bind(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+    close(fd);
+    return -1;
+  }
+  sockaddr_in assigned{};
+  socklen_t length = sizeof(assigned);
+  const bool ok =
+      getsockname(fd, reinterpret_cast<sockaddr*>(&assigned), &length) == 0;
+  close(fd);
+  return ok ? ntohs(assigned.sin_port) : -1;
+}
+
+bool StartIsolatedQ(const Config& config, IsolatedQ* out, std::string* error) {
+  const int port = FreeLoopbackPort();
+  if (port < 1) {
+    *error = "cannot allocate a loopback port";
+    return false;
+  }
+  std::filesystem::create_directories(std::filesystem::path(config.data_dir) /
+                                      "db");
+  std::string pattern =
+      (std::filesystem::path(config.data_dir) / "db" / "test-XXXXXX").string();
+  std::vector<char> buffer(pattern.begin(), pattern.end());
+  buffer.push_back('\0');
+  if (mkdtemp(buffer.data()) == nullptr) {
+    *error = "cannot create isolated test directory";
+    return false;
+  }
+  out->directory = std::string(buffer.data());
+  out->config = config.kdbx;
+  out->config.port = port;
+  out->config.hdb_dir = out->directory + "/hdb";
+  out->instance_id =
+      "quant-test-" + std::to_string(getpid()) + "-" +
+      std::to_string(
+          std::chrono::steady_clock::now().time_since_epoch().count());
+  std::filesystem::create_directories(out->config.hdb_dir);
+
+  const std::string log_path = out->directory + "/q.log";
   const int log_fd =
-      open(log_path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+      open(log_path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0600);
   if (log_fd < 0) {
     *error = "cannot open isolated q log";
-    return -1;
+    return false;
   }
   posix_spawn_file_actions_t actions;
   posix_spawn_file_actions_init(&actions);
@@ -145,11 +189,13 @@ pid_t StartIsolatedQ(const Config& config, KdbxConfig* test_config,
   posix_spawn_file_actions_addclose(&actions, log_fd);
 
   const std::string qbin = QBinary();
-  const std::string endpoint =
-      test_config->host + ":" + std::to_string(test_config->port);
+  const std::string endpoint = out->config.host + ":" + std::to_string(port);
   char* argv[] = {const_cast<char*>(qbin.data()),
                   const_cast<char*>(config.kdbx.script.data()),
-                  const_cast<char*>("-p"), const_cast<char*>(endpoint.data()),
+                  const_cast<char*>("-p"),
+                  const_cast<char*>(endpoint.data()),
+                  const_cast<char*>("-instanceId"),
+                  const_cast<char*>(out->instance_id.data()),
                   nullptr};
   pid_t pid = 0;
   const int spawn_error =
@@ -159,19 +205,50 @@ pid_t StartIsolatedQ(const Config& config, KdbxConfig* test_config,
   if (spawn_error != 0) {
     *error =
         std::string("isolated q launch failed: ") + std::strerror(spawn_error);
-    return -1;
+    return false;
+  }
+  out->pid = pid;
+  out->owned = true;
+
+  const std::string command =
+      CaptureCommand("ps -p " + std::to_string(pid) + " -o command=");
+  if (command.find(config.kdbx.script) == std::string::npos ||
+      command.find(endpoint) == std::string::npos ||
+      command.find(out->instance_id) == std::string::npos) {
+    *error = "isolated q process identity verification failed";
+    return false;
   }
 
-  KdbxClient probe(*test_config);
+  KdbxClient probe(out->config);
   for (int attempt = 0; attempt < 100; ++attempt) {
     if (probe.Connect(error)) break;
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
-  if (!probe.connected()) {
-    kill(pid, SIGTERM);
-    return -1;
+  if (!probe.connected()) return false;
+
+  std::string handshake;
+  if (!probe.QueryJson(".quant.instanceJson", &handshake, error)) return false;
+  Json parsed;
+  if (!Json::Parse(handshake, &parsed, error)) return false;
+  const Json* actual = parsed.Find("instanceId");
+  if (actual == nullptr || actual->as_string() != out->instance_id) {
+    *error = "isolated q instance id mismatch";
+    return false;
   }
-  return pid;
+  return true;
+}
+
+void StopIsolatedQ(IsolatedQ* isolated) {
+  if (isolated->pid > 0 && isolated->owned) {
+    kill(isolated->pid, SIGTERM);
+    int status = 0;
+    waitpid(isolated->pid, &status, 0);
+  }
+  if (!isolated->directory.empty()) {
+    std::filesystem::remove_all(isolated->directory);
+  }
+  isolated->pid = -1;
+  isolated->owned = false;
 }
 
 int CommandDb(App& app, const std::string& action) {
@@ -282,19 +359,19 @@ int CommandDb(App& app, const std::string& action) {
   }
   if (action == "verify" || action == "benchmark") {
     std::string error;
-    KdbxConfig test_config;
-    const pid_t pid = StartIsolatedQ(app.config, &test_config, &error);
-    if (pid <= 0) {
+    IsolatedQ isolated;
+    if (!StartIsolatedQ(app.config, &isolated, &error)) {
+      StopIsolatedQ(&isolated);
       std::cout << "FAILED: " << error << "\n";
       return 1;
     }
-    KdbxClient client(test_config);
+    const pid_t isolated_pid = isolated.pid;
+    const std::string instance_id = isolated.instance_id;
+    KdbxClient client(isolated.config);
     std::string report;
     const bool ok = action == "verify" ? client.SelfTest(&report, &error)
                                        : client.Benchmark(&report, &error);
-    kill(pid, SIGTERM);
-    int status = 0;
-    waitpid(pid, &status, 0);
+    StopIsolatedQ(&isolated);
     if (!ok) {
       std::cout << "FAILED: " << error << "\n";
       return 1;
@@ -302,7 +379,8 @@ int CommandDb(App& app, const std::string& action) {
     std::cout << (action == "verify"
                       ? "== VERIFIED: isolated C++ to q round-trip ==\n"
                       : "== VERIFIED: isolated KDB-X benchmark ==\n")
-              << "isolated_q_pid=" << pid << "\n"
+              << "isolated_q_pid=" << isolated_pid
+              << " instance=" << instance_id << "\n"
               << report;
     return 0;
   }

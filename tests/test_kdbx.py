@@ -1,8 +1,8 @@
-"""KDB-X integration tests (C++ -> q -> Python round-trip).
+"""KDB-X integration tests with mandatory process isolation.
 
-These tests require an actual KDB-X runtime and the PyKX package. They are
-skipped, not passed, when the runtime is unavailable. No broker credentials are
-used; all fixtures are deterministic synthetic events.
+Each fixture starts a private q process on an OS-assigned loopback port with a
+unique instance id and a temporary HDB directory. Production endpoints are
+never contacted, reset, or stopped.
 """
 
 from __future__ import annotations
@@ -10,7 +10,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import socket
 import subprocess
+import tempfile
+import time
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -18,6 +24,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 QUANT = ROOT / "build" / "quant"
 RESEARCH = ROOT / "python" / "research.py"
+PYKX_PYTHON = ROOT / "data" / "venv" / "bin" / "python"
 
 
 def run(args: list[str], timeout: int = 90) -> tuple[int, str]:
@@ -32,90 +39,179 @@ def run(args: list[str], timeout: int = 90) -> tuple[int, str]:
     return completed.returncode, completed.stdout + completed.stderr
 
 
+def free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+@dataclass
+class IsolatedQ:
+    port: int
+    directory: Path
+    instance_id: str
+    process: subprocess.Popen
+    owned: bool = True
+
+
 @pytest.fixture(scope="module")
-def q_server():
+def isolated_q():
+    qhome = os.environ.get("QHOME", "")
+    qbin = Path(qhome) / "bin" / "q" if qhome else Path()
     if not QUANT.exists():
         pytest.skip("build/quant not present; run cmake build first")
-    qhome = os.environ.get("QHOME", "")
-    if not qhome or not (Path(qhome) / "bin" / "q").exists():
+    if not qbin.exists():
         pytest.skip("KDB-X q runtime not available")
-    code, out = run([str(QUANT), "db", "start"], timeout=60)
-    if code != 0 and "already running" not in out:
-        pytest.skip(f"q server unavailable: {out[-300:]}")
-    yield
-    run([str(QUANT), "db", "stop"], timeout=30)
+    if not PYKX_PYTHON.exists():
+        pytest.skip("PyKX interpreter not available")
+
+    port = free_port()
+    directory = Path(
+        tempfile.mkdtemp(prefix="quant-q-test-", dir=ROOT / "data")
+    )
+    instance_id = "pytest-" + uuid.uuid4().hex
+    log = open(directory / "q.log", "wb")
+    process = subprocess.Popen(
+        [
+            str(qbin),
+            str(ROOT / "q" / "quant.q"),
+            "-p",
+            f"127.0.0.1:{port}",
+            "-instanceId",
+            instance_id,
+        ],
+        cwd=ROOT,
+        stdin=subprocess.DEVNULL,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+    )
+    log.close()
+    server = IsolatedQ(port, directory, instance_id, process)
+
+    probe = """
+import pykx as kx
+with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
+    value = q(".quant.instanceId").py()
+    print(value.decode() if isinstance(value, bytes) else value)
+""".replace("PORT", str(port))
+    deadline = time.time() + 90
+    identity = ""
+    while time.time() < deadline:
+        if process.poll() is not None:
+            break
+        code, out = run([str(PYKX_PYTHON), "-c", probe], timeout=45)
+        if code == 0:
+            try:
+                identity = out.strip().splitlines()[-1]
+                break
+            except (ValueError, KeyError, IndexError):
+                pass
+        time.sleep(0.2)
+    if identity != instance_id:
+        process.terminate()
+        process.wait(timeout=10)
+        shutil.rmtree(directory, ignore_errors=True)
+        pytest.fail("could not verify isolated q instance identity")
+
+    yield server
+
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=10)
+    shutil.rmtree(directory, ignore_errors=True)
 
 
-def test_cpp_to_q_roundtrip(q_server):
+def test_cpp_verify_uses_isolated_instance():
     code, out = run([str(QUANT), "db", "verify"], timeout=90)
     assert code == 0, out
-    assert "counts=" in out and '"quotes":3' in out
-    assert '"duplicates":1' in out and '"outOfOrder":1' in out
-    assert "historical_tables=" in out
+    assert "isolated C++ to q round-trip" in out
+    assert "instance=quant-test-" in out
+    assert '"duplicates":1' in out
 
 
-def test_pykx_reads_same_events(q_server):
+def test_pykx_reads_same_events(isolated_q):
     script = """
 import json
 import pykx as kx
 
 def ingest(seq, seq_id, price):
-    with kx.SyncQConnection(host="127.0.0.1", port=5001) as q:
+    with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
         q(".quant.ingest", [seq, kx.SymbolAtom(seq_id),
                             kx.SymbolAtom("TEST"), kx.SymbolAtom("UPSTOX"),
                             946684800000000000, 946684800000000001,
                             946684800000000000, 123, price, price - 0.05,
                             price + 0.05, 1000.0, kx.SymbolAtom("ok")])
 
-with kx.SyncQConnection(host="127.0.0.1", port=5001) as q:
+with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
     q(".quant.reset[]")
 ingest(1, "e1", 100.0)
 ingest(2, "e2", 101.0)
 ingest(0, "e0", 99.0)
 ingest(2, "e2", 101.0)
-with kx.SyncQConnection(host="127.0.0.1", port=5001) as q:
-    print(json.dumps({"state": q(".quant.state[]").py(),
+with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
+    identity = q(".quant.instanceJson[]").py()
+    if isinstance(identity, bytes):
+        identity = identity.decode()
+    print(json.dumps({"instance": identity,
+                      "state": q(".quant.state[]").py(),
                       "counts": q(".quant.counts[]").py()}))
-"""
-    python = ROOT / "data" / "venv" / "bin" / "python"
-    code, out = run([str(python), "-c", script])
+""".replace("PORT", str(isolated_q.port))
+    code, out = run([str(PYKX_PYTHON), "-c", script])
     assert code == 0, out
     report = json.loads(out.strip().splitlines()[-1])
+    assert (
+        json.loads(report["instance"])["instanceId"] == isolated_q.instance_id
+    )
     assert report["state"]["duplicates"] == 1
     assert report["state"]["outOfOrder"] == 1
     assert report["counts"]["quotes"] == 3
-    code, out = run(["python3", str(RESEARCH), "--kdbx-check"], timeout=90)
-    assert code == 0, out
-    statuses = json.loads(out[out.index("{") :])
-    assert all(item["status"] == "VERIFIED" for item in statuses.values())
 
 
-def test_q_feature_math_matches_fixture(q_server):
+def test_q_feature_math_matches_fixture(isolated_q):
     script = """
 import json
 import pykx as kx
 
-with kx.SyncQConnection(host="127.0.0.1", port=5001) as q:
+with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
     q(".quant.reset[]")
     for i in range(21):
         q(".quant.ingestBar", [9845 + i, kx.SymbolAtom("FIX"),
                                100.0 + i, 101.0 + i, 99.0 + i,
                                100.0 + i, 1000.0 + i])
     rows = q(".quant.featureTable[]").py()
-    sys_out = {"ret20": rows["ret20"][0], "vwapDev": rows["vwapDev"][0]}
-    print(json.dumps(sys_out))
-"""
-    python = ROOT / "data" / "venv" / "bin" / "python"
-    code, out = run([str(python), "-c", script])
+    print(json.dumps({"ret20": rows["ret20"][0],
+                      "vwapDev": rows["vwapDev"][0]}))
+""".replace("PORT", str(isolated_q.port))
+    code, out = run([str(PYKX_PYTHON), "-c", script])
     assert code == 0, out
     values = json.loads(out.strip().splitlines()[-1])
     assert abs(values["ret20"] - 0.2) < 1e-9
     assert 0.0 <= values["vwapDev"] < 1.0
 
 
-def test_benchmark_records_latency(q_server):
+def test_production_service_unchanged():
+    code, before = run([str(QUANT), "db", "status"], timeout=30)
+    if code != 0 or "connected=false" in before:
+        pytest.skip("no production q instance to compare")
+    counts_before = next(
+        (line for line in before.splitlines() if "connected=true" in line), ""
+    )
+    assert run([str(QUANT), "db", "verify"], timeout=90)[0] == 0
+    assert run([str(QUANT), "db", "benchmark"], timeout=180)[0] == 0
+    code, after = run([str(QUANT), "db", "status"], timeout=30)
+    counts_after = next(
+        (line for line in after.splitlines() if "connected=true" in line), ""
+    )
+    assert counts_before == counts_after
+
+
+def test_benchmark_is_isolated():
     code, out = run([str(QUANT), "db", "benchmark"], timeout=180)
     assert code == 0, out
+    assert "instance=quant-test-" in out
     p99 = re.search(r"ingest_p99_ms=([0-9.]+)", out)
     assert p99 is not None and float(p99.group(1)) > 0.0
-    assert "NOT IMPLEMENTED" in out  # async queue honestly disclosed

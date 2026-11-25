@@ -268,8 +268,8 @@ bool KdbxClient::IngestBar(const Candle& candle, const std::string& symbol,
 bool KdbxClient::QueryJson(const std::string& function, std::string* out,
                            std::string* error) {
   static const std::set<std::string> kAllowed = {
-      ".quant.countsJson", ".quant.stateJson", ".quant.featuresJson",
-      ".quant.dbStatusJson", ".quant.historicalJson"};
+      ".quant.countsJson",   ".quant.stateJson",      ".quant.featuresJson",
+      ".quant.dbStatusJson", ".quant.historicalJson", ".quant.instanceJson"};
   if (kAllowed.count(function) == 0) {
     if (error) *error = "q function not whitelisted: " + function;
     return false;
