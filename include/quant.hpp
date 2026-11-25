@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <set>
@@ -30,6 +31,10 @@ class Money {
   static constexpr Money FromPaise(int64_t paise) { return Money(paise); }
   static Money FromRupees(double rupees);
   static bool TryFromRupees(double rupees, Money* out);
+  static Money Invalid() {
+    return FromPaise(std::numeric_limits<int64_t>::min());
+  }
+  bool valid() const { return paise_ != std::numeric_limits<int64_t>::min(); }
   constexpr int64_t paise() const { return paise_; }
   double rupees() const { return static_cast<double>(paise_) / 100.0; }
 
@@ -77,6 +82,7 @@ enum class EventType {
   kOrder,
   kFill,
   kAccounting,
+  kPaperIntent,
   kHeartbeat,
 };
 
@@ -343,6 +349,7 @@ class Portfolio {
 
   Money equity() const;
   Money available_cash() const;
+  Money market_value() const;
   Money drawdown() const;
   double drawdown_fraction() const;
   int open_position_count() const {
@@ -356,6 +363,7 @@ class Portfolio {
 
  private:
   void UpdatePeakEquity();
+  bool RecomputeUnrealized();
 
   Ledger ledger_;
   std::map<std::string, Position> positions_;
@@ -388,7 +396,8 @@ struct SizingInput {
   double tick_size = 0.0;       // Instrument tick size when known.
   double participation = 0.0;   // Optional override of the config cap.
   Money current_exposure;       // Exposure already held by the portfolio.
-  bool delivery = false;        // Charge model used for the cash reserve.
+  bool capacity_estimate = false;  // Historical capacity, not live depth.
+  bool delivery = false;           // Charge model used for the cash reserve.
 };
 
 struct SizingResult {

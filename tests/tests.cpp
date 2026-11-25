@@ -620,6 +620,54 @@ void TestFreshnessSemantics() {
         "risk rejects unknown feed freshness");
 }
 
+void TestMarkedSaleAndCostBoundaries() {
+  Portfolio portfolio(Money::FromRupees(500.0));
+  std::string error;
+  const CostBreakdown zero;
+  Check(portfolio.Buy("Z", 1, Money::FromRupees(100.0), zero, &error),
+        "zero-cost buy");
+  Check(portfolio.MarkToMarket("Z", Money::FromRupees(120.0), &error),
+        "zero-cost mark");
+  Near(portfolio.equity().rupees(), 520.0, 0.01, "marked equity before sale");
+  Check(portfolio.Sell("Z", 1, Money::FromRupees(120.0), zero, &error),
+        "zero-cost sale");
+  Near(portfolio.ledger().cash.rupees(), 520.0, 0.01, "cash after sale");
+  Near(portfolio.ledger().invested.rupees(), 0.0, 0.01,
+       "cost basis after full sale");
+  Near(portfolio.ledger().unrealized_pnl.rupees(), 0.0, 0.01,
+       "unrealized P&L after full sale");
+  Near(portfolio.equity().rupees(), 520.0, 0.01, "equity after full sale");
+  Near(portfolio.ledger().peak_equity.rupees(), 520.0, 0.01,
+       "peak after full sale");
+
+  Near(EstimateCosts(Money::FromRupees(10.0), true, true, 0.0).stt.rupees(),
+       0.0, 0.01, "raw STT 0.01 rounds to zero");
+  Near(EstimateCosts(Money::FromRupees(490.0), true, true, 0.0).stt.rupees(),
+       0.0, 0.01, "raw STT 0.49 rounds to zero");
+  Near(EstimateCosts(Money::FromRupees(500.0), true, true, 0.0).stt.rupees(),
+       1.0, 0.01, "raw STT 0.50 rounds up");
+  Near(EstimateCosts(Money::FromRupees(1400.0), true, true, 0.0).stt.rupees(),
+       1.0, 0.01, "raw STT 1.40 rounds down");
+  Near(EstimateCosts(Money::FromRupees(1500.0), true, true, 0.0).stt.rupees(),
+       2.0, 0.01, "raw STT 1.50 rounds up");
+
+  Config config = TestConfig();
+  SizingInput missing;
+  missing.price = Money::FromRupees(100.0);
+  missing.stop_distance = 0.05;
+  missing.available_depth = 0;
+  const SizingResult rejected = SizePosition(config, portfolio, missing);
+  Check(rejected.quantity == 0 &&
+            rejected.reason.find("depth") != std::string::npos,
+        "missing depth rejects execution sizing");
+  missing.capacity_estimate = true;
+  const SizingResult capacity = SizePosition(config, portfolio, missing);
+  Check(capacity.quantity > 0, "historical capacity mode allowed explicitly");
+
+  Check(!Money::FromRupees(std::numeric_limits<double>::quiet_NaN()).valid(),
+        "invalid conversion does not produce valid money");
+}
+
 void TestHighWaterAndMoneyBounds() {
   Portfolio portfolio(Money::FromRupees(500.0));
   std::string error;
@@ -836,6 +884,7 @@ int main() {
   TestCsv();
   TestFreshnessSemantics();
   TestDailyRiskLimit();
+  TestMarkedSaleAndCostBoundaries();
   TestHighWaterAndMoneyBounds();
   TestDynamicSizing();
   TestSizingConstraints();

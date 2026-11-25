@@ -202,6 +202,36 @@ with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
     assert -1.0 < values["vwapDev"] < 1.0
 
 
+def test_q_daily_vwap_proxy_uses_typical_price(isolated_q):
+    script = """
+import json
+import pykx as kx
+
+with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
+    q(".quant.reset[]")
+    for i in range(21):
+        close = 100.0 + i
+        q(".quant.ingestBar", [9845 + i, kx.SymbolAtom("VW"),
+                               close + 6.0, close, close - 3.0,
+                               close, 1000.0 + 10.0 * i])
+    rows = q(".quant.featureTable[]").py()
+    print(json.dumps({"vwapDev": rows["vwapDev"][0]}))
+""".replace("PORT", str(isolated_q.port))
+    code, out = run([str(PYKX_PYTHON), "-c", script])
+    assert code == 0, out
+    q_value = json.loads(out.strip().splitlines()[-1])["vwapDev"]
+    weighted = 0.0
+    volume = 0.0
+    for i in range(1, 21):
+        close = 100.0 + i
+        size = 1000.0 + 10.0 * i
+        typical = (close + (close - 3.0) + close) / 3.0
+        weighted += typical * size
+        volume += size
+    expected = 120.0 / (weighted / volume) - 1.0
+    assert abs(q_value - expected) < 1e-9
+
+
 def test_point_in_time_features_and_recovery(isolated_q):
     script = """
 import json

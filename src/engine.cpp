@@ -260,7 +260,7 @@ bool Money::TryFromRupees(double rupees, Money* out) {
 
 Money Money::FromRupees(double rupees) {
   Money result;
-  if (!TryFromRupees(rupees, &result)) return FromPaise(0);
+  if (!TryFromRupees(rupees, &result)) return Invalid();
   return result;
 }
 
@@ -490,7 +490,10 @@ CostBreakdown EstimateCosts(Money turnover, bool delivery, bool is_buy,
     stt_rate = 0.00025;  // sell side only.
   }
   // Zerodha rounds STT to the nearest rupee; 50 paise rounds up.
-  const long long stt_rupees = std::llround(value * stt_rate + 0.5 - 1e-12);
+  const long double raw_stt =
+      static_cast<long double>(value) * static_cast<long double>(stt_rate);
+  const long long stt_rupees =
+      static_cast<long long>(std::floor(static_cast<double>(raw_stt + 0.5L)));
   result.stt = Money::FromPaise(stt_rupees * 100);
 
   result.exchange_fee = Money::FromRupees(value * 0.0000307);  // NSE cash.
@@ -572,6 +575,26 @@ void Portfolio::UpdatePeakEquity() {
   if (current > ledger_.peak_equity) ledger_.peak_equity = current;
 }
 
+bool Portfolio::RecomputeUnrealized() {
+  int64_t unrealized = 0;
+  for (const auto& [symbol, position] : positions_) {
+    int64_t contribution = 0;
+    if (!CheckedMultiply(
+            position.last_price.paise() - position.avg_price.paise(),
+            static_cast<int64_t>(position.quantity), &contribution) ||
+        !CheckedAdd(unrealized, contribution, &unrealized)) {
+      return false;
+    }
+    (void)symbol;
+  }
+  ledger_.unrealized_pnl = Money::FromPaise(unrealized);
+  return true;
+}
+
+Money Portfolio::market_value() const {
+  return ledger_.invested + ledger_.unrealized_pnl;
+}
+
 bool Portfolio::Buy(const std::string& symbol, int quantity, Money price,
                     const CostBreakdown& costs, std::string* error) {
   if (quantity <= 0 || price <= Money::FromRupees(0.0)) {
@@ -591,6 +614,8 @@ bool Portfolio::Buy(const std::string& symbol, int quantity, Money price,
     return false;
   }
   const Money required = Money::FromPaise(required_paise);
+  const Ledger prior_ledger = ledger_;
+  const auto prior_positions = positions_;
   if (required > ledger_.cash) {
     if (error) *error = "insufficient cash: required exceeds available";
     return false;
@@ -628,6 +653,12 @@ bool Portfolio::Buy(const std::string& symbol, int quantity, Money price,
                        costs.stamp + costs.dp;
   ledger_.slippage += costs.slippage;
   ++ledger_.trade_count;
+  if (!RecomputeUnrealized()) {
+    ledger_ = prior_ledger;
+    positions_ = prior_positions;
+    if (error) *error = "buy position-state overflow";
+    return false;
+  }
   UpdatePeakEquity();
   audit_.push_back("BUY " + symbol + " qty=" + std::to_string(quantity) +
                    " price_paise=" + std::to_string(price.paise()) +
@@ -659,6 +690,8 @@ bool Portfolio::Sell(const std::string& symbol, int quantity, Money price,
   const Money notional = Money::FromPaise(notional_paise);
   const Money basis = Money::FromPaise(basis_paise);
   const Money pnl = notional - basis - costs.total;
+  const Ledger prior_ledger = ledger_;
+  const auto prior_positions = positions_;
   ledger_.cash += notional - costs.total;
   ledger_.invested -= basis;
   ledger_.realized_pnl += pnl;
@@ -672,6 +705,12 @@ bool Portfolio::Sell(const std::string& symbol, int quantity, Money price,
     positions_.erase(it);
   } else {
     it->second.last_price = price;
+  }
+  if (!RecomputeUnrealized()) {
+    ledger_ = prior_ledger;
+    positions_ = prior_positions;
+    if (error) *error = "sell position-state overflow";
+    return false;
   }
   UpdatePeakEquity();
   audit_.push_back("SELL " + symbol + " qty=" + std::to_string(quantity) +
@@ -687,20 +726,15 @@ bool Portfolio::MarkToMarket(const std::string& symbol, Money price,
     if (error) *error = "mark-to-market unknown symbol";
     return false;
   }
+  const Ledger prior_ledger = ledger_;
+  const auto prior_positions = positions_;
   it->second.last_price = price;
-  int64_t unrealized = 0;
-  for (const auto& [key, position] : positions_) {
-    int64_t contribution = 0;
-    if (!CheckedMultiply(
-            position.last_price.paise() - position.avg_price.paise(),
-            static_cast<int64_t>(position.quantity), &contribution) ||
-        !CheckedAdd(unrealized, contribution, &unrealized)) {
-      if (error) *error = "mark-to-market overflow";
-      return false;
-    }
-    (void)key;
+  if (!RecomputeUnrealized()) {
+    ledger_ = prior_ledger;
+    positions_ = prior_positions;
+    if (error) *error = "mark-to-market overflow";
+    return false;
   }
-  ledger_.unrealized_pnl = Money::FromPaise(unrealized);
   UpdatePeakEquity();
   return true;
 }
@@ -794,6 +828,10 @@ SizingResult SizePosition(const Config& config, const Portfolio& portfolio,
   const double participation = input.participation > 0.0
                                    ? input.participation
                                    : config.max_participation_fraction;
+  if (input.available_depth <= 0 && !input.capacity_estimate) {
+    result.reason = "execution depth unavailable";
+    return result;
+  }
   const double depth_cap =
       input.available_depth > 0
           ? static_cast<double>(input.available_depth) * participation
@@ -893,7 +931,7 @@ RiskDecision RiskEngine::Evaluate(const Signal& signal, const Quote& quote,
   sizing.volatility = signal.features.vol20;
   sizing.stop_distance = config_.stop_loss_fraction;
   sizing.available_depth = quote.ask_qty;  // Side-specific depth.
-  sizing.current_exposure = portfolio.ledger().invested;
+  sizing.current_exposure = portfolio.market_value();
   if (sizing.available_depth <= 0)
     return reject("missing executable ask depth");
   const SizingResult sized = SizePosition(config_, portfolio, sizing);
@@ -1071,6 +1109,11 @@ BacktestMetrics RunBacktest(
     const std::map<std::string, std::vector<Candle>>& history,
     const Config& config) {
   BacktestMetrics metrics;
+  if (config.max_open_positions != 1) {
+    metrics.warnings.push_back(
+        "multi-position backtest unsupported; configure MAX_OPEN_POSITIONS=1");
+    return metrics;
+  }
   metrics.gross_pnl = Money::FromRupees(0.0);
   metrics.net_pnl = Money::FromRupees(0.0);
   metrics.max_drawdown = Money::FromRupees(0.0);
@@ -1113,7 +1156,13 @@ BacktestMetrics RunBacktest(
         }
         if (current_index < series.size()) {
           const Candle& candle = series[current_index];
-          portfolio.MarkToMarket(open_symbol, Money::FromRupees(candle.close));
+          std::string mark_error;
+          if (!portfolio.MarkToMarket(
+                  open_symbol, Money::FromRupees(candle.close), &mark_error)) {
+            metrics.warnings.push_back("mark failed: " + mark_error);
+            open_symbol.clear();
+            continue;
+          }
           const bool stop = candle.low <= entry_price.rupees() *
                                               (1.0 - config.stop_loss_fraction);
           if (current_index >=
@@ -1124,9 +1173,9 @@ BacktestMetrics RunBacktest(
             auto position = portfolio.positions().find(open_symbol);
             if (position != portfolio.positions().end()) {
               const int qty = position->second.quantity;
-              const CostBreakdown costs =
-                  EstimateCosts(Money::FromPaise(exit_price.paise() * qty),
-                                false, false, config.slippage_bps);
+              const CostBreakdown costs = EstimateCosts(
+                  Money::FromPaise(exit_price.paise() * qty),
+                  config.backtest_delivery, false, config.slippage_bps);
               const Money basis = position->second.avg_price;  // per share.
               const int64_t trade_gross = (exit_price.paise() - basis.paise()) *
                                           static_cast<int64_t>(qty);
@@ -1135,7 +1184,13 @@ BacktestMetrics RunBacktest(
                 gross_wins += trade_gross;
               else
                 gross_losses -= trade_gross;
-              portfolio.Sell(open_symbol, qty, exit_price, costs, nullptr);
+              std::string sell_error;
+              if (!portfolio.Sell(open_symbol, qty, exit_price, costs,
+                                  &sell_error)) {
+                metrics.warnings.push_back("sell failed: " + sell_error);
+                open_symbol.clear();
+                continue;
+              }
               ++metrics.trades;
               if (exit_price > basis) ++metrics.wins;
             }
@@ -1189,7 +1244,10 @@ BacktestMetrics RunBacktest(
         SizingInput sizing;
         sizing.price = Money::FromRupees(execution_candle.open);
         sizing.volatility = features.vol20;
-        sizing.available_depth = static_cast<int64_t>(execution_candle.volume);
+        sizing.available_depth = static_cast<int64_t>(
+            PriorAverageVolume(series, execution_index, 20));
+        sizing.capacity_estimate = true;
+        sizing.stop_distance = config.stop_loss_fraction;
         const SizingResult sized = SizePosition(config, portfolio, sizing);
         if (sized.quantity >= 1) {
           const Money price = Money::FromRupees(execution_candle.open);

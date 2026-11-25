@@ -177,7 +177,7 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
   if[n<2; :()];
   rows:(); i:0;
   do[n; rows:rows,enlist .quant.featureAt[exec close from b;exec volume from b;
-        (exec high from b)+(exec low from b)+(exec close from b)%3;
+        ((exec high from b)+(exec low from b)+(exec close from b))%3;
         exec date from b;i;sym];
       i:i+1];
   :rows}

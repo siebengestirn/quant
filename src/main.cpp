@@ -1021,10 +1021,13 @@ int CommandPaper(App& app) {
       payload["price_paise"] = Json::Number(
           static_cast<double>(Money::FromRupees(candidate.last).paise()));
       Event event;
-      event.type = EventType::kFill;
+      event.type = EventType::kPaperIntent;
       event.payload = Json::ObjectValue(payload).Dump();
       std::string error;
-      app.journal.Append(&event, &error);
+      if (!app.journal.Append(&event, &error)) {
+        std::cout << "FAILED: paper intent journal append — " << error << "\n";
+        return 1;
+      }
       std::cout << "journal: conditional paper intent recorded\n";
     }
   }

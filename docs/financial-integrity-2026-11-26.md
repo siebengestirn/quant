@@ -26,3 +26,29 @@ acceptance.
   acceptance is implied.
 - q tests may be skipped when the runtime is absent; a skip is not a pass.
 - Live execution remains locked. Current decision remains NO TRADE.
+
+## PR #2 review follow-up (same day)
+
+Independent review rejected F-001, F-002 and F-003. Additional changes:
+
+- `Portfolio` now has one `RecomputeUnrealized()` used after Buy, Sell and
+  mark-to-market, with ledger/position snapshots rolled back on failed
+  recalculation. Regression fixture: buy at ₹100, mark to ₹120, sell at ₹120
+  with zero costs → cash ₹520, cost basis ₹0, unrealized ₹0, equity ₹520.
+- STT rounding changed to `floor(raw + 0.5)` on a long double. Boundary tests
+  cover ₹0.01, ₹0.49, ₹0.50, ₹1.40, ₹1.50 and ₹2.50 raw charges.
+- `Money::Invalid()` sentinel replaces invalid-to-zero conversion; tests assert
+  NaN conversion is not valid money.
+- Missing execution depth now rejects sizing; explicit historical capacity mode
+  is required for backtests. Current exposure uses market value, not cost basis.
+- Backtest uses `PriorAverageVolume` as labelled capacity (never execution-day
+  volume), propagates mark/sell failures, applies delivery entry and exit costs
+  consistently, and rejects unsupported multi-position configurations.
+- q typical-price expression explicitly groups the numerator; PyKX fixture
+  verifies the daily VWAP proxy against typical-price volume weighting.
+- Paper conditional entry now emits `kPaperIntent`, never `kFill`, and checks
+  journal append success before reporting.
+
+Status remains TESTED. Independent acceptance has not been recorded; PR #2
+stays open. F-006 daily-risk persistence and operational integration remain
+BLOCKED / NOT IMPLEMENTED.
