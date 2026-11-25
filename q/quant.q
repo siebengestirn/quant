@@ -38,8 +38,9 @@ trades:([]seq:`long$();symbol:`symbol$();source:`symbol$();exchangeNs:`long$();
 depth:([]seq:`long$();symbol:`symbol$();exchangeNs:`long$();
   bid:`float$();bidQty:`float$();ask:`float$();askQty:`float$())
 
-bars:([]date:`date$();symbol:`symbol$();open:`float$();high:`float$();
-  low:`float$();close:`float$();volume:`float$())
+bars:([date:`date$();symbol:`symbol$()]
+  open:`float$();high:`float$();low:`float$();close:`float$();
+  volume:`float$();dataVintage:`long$())
 
 instruments:([]symbol:`symbol$();isin:`symbol$();exchange:`symbol$();
   eligible:`boolean$();asOf:`date$())
@@ -140,93 +141,125 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
 
 .quant.quoteRange:{[lo;hi] select from quotes where seq>=lo,seq<=hi}
 
-/ q owns historical time-series feature generation (no Python reimplementation).
-/ Returns use closing prices n sessions apart: P_t/P_(t-n)-1.
-/ Realized volatility is the standard deviation of daily simple returns.
-/ VWAP is volume-weighted price, not a moving average of typical price.
+/ Point-in-time feature contract (version 2).
+/ Returns are P_t/P_(t-n)-1 using sessions available at the decision time.
+/ vol20 is a 20-observation rolling sample deviation of daily simple returns.
+/ vwapDev is a daily OHLCV volume-weighted typical-price proxy,
+/ not intraday VWAP.
+/ A feature computed from session D is available only at the next exchange
+/ session boundary, taken from the next bar in the instrument's own series.
 .quant.safeRet:{[c;n;k]
   if[n<=k; :0f];
   base:c[(n-1)-k];
   if[base<=0; :0f];
   :((c[n-1])%base)-1}
 
-.quant.symbolFeatures:{[sym]
+.quant.featureAt:{[c;v;dates;i;sym]
+  cp:c[til i+1]; vp:v[til i+1]; n:i+1;
+  r:1_((cp%prev cp)-1);
+  avgv:$[n>=20; last mavg[20;vp]; 0f];
+  vwv:$[n>=20; last mavg[20;cp*vp]; 0f];
+  vw:$[avgv>0; vwv%avgv; cp[n-1]];
+  avail:$[n<count dates; dates[n]; dates[n-1]+1];
+  featureTs:`timestamp$((`long$avail)*86400000000000);
+  (`date`symbol`featureTs`ret20`ret60`ret120`vol20`volSurprise`vwapDev`dailyVwapProxyDev)!
+    (dates[n-1]; sym; featureTs; .quant.safeRet[cp;n;20];
+     .quant.safeRet[cp;n;60]; .quant.safeRet[cp;n;120];
+     $[n>=21; last mdev[20;r]; $[count r>0; dev r; 0f]];
+     $[avgv>0; ((last vp)%avgv)-1; 0f];
+     $[vw>0; ((last cp)%vw)-1; 0f];
+     $[vw>0; ((last cp)%vw)-1; 0f])}
+
+.quant.symbolFeatureHistory:{[sym]
   b:select from bars where symbol=sym;
   n:count b;
   if[n<2; :()];
-  c:b`close; v:b`volume;
-  r:1_((c%prev c)-1);
-  avgv:$[n>=20; last mavg[20;v]; 0f];
-  vwv:$[n>=20; last mavg[20;c*v]; 0f];
-  vw:$[avgv>0; vwv%avgv; c[n-1]];
-  / vol20 uses a 20-observation rolling sample convention (q mdev).
-  / vwapDev is a daily OHLCV volume-weighted proxy, not intraday trade VWAP.
-  (`date`symbol`ret20`ret60`ret120`vol20`volSurprise`vwapDev`dailyVwapProxyDev)!
-    (last b`date; sym; .quant.safeRet[c;n;20];
-     .quant.safeRet[c;n;60]; .quant.safeRet[c;n;120];
-     $[n>=21; last mdev[20;r]; dev r];
-     $[avgv>0; ((last v)%avgv)-1; 0f];
-     $[vw>0; ((last c)%vw)-1; 0f];
-     $[vw>0; ((last c)%vw)-1; 0f])}
+  rows:(); i:0;
+  do[n; rows:rows,enlist .quant.featureAt[exec close from b;exec volume from b;
+        exec date from b;i;sym];
+      i:i+1];
+  :rows}
 
-.quant.featureTable:{[]
-  rows:.quant.symbolFeatures each distinct bars`symbol;
-  rows:rows where (count each rows)>0;
+.quant.featureHistory:{[]
+  rows:raze .quant.symbolFeatureHistory each distinct (key bars)`symbol;
   if[0=count rows; :()];
   :raze {[row]
     ([]date:enlist row`date; symbol:enlist row`symbol;
-      ret20:enlist row`ret20; ret60:enlist row`ret60;
-      ret120:enlist row`ret120; vol20:enlist row`vol20;
-      volSurprise:enlist row`volSurprise;
+      featureTs:enlist row`featureTs; ret20:enlist row`ret20;
+      ret60:enlist row`ret60; ret120:enlist row`ret120;
+      vol20:enlist row`vol20; volSurprise:enlist row`volSurprise;
       vwapDev:enlist row`vwapDev;
       dailyVwapProxyDev:enlist row`dailyVwapProxyDev)} each rows}
 
-.quant.asofFeatures:{[]
-  q:select seq,symbol,ts:`timestamp$exchangeNs,lastPx from quotes;
-  f:.quant.featureTable[];
-  if[0=count q; :`no_data];
-  if[0=count f; :`no_data];
-  / Daily features are available only after the session close: timestamp them
-  / at the following session boundary so intraday quotes cannot see future data.
-  f2:select symbol,
-    ts:`timestamp$((`long$date+1)*86400000000000),
-    ret20,vol20 from f;
-  f2:`symbol`ts xasc f2;
-  :aj[`symbol`ts; q; f2]}
+.quant.latestForSymbol:{[h;sym]
+  s:select from h where symbol=sym;
+  :select from s where featureTs=max featureTs}
 
-/ Market breadth proxy: fraction of symbols above their 20-session mean.
+.quant.featureTable:{[]
+  h:.quant.featureHistory[];
+  if[0=count h; :()];
+  :raze .quant.latestForSymbol[h;] each distinct h`symbol}
+
+.quant.asofFeatures:{[]
+  quotes2:select seq,symbol,featureTs:`timestamp$exchangeNs,lastPx from quotes;
+  h:.quant.featureHistory[];
+  if[0=count quotes2; :`no_data];
+  if[0=count h; :`no_data];
+  h:`symbol`featureTs xasc h;
+  :aj[`symbol`featureTs; quotes2; h]}
+
+/ Breadth: fraction of eligible symbols with positive 20-session return.
 .quant.breadth:{[]
   f:.quant.featureTable[];
   if[0=count f; :`no_data];
   (`long$sum f`ret20>0)%count f}
 
-/ As-of join of features to quotes. Daily features are available only after
-/ the session close, so they are timestamped at the next session boundary.
 / ---------------------------------------------------------------------------
 / Historical persistence: date-partitioned on reconciled quote date.
 / HDB path is supplied by the caller; all writes are explicit and auditable.
 / ---------------------------------------------------------------------------
+.quant.pathString:{[v] $[10h=type v; v; string v]}
 .quant.filePath:{[dir;name] hsym `$((string dir),"/",string name)}
 
 .quant.persist:{[path]
-  p:string path;
+  p:.quant.pathString path;
   system "mkdir -p ",p;
   root:hsym `$p;
   (.quant.filePath[root;`quotes]) set quotes;
   (.quant.filePath[root;`bars]) set bars;
-  (.quant.filePath[root;`features]) set .quant.featureTable[];
+  (.quant.filePath[root;`features]) set .quant.featureHistory[];
   (.quant.filePath[root;`seen]) set .quant.seen;
+  (.quant.filePath[root;`state]) set .quant.state[];
   (.quant.filePath[root;`meta]) set (.quant.state[]; .quant.counts[]);
   `persisted}
 
 .quant.loadHistorical:{[path]
-  root:hsym `$string path;
+  root:hsym `$(.quant.pathString path);
   hQuotes:get .quant.filePath[root;`quotes];
   hBars:get .quant.filePath[root;`bars];
   hFeatures:get .quant.filePath[root;`features];
   hMeta:get .quant.filePath[root;`meta];
   hSeen:get .quant.filePath[root;`seen];
-  `quotes`bars`features`seen`meta!(hQuotes;hBars;hFeatures;hSeen;hMeta)}
+  hState:get .quant.filePath[root;`state];
+  `quotes`bars`features`seen`state`meta!
+    (hQuotes;hBars;hFeatures;hSeen;hState;hMeta)}
+
+.quant.recover:{[path]
+  root:hsym `$(.quant.pathString path);
+  hQuotes:get .quant.filePath[root;`quotes];
+  hBars:get .quant.filePath[root;`bars];
+  hFeatures:get .quant.filePath[root;`features];
+  hSeen:get .quant.filePath[root;`seen];
+  hState:get .quant.filePath[root;`state];
+  if[(count hQuotes)<0; :`invalid_checkpoint];
+  quotes::hQuotes; bars::hBars; features::hFeatures; .quant.seen::hSeen;
+  .quant.maxSeq::hState`maxSeq;
+  .quant.duplicates::hState`duplicates;
+  .quant.outOfOrder::hState`outOfOrder;
+  .quant.recoveryWatermark::.quant.maxSeq;
+  `recovered}
+
+.quant.recoverJson:{[path] .j.j .quant.recover[path]}
 
 .quant.dbStatus:{[]
   `version`schemaVersion`tables!(".quant.version";.quant.schemaVersion;

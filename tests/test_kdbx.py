@@ -202,6 +202,55 @@ with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
     assert 0.0 <= values["vwapDev"] < 1.0
 
 
+def test_point_in_time_features_and_recovery(isolated_q):
+    script = """
+import json
+import pykx as kx
+
+def call(q, fn, *args):
+    return q(fn, list(args)) if args else q(fn)
+
+with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
+    q(".quant.reset[]")
+    for i in range(21):
+        q(".quant.ingestBar", [9845 + i, kx.SymbolAtom("FIX"),
+                               100.0 + i, 101.0 + i, 99.0 + i,
+                               100.0 + i, 1000.0 + i])
+    q(".quant.ingestBar", [9865, kx.SymbolAtom("FIX"), 120.0, 121.0,
+                           119.0, 120.0, 1000.0])
+    ns = 9866 * 86400000000000
+    q(".quant.ingest", [1, kx.SymbolAtom("e1"), kx.SymbolAtom("FIX"),
+                        kx.SymbolAtom("UPSTOX"), ns, ns, ns, 123,
+                        120.0, 119.9, 120.1, 1000.0, kx.SymbolAtom("ok")])
+    hist = q(".quant.featureHistory[]").py()
+    latest = q(".quant.featureTable[]").py()
+    asof = q(".quant.asofFeatures[]").py()
+    before = q(".quant.counts[]").py()["bars"]
+    q(".quant.persist", "CHECKPOINT")
+    q(".quant.reset[]")
+    recovered = q(".quant.recover", "CHECKPOINT").py()
+    after = q(".quant.counts[]").py()["bars"]
+    data = {"history_rows": len(hist["date"]),
+            "latest_ret20": latest["ret20"][0],
+            "asof_ret20": asof["ret20"][0],
+            "bars_before": before, "bars_after": after,
+            "recovered": recovered.decode() if isinstance(recovered, bytes)
+                         else recovered}
+    print(json.dumps(data))
+""".replace("PORT", str(isolated_q.port)).replace(
+        "CHECKPOINT", str(isolated_q.directory / "hdb")
+    )
+    code, out = run([str(PYKX_PYTHON), "-c", script])
+    assert code == 0, out
+    data = json.loads(out.strip().splitlines()[-1])
+    assert data["history_rows"] == 21
+    assert abs(data["latest_ret20"] - 0.2) < 1e-9
+    assert abs(data["asof_ret20"] - 0.2) < 1e-9
+    assert data["bars_before"] == 21
+    assert data["bars_after"] == 21
+    assert data["recovered"] == "recovered"
+
+
 def test_production_service_unchanged():
     if not q_runtime_available():
         pytest.skip("KDB-X q runtime not available")

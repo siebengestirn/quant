@@ -60,8 +60,10 @@ INDEPENDENTLY_VERIFIED or ACCEPTED.
 | QG-006 | Multi-session strategy used intraday charges; terminal position not liquidated | `BACKTEST_DELIVERY` and `TERMINAL_LIQUIDATION` config; delivery costs used for entry/exit; terminal liquidation optional and reported. | TESTED (review pending) |
 | QG-007 | Provider freshness fallback and monotonic timestamp conversion | Missing provider time is UNKNOWN and rejected by risk; trade freshness separate; monotonic receive time converted to ns for q; source identity preserved from the event instead of hardcoded. | TESTED (review pending) |
 | QG-008 | Journal failure state, writer lock, checksum identity, permissions | Failed write/sync marks journal unhealthy; exclusive `flock` writer lock; 0600 file and lock; checksum includes journal sequence; EINTR handled; explicit `Close`. | TESTED (review pending) |
-| QG-009 | q vol20 was full-history deviation; VWAP proxy mislabelled | `vol20` now uses rolling 20-observation `mdev`; added `dailyVwapProxyDev` and documented that `vwapDev` is a daily OHLCV proxy, not intraday VWAP. | TESTED (review pending) |
-| QG-010..016 | Historical feature leakage, recovery, real pipeline, security, point-in-time data, statistical validation, audit lifecycle | NOT IMPLEMENTED. | BLOCKED |
+| QG-009 | q vol20 was full-history deviation; VWAP proxy mislabelled | One point-in-time feature contract now used by q and Python: `P_t/P_(t-n)-1`, rolling 20-session population deviation, daily volume-weighted typical-price proxy named explicitly. | TESTED (review pending) |
+| QG-010 | Latest-only feature table joined to historical quotes | `.quant.featureHistory` generates one row per instrument/session using only prior bars; availability is the next bar in that instrument's own series; `.quant.asofFeatures` joins quotes to that history with `symbol`,`featureTs`. | TESTED (review pending) |
+| QG-011 | Historical bars not uniquely keyed; recovery returned data without restoring state | `bars` keyed by `(date,symbol)`; duplicate bar ingestion verified; `.quant.recover` restores tables, seen keys and committed state and publishes a watermark. | TESTED (review pending) |
+| QG-012..016 | Real pipeline, q security, point-in-time universe, statistics, audit lifecycle | NOT IMPLEMENTED. | BLOCKED |
 
 No gate is accepted. PR #1 remains open and unmerged.
 
@@ -79,4 +81,4 @@ No gate is accepted. PR #1 remains open and unmerged.
   `data/journal/events.jnl.legacy-checksum-v1` and a new journal started.
 - QG-003 daily state persistence across process restart: NOT IMPLEMENTED.
 - QG-007 cross-language timestamp boundary fixtures: NOT IMPLEMENTED.
-- QG-010..016: unchanged blockers.
+- QG-012..016: unchanged blockers.

@@ -88,13 +88,17 @@ def features(rows: list[dict[str, float]], index: int) -> dict[str, float]:
         return close[-1] / close[-1 - periods] - 1.0
 
     recent = close[-20:]
+    return_source = close[-21:] if len(close) >= 21 else close
     returns = [
-        recent[i] / recent[i - 1] - 1.0
-        for i in range(1, len(recent))
-        if recent[i - 1] > 0
+        return_source[i] / return_source[i - 1] - 1.0
+        for i in range(1, len(return_source))
+        if return_source[i - 1] > 0
     ]
     vols = volume[-20:]
     avg_volume = statistics.fmean(vols) if vols else 0.0
+    vwap_window = list(zip(close[-20:], volume[-20:]))
+    weighted = sum(price * size for price, size in vwap_window)
+    daily_vwap = weighted / sum(vols) if sum(vols) > 0 else close[-1]
     sma20 = statistics.fmean(recent) if recent else 0.0
     sma60 = statistics.fmean(close[-60:]) if len(close) >= 60 else 0.0
     sma120 = statistics.fmean(close[-120:]) if len(close) >= 120 else 0.0
@@ -117,7 +121,7 @@ def features(rows: list[dict[str, float]], index: int) -> dict[str, float]:
         "ret20": ret(20),
         "ret60": ret(60),
         "ret120": ret(120),
-        "vol20": statistics.stdev(returns) if len(returns) > 1 else 0.0,
+        "vol20": statistics.pstdev(returns[-20:]) if returns else 0.0,
         "volume_surprise": (
             (vols[-1] / avg_volume - 1) if avg_volume > 0 else 0.0
         ),
@@ -125,6 +129,18 @@ def features(rows: list[dict[str, float]], index: int) -> dict[str, float]:
         "breakout": max(-1.0, min(1.0, breakout)),
         "vwap_dev": (close[-1] / typical - 1) if typical > 0 else 0.0,
     }
+
+
+def feature_history(rows: list[dict[str, float]]) -> list[dict[str, float]]:
+    """Point-in-time features with availability at the next observed session."""
+    result = []
+    for index in range(len(rows)):
+        item = features(rows, index)
+        item["index"] = index
+        item["availability_index"] = min(index + 1, len(rows) - 1)
+        item["date"] = rows[index]["date"]
+        result.append(item)
+    return result
 
 
 def clamp(value: float, low: float = -1.0, high: float = 1.0) -> float:
