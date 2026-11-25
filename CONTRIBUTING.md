@@ -9,8 +9,9 @@ This file states the contribution workflow. `git-policy.json` and
    `git pull --ff-only origin main`.
 2. Create one bounded topic branch for one coherent change.
 3. Add tests with behavior changes, including failure paths.
-4. Run the full local gates: CMake build, CTest, C++ tests, Python tests,
-   sanitizers, prose sweep and secret scan.
+4. Run `python3 scripts/assurance.py check` for the full fail-closed gate.
+   Use `python3 scripts/assurance.py polish` to apply formatting first, and
+   `python3 scripts/assurance.py audit --strict` for terminology only.
 5. Run `python3 scripts/check_git_policy.py` and `git diff --check`.
 6. Open a pull request with exact commands, exits, test counts and unresolved
    gates. Keep live execution locked.

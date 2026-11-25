@@ -64,7 +64,12 @@ ctest --test-dir build --output-on-failure
 ./build/quant_tests
 python3 python/research.py --self-test
 python3 -m pytest tests/test_research.py tests/test_kdbx.py -q
+python3 scripts/assurance.py check
 ```
+
+The single-file assurance tool provides `check`, `polish`, `audit` and
+`status`. It is fail-closed, records PASS/FAIL/SKIP per step and verifies that
+a gate does not mutate the tree.
 
 Sanitizers: `cmake -S . -B build-san -DQUANT_SANITIZERS=ON && cmake --build
 build-san -j 4`.

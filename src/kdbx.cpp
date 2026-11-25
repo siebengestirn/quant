@@ -290,8 +290,7 @@ bool KdbxClient::QueryJson(const std::string& function, std::string* out,
 #ifdef QUANT_HAS_KDBX
   if (!Connect(error)) return false;
   K argument = static_cast<K>(0);
-  if (function == ".quant.historicalJson" ||
-      function == ".quant.recoverJson") {
+  if (function == ".quant.historicalJson" || function == ".quant.recoverJson") {
     argument = ks(const_cast<char*>(impl_->config.hdb_dir.c_str()));
   }
   return impl_->CallJson(function, argument, out, error);
