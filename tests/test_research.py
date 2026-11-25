@@ -100,3 +100,60 @@ def test_warmup_and_final_availability_are_explicit():
     history = research.feature_history(rows)
     assert history[-1]["availability_index"] is None
     assert history[0]["availability_index"] == 1
+
+
+def test_forward_label_is_censored_not_zero():
+    rows = [{"close": float(100 + i)} for i in range(5)]
+    assert research.forward_label(rows, 4, 2) is None
+    assert research.forward_label(rows, 2, 2) is not None
+    assert research.forward_label(rows, 0, 0) is None
+
+
+def test_daily_cross_sectional_ic_reports_validity():
+    history = research.synthetic_history()
+    result = research.daily_cross_sectional_ic(history, research.score_momentum)
+    assert result["status"] == "CALCULATED"
+    assert result["observations"] > 0
+    assert len(result["daily_ics"]) == result["observations"]
+    assert len(result["dates"]) == result["observations"]
+    assert -1.0 <= result["mean_ic"] <= 1.0
+    assert result["coverage"] >= 5
+
+
+def test_cscv_pbo_is_a_probability():
+    matrix = [
+        [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+        [0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1],
+        [0.4, 0.5, 0.4, 0.5, 0.4, 0.5, 0.4, 0.5],
+    ]
+    result = research.cscv_pbo(matrix)
+    assert result["status"] == "CALCULATED"
+    assert 0.0 <= result["pbo"] <= 1.0
+    assert result["splits"] > 0
+    assert research.cscv_pbo([[1.0, 2.0]])["status"] == "UNDEFINED"
+
+
+def test_deflated_sharpe_accounts_for_trials():
+    rng = __import__("random").Random(7)
+    returns = [rng.gauss(0.0004, 0.01) for _ in range(120)]
+    small = research.deflated_sharpe_ratio(returns, 2)
+    large = research.deflated_sharpe_ratio(returns, 200)
+    assert small["status"] == "CALCULATED"
+    assert 0.0 <= large["dsr"] <= 1.0
+    assert large["dsr"] <= small["dsr"]
+    assert research.deflated_sharpe_ratio([1.0, 2.0], 3)["status"] == (
+        "UNDEFINED"
+    )
+
+
+def test_experiment_registry_is_append_only(tmp_path):
+    first = research.register_experiment(tmp_path, {"strategy": "x"})
+    second = research.register_experiment(tmp_path, {"strategy": "y"})
+    assert first != second
+    lines = (
+        (tmp_path / "data" / "assurance" / "experiments.jsonl")
+        .read_text()
+        .splitlines()
+    )
+    assert len(lines) == 2
+    assert research.json.loads(lines[0])["id"] == first

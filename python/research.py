@@ -17,13 +17,16 @@ from __future__ import annotations
 
 import argparse
 import csv
+import itertools
 import json
 import math
 import random
 import statistics
 import subprocess
 import sys
+import uuid
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Research constants (ESTIMATED). They are not trading parameters.
@@ -311,6 +314,242 @@ def walk_forward_ic(
     return output
 
 
+def forward_label(
+    rows: list[dict[str, float]], index: int, sessions: int
+) -> float | None:
+    """Executable forward label; None when the horizon is censored."""
+    if sessions <= 0 or index + sessions >= len(rows):
+        return None
+    base = rows[index]["close"]
+    if base <= 0 or not math.isfinite(base):
+        return None
+    end = rows[index + sessions]["close"]
+    if end <= 0 or not math.isfinite(end):
+        return None
+    return end / base - 1.0
+
+
+def spearman_strict(xs: list[float], ys: list[float]) -> float | None:
+    """Rank correlation that reports UNDEFINED instead of a fabricated zero."""
+    if len(xs) != len(ys) or len(xs) < 5:
+        return None
+    if not all(math.isfinite(v) for v in xs + ys):
+        return None
+    value = spearman(xs, ys)
+    return value if math.isfinite(value) else None
+
+
+def cross_sectional_spread_returns(
+    history: dict[str, list[dict[str, float]]],
+    score_fn: Callable[[dict[str, float]], float],
+    horizon: int = HOLDING_SESSIONS,
+) -> list[float]:
+    """Gross top-minus-bottom spread returns; no execution costs included."""
+    by_date: dict[str, list[tuple[float, float]]] = {}
+    for symbol, rows in history.items():
+        if symbol in ("NIFTY 50", "INDIA VIX"):
+            continue
+        for index, row in enumerate(rows):
+            if index < MIN_HISTORY:
+                continue
+            label = forward_label(rows, index, horizon)
+            if label is None:
+                continue
+            score = score_fn(features(rows, index))
+            if math.isfinite(score):
+                by_date.setdefault(row["date"], []).append((score, label))
+    spreads: list[float] = []
+    for date in sorted(by_date):
+        values = by_date[date]
+        if len(values) < 6:
+            continue
+        values.sort(key=lambda item: item[0])
+        cutoff = len(values) // 2
+        top = statistics.fmean(label for _score, label in values[cutoff:])
+        bottom = statistics.fmean(label for _score, label in values[:cutoff])
+        spreads.append(top - bottom)
+    return spreads
+
+
+def daily_cross_sectional_ic(
+    history: dict[str, list[dict[str, float]]],
+    score_fn: Callable[[dict[str, float]], float],
+    horizon: int = HOLDING_SESSIONS,
+    min_instruments: int = 5,
+) -> dict:
+    """Daily Spearman IC across the eligible universe for each decision date.
+
+    A label is included only when the full forward horizon exists. Censored
+    observations are excluded, never replaced with zero.
+    """
+    by_date: dict[str, dict[str, tuple[int, dict[str, float]]]] = {}
+    for symbol, rows in history.items():
+        if symbol in ("NIFTY 50", "INDIA VIX"):
+            continue
+        for index, row in enumerate(rows):
+            if index < MIN_HISTORY:
+                continue
+            by_date.setdefault(row["date"], {})[symbol] = (
+                index,
+                row,
+            )
+    daily: list[float] = []
+    daily_dates: list[str] = []
+    coverage: list[int] = []
+    for date in sorted(by_date):
+        scores: list[float] = []
+        labels: list[float] = []
+        for symbol, (index, _row) in by_date[date].items():
+            rows = history[symbol]
+            label = forward_label(rows, index, horizon)
+            if label is None:
+                continue
+            score = score_fn(features(rows, index))
+            if not math.isfinite(score):
+                continue
+            scores.append(score)
+            labels.append(label)
+        if len(scores) < min_instruments:
+            continue
+        value = spearman_strict(scores, labels)
+        if value is None:
+            continue
+        daily.append(value)
+        daily_dates.append(date)
+        coverage.append(len(scores))
+    if not daily:
+        return {
+            "observations": 0,
+            "mean_ic": 0.0,
+            "median_ic": 0.0,
+            "ic_std": 0.0,
+            "coverage": 0,
+            "effective_sample_size": 0,
+            "daily_ics": [],
+            "dates": [],
+            "status": "UNDEFINED",
+        }
+    return {
+        "observations": len(daily),
+        "mean_ic": statistics.fmean(daily),
+        "median_ic": statistics.median(daily),
+        "ic_std": (statistics.stdev(daily) if len(daily) > 1 else 0.0),
+        "coverage": min(coverage),
+        "effective_sample_size": sum(coverage),
+        "daily_ics": daily,
+        "dates": daily_dates,
+        "status": "CALCULATED",
+    }
+
+
+def cscv_pbo(performance: list[list[float]], max_splits: int = 256) -> dict:
+    """Combinatorially Symmetric Cross-Validation probability of overfitting.
+
+    Rows are candidate configurations; columns are out-of-sample periods.
+    For every symmetric half-split the best in-sample configuration is chosen
+    and its out-of-sample logit rank is accumulated. PBO is the fraction of
+    logits that are non-positive.
+    """
+    if len(performance) < 2 or len(performance[0]) < 4:
+        return {"status": "UNDEFINED", "pbo": 1.0, "splits": 0}
+    width = len(performance[0])
+    if any(len(row) != width for row in performance):
+        return {"status": "INVALID_INPUT", "pbo": 1.0, "splits": 0}
+    # Bound the combinatorial space explicitly. A full CSCV over hundreds of
+    # periods is intractable; the declared subset is recorded in the result.
+    columns = (
+        list(range(width))
+        if width <= 12
+        else [round(i * (width - 1) / 11) for i in range(12)]
+    )
+    combinations = list(itertools.combinations(columns, len(columns) // 2))
+    if len(combinations) > max_splits:
+        step = max(1, len(combinations) // max_splits)
+        combinations = combinations[::step][:max_splits]
+    logits: list[float] = []
+    count = len(performance)
+    for train_columns in combinations:
+        test_columns = [i for i in columns if i not in train_columns]
+        in_sample = [
+            statistics.fmean(row[i] for i in train_columns)
+            for row in performance
+        ]
+        out_sample = [
+            statistics.fmean(row[i] for i in test_columns)
+            for row in performance
+        ]
+        winner = max(range(count), key=lambda i: in_sample[i])
+        final_rank = (
+            sum(1 for value in out_sample if value < out_sample[winner]) + 1
+        )
+        probability = final_rank / (count + 1)
+        if probability <= 0.0 or probability >= 1.0:
+            continue
+        logits.append(math.log(probability / (1.0 - probability)))
+    if not logits:
+        return {"status": "UNDEFINED", "pbo": 1.0, "splits": 0}
+    return {
+        "status": "CALCULATED",
+        "pbo": sum(1 for value in logits if value <= 0.0) / len(logits),
+        "splits": len(logits),
+        "mean_logit": statistics.fmean(logits),
+        "periods_used": len(columns),
+        "periods_total": width,
+    }
+
+
+def deflated_sharpe_ratio(returns: list[float], trials: int) -> dict:
+    """Deflated Sharpe ratio probability under multiple testing.
+
+    Uses per-observation Sharpe, skew and excess kurtosis, and the expected
+    maximum Sharpe over the declared trial universe. Returns a probability,
+    not a heuristic haircut.
+    """
+    n = len(returns)
+    if n < 4 or trials < 1 or not all(math.isfinite(v) for v in returns):
+        return {"status": "UNDEFINED", "dsr": 0.0}
+    mean = statistics.fmean(returns)
+    sigma = statistics.pstdev(returns)
+    if sigma <= 0.0:
+        return {"status": "UNDEFINED", "dsr": 0.0}
+    sr = mean / sigma
+    log_trials = math.log(trials)
+    expected_max = math.sqrt(2.0 * log_trials)
+    if expected_max > 0.0:
+        expected_max -= (0.5772156649 + math.log(4.0 * math.pi)) / (
+            2.0 * expected_max
+        )
+    sr_zero = expected_max / math.sqrt(n)
+    centered = [value - mean for value in returns]
+    skew = sum(value**3 for value in centered) / n / sigma**3
+    kurtosis = sum(value**4 for value in centered) / n / sigma**4
+    variance = 1.0 - skew * sr + (kurtosis - 1.0) / 4.0 * sr**2
+    if variance <= 0.0:
+        return {"status": "UNDEFINED", "dsr": 0.0}
+    z = (sr - sr_zero) * math.sqrt(max(1, n - 1)) / math.sqrt(variance)
+    return {
+        "status": "CALCULATED",
+        "dsr": statistics.NormalDist().cdf(z),
+        "observed_sharpe": sr,
+        "expected_max_sharpe": sr_zero,
+        "trials": trials,
+        "observations": n,
+    }
+
+
+def register_experiment(root: Path, record: dict) -> str:
+    """Append-only experiment registry entry with an immutable identifier."""
+    identifier = uuid.uuid4().hex
+    path = root / "data" / "assurance" / "experiments.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entry = dict(record)
+    entry["id"] = identifier
+    entry["registered_at_utc"] = datetime.now(UTC).isoformat()
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry, sort_keys=True) + "\n")
+    return identifier
+
+
 def bootstrap_ci(
     values: list[float], draws: int = BOOTSTRAP_DRAWS
 ) -> list[float]:
@@ -504,8 +743,8 @@ def analyze(history: dict[str, list[dict[str, float]]], root: Path) -> dict:
         "multiple_testing": {
             "trials": TRIALS,
             "deflated_sharpe_note": (
-                "ESTIMATED conservative haircut; full DSR needs trial "
-                "return distribution"
+                "CALCULATED on gross cross-sectional spread returns; "
+                "costs and execution effects are excluded"
             ),
         },
         "authoritative_cpp_backtest": cpp_authoritative_backtest(root),
@@ -519,18 +758,56 @@ def analyze(history: dict[str, list[dict[str, float]]], root: Path) -> dict:
         return report
 
     for name, score_fn in STRATEGIES.items():
-        stats = walk_forward_ic(usable, score_fn)
+        stats = daily_cross_sectional_ic(usable, score_fn)
+        stats["folds"] = stats["observations"]
+        stats["fold_ics"] = stats["daily_ics"]
         report["walk_forward"][name] = stats
-        if stats["folds"]:
-            fold_ics = stats.get("fold_ics", [])
-            ci = bootstrap_ci(fold_ics)
-            report["walk_forward"][name]["ic_bootstrap_95ci"] = ci
+        if stats["observations"]:
+            values = stats["daily_ics"]
+            report["walk_forward"][name]["ic_bootstrap_95ci"] = bootstrap_ci(
+                values
+            )
             report["walk_forward"][name]["deflated_mean_ic"] = deflated(
-                stats["mean_ic"], TRIALS, stats["folds"]
+                stats["mean_ic"], TRIALS, stats["observations"]
             )
-            report["walk_forward"][name]["pbo_proxy"] = (
-                probability_backtest_overfitting(fold_ics)
+            spread = cross_sectional_spread_returns(usable, score_fn)
+            ratio = deflated_sharpe_ratio(spread, TRIALS)
+            report["walk_forward"][name]["dsr"] = ratio
+            report["walk_forward"][name]["gross_spread_observations"] = len(
+                spread
             )
+            register_experiment(
+                root,
+                {
+                    "strategy": name,
+                    "dataset": "cache/history",
+                    "ic_observations": stats["observations"],
+                    "mean_ic": stats["mean_ic"],
+                    "status": "INCONCLUSIVE",
+                },
+            )
+    date_maps = [
+        dict(
+            zip(
+                report["walk_forward"][name]["dates"],
+                report["walk_forward"][name]["daily_ics"],
+                strict=False,
+            )
+        )
+        for name in STRATEGIES
+    ]
+    common_dates = sorted(set.intersection(*[set(m) for m in date_maps]))
+    if len(common_dates) >= 4:
+        matrix = [
+            [mapping[date] for date in common_dates] for mapping in date_maps
+        ]
+        report["multiple_testing"]["cscv_pbo"] = cscv_pbo(matrix)
+    else:
+        report["multiple_testing"]["cscv_pbo"] = {
+            "status": "UNDEFINED",
+            "pbo": 1.0,
+            "reason": "fewer than four common decision dates",
+        }
     report["baselines"]["no_trade"] = {
         "expected_return": 0.0,
         "cost": 0.0,
