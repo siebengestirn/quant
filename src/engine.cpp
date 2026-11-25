@@ -90,30 +90,8 @@ std::string UtcSessionDate(int64_t now_ms) {
   return oss.str();
 }
 
-bool CheckedMultiply(int64_t left, int64_t right, int64_t* out) {
-  if (out == nullptr || right == 0) {
-    if (out != nullptr)
-      *out = 0;
-    return out != nullptr;
-  }
-  if (left > std::numeric_limits<int64_t>::max() / right ||
-      left < std::numeric_limits<int64_t>::min() / right) {
-    return false;
-  }
-  *out = left * right;
-  return true;
-}
-
-bool CheckedAdd(int64_t left, int64_t right, int64_t* out) {
-  if (out == nullptr)
-    return false;
-  if ((right > 0 && left > std::numeric_limits<int64_t>::max() - right) ||
-      (right < 0 && left < std::numeric_limits<int64_t>::min() - right)) {
-    return false;
-  }
-  *out = left + right;
-  return true;
-}
+using money_detail::CheckedAdd;
+using money_detail::CheckedMultiply;
 
 bool ParseInteger64(const std::string& text, int64_t* out) {
   if (text.empty())
@@ -476,8 +454,33 @@ std::vector<std::string> ValidateConfig(const Config& config) {
   if (config.max_open_positions < 0) {
     errors.push_back("MAX_OPEN_POSITIONS must be non-negative");
   }
-  if (config.max_spread_bps < 0.0 || config.slippage_bps < 0.0) {
-    errors.push_back("cost parameters must be non-negative");
+  if (!std::isfinite(config.max_spread_bps) || config.max_spread_bps < 0.0) {
+    errors.push_back("MAX_SPREAD_BPS must be finite and non-negative");
+  }
+  if (!std::isfinite(config.slippage_bps) || config.slippage_bps < 0.0) {
+    errors.push_back("SLIPPAGE_BPS must be finite and non-negative");
+  }
+  if (!std::isfinite(config.stop_loss_fraction) ||
+      !(config.stop_loss_fraction > 0.0 && config.stop_loss_fraction <= 0.5)) {
+    errors.push_back("STOP_LOSS_FRACTION must be finite and in (0, 0.5]");
+  }
+  if (!std::isfinite(config.max_participation_fraction) ||
+      !(config.max_participation_fraction > 0.0 &&
+        config.max_participation_fraction <= 1.0)) {
+    errors.push_back("MAX_PARTICIPATION_FRACTION must be finite and in (0, 1]");
+  }
+  if (!std::isfinite(config.min_traded_value_inr) ||
+      config.min_traded_value_inr < 0.0) {
+    errors.push_back("MIN_TRADED_VALUE_INR must be finite and non-negative");
+  }
+  if (config.queue_capacity == 0) {
+    errors.push_back("QUEUE_CAPACITY must be positive");
+  }
+  if (config.stale_quote_seconds <= 0 || config.http_timeout_seconds <= 0) {
+    errors.push_back("timeouts and staleness windows must be positive");
+  }
+  if (config.kdbx.timeout_ms <= 0 || config.kdbx.batch_size == 0) {
+    errors.push_back("KDB-X timeout and batch size must be positive");
   }
   if (config.allow_margin || config.allow_short_selling) {
     errors.push_back(
@@ -1265,8 +1268,8 @@ BacktestMetrics RunBacktest(
           if (!portfolio.MarkToMarket(
                   open_symbol, Money::FromRupees(candle.close), &mark_error)) {
             metrics.warnings.push_back("mark failed: " + mark_error);
-            open_symbol.clear();
-            continue;
+            metrics.halted = true;
+            break;
           }
           const bool stop = candle.low <= entry_price.rupees() *
                                               (1.0 - config.stop_loss_fraction);
@@ -1286,18 +1289,18 @@ BacktestMetrics RunBacktest(
               const Money basis = position->second.avg_price;  // per share.
               const int64_t trade_gross = (exit_price.paise() - basis.paise()) *
                                           static_cast<int64_t>(qty);
+              std::string sell_error;
+              if (!portfolio.Sell(
+                      open_symbol, qty, exit_price, costs, &sell_error)) {
+                metrics.warnings.push_back("sell failed: " + sell_error);
+                metrics.halted = true;
+                break;
+              }
               metrics.gross_pnl += Money::FromPaise(trade_gross);
               if (trade_gross > 0)
                 gross_wins += trade_gross;
               else
                 gross_losses -= trade_gross;
-              std::string sell_error;
-              if (!portfolio.Sell(
-                      open_symbol, qty, exit_price, costs, &sell_error)) {
-                metrics.warnings.push_back("sell failed: " + sell_error);
-                open_symbol.clear();
-                continue;
-              }
               ++metrics.trades;
               if (exit_price > basis)
                 ++metrics.wins;
@@ -1361,6 +1364,7 @@ BacktestMetrics RunBacktest(
             PriorAverageVolume(series, execution_index, 20));
         sizing.capacity_estimate = true;
         sizing.stop_distance = config.stop_loss_fraction;
+        sizing.delivery = config.backtest_delivery;
         const SizingResult sized = SizePosition(config, portfolio, sizing);
         if (sized.quantity >= 1) {
           const Money price = Money::FromRupees(execution_candle.open);
@@ -1406,7 +1410,12 @@ BacktestMetrics RunBacktest(
       metrics.gross_pnl += Money::FromPaise(
           (price.paise() - position_it->second.avg_price.paise()) *
           static_cast<int64_t>(qty));
-      portfolio.Sell(symbol, qty, price, costs, nullptr);
+      std::string terminal_error;
+      if (!portfolio.Sell(symbol, qty, price, costs, &terminal_error)) {
+        metrics.warnings.push_back("terminal liquidation failed: " +
+                                   terminal_error);
+        metrics.halted = true;
+      }
     }
   } else {
     std::vector<std::string> symbols;
@@ -1437,17 +1446,25 @@ BacktestMetrics RunBacktest(
   metrics.open_positions = portfolio.open_position_count();
   metrics.audit = portfolio.audit();
   metrics.final_equity = portfolio.equity().rupees();
-  metrics.profit_factor =
-      gross_losses > 0
-          ? static_cast<double>(gross_wins) / static_cast<double>(gross_losses)
-          : (gross_wins > 0 ? 999.0 : 0.0);
+  if (gross_losses > 0) {
+    metrics.profit_factor =
+        static_cast<double>(gross_wins) / static_cast<double>(gross_losses);
+    metrics.profit_factor_status = "GROSS";
+  } else {
+    metrics.profit_factor = 0.0;
+    metrics.profit_factor_status = "NOT_MEANINGFUL";
+  }
   const double gross = std::abs(metrics.gross_pnl.rupees());
-  metrics.cost_to_gross = gross > 0.0
-                              ? std::abs(portfolio.ledger().brokerage.rupees() +
-                                         portfolio.ledger().statutory.rupees() +
-                                         portfolio.ledger().slippage.rupees()) /
-                                    gross
-                              : 0.0;
+  if (gross > 0.0) {
+    metrics.cost_to_gross = std::abs(portfolio.ledger().brokerage.rupees() +
+                                     portfolio.ledger().statutory.rupees() +
+                                     portfolio.ledger().slippage.rupees()) /
+                            gross;
+    metrics.cost_to_gross_status = "MEANINGFUL";
+  } else {
+    metrics.cost_to_gross = 0.0;
+    metrics.cost_to_gross_status = "NOT_MEANINGFUL";
+  }
   std::vector<double> returns;
   for (size_t i = 1; i < equity_curve.size(); ++i) {
     if (equity_curve[i - 1] > 0.0) {
@@ -1549,16 +1566,22 @@ bool Journal::Open(const std::string& path, std::string* error) {
     if (lock_fd_ >= 0)
       close(lock_fd_);
     lock_fd_ = -1;
+    locked_ = false;
     if (error)
       *error = "journal writer lock unavailable";
     return false;
   }
+  locked_ = true;
   if (std::filesystem::exists(path_)) {
     std::string replay_error;
     const std::vector<Event> existing = Replay(&replay_error);
     if (!replay_error.empty()) {
       if (error)
         *error = "journal validation failed: " + replay_error;
+      flock(lock_fd_, LOCK_UN);
+      close(lock_fd_);
+      lock_fd_ = -1;
+      locked_ = false;
       return false;
     }
     size_ = existing.size();
@@ -1579,6 +1602,8 @@ void Journal::Close() {
     close(lock_fd_);
     lock_fd_ = -1;
   }
+  locked_ = false;
+  healthy_ = false;
 }
 
 Journal::~Journal() {
@@ -1589,9 +1614,9 @@ Journal::~Journal() {
 }
 
 bool Journal::Append(Event* event, std::string* error) {
-  if (!healthy_) {
+  if (!healthy_ || !locked_ || lock_fd_ < 0) {
     if (error)
-      *error = "journal unhealthy; recovery required";
+      *error = "journal unhealthy or writer lock not held";
     return false;
   }
   if (path_.empty()) {
@@ -1599,7 +1624,8 @@ bool Journal::Append(Event* event, std::string* error) {
       *error = "journal not opened";
     return false;
   }
-  event->sequence = next_sequence_++;
+  const uint64_t candidate_sequence = next_sequence_;
+  event->sequence = candidate_sequence;
   if (event->id.empty())
     event->id = EventId(event->sequence, event->payload);
   event->timestamp_ms =
@@ -1651,6 +1677,7 @@ bool Journal::Append(Event* event, std::string* error) {
     return false;
   }
   close(fd);
+  next_sequence_ = candidate_sequence + 1;
   ++size_;
   if (error)
     error->clear();
@@ -1679,8 +1706,14 @@ std::vector<Event> Journal::Replay(std::string* error) const {
   std::vector<std::string> lines;
   std::string line;
   std::istringstream stream(content);
-  while (std::getline(stream, line))
+  while (std::getline(stream, line)) {
+    if (line.empty()) {
+      if (error)
+        *error = "blank journal record";
+      return {};
+    }
     lines.push_back(line);
+  }
   uint64_t expected = 1;
   for (const std::string& record : lines) {
     line = record;
@@ -1705,6 +1738,12 @@ std::vector<Event> Journal::Replay(std::string* error) const {
         !ParseInteger32(fields[4], &schema)) {
       if (error)
         *error = "non-numeric journal field";
+      return {};
+    }
+    if (type < 0 || type > static_cast<int>(EventType::kHeartbeat) ||
+        schema != 1) {
+      if (error)
+        *error = "invalid event type or schema version";
       return {};
     }
     event.type = static_cast<EventType>(type);

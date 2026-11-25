@@ -52,3 +52,29 @@ Independent review rejected F-001, F-002 and F-003. Additional changes:
 Status remains TESTED. Independent acceptance has not been recorded; PR #2
 stays open. F-006 daily-risk persistence and operational integration remain
 BLOCKED / NOT IMPLEMENTED.
+
+## Final financial-integrity pass (same day)
+
+- Money now carries an explicit validity flag. Invalid values propagate through
+  addition and subtraction; overflow yields invalid money, never a valid zero.
+  `CheckedMultiply` uses a 128-bit product where available and a sign-aware
+  fallback, removing the `INT64_MIN / -1` undefined case.
+- Journal `Close()` now marks the instance closed/unhealthy and releases writer
+  ownership; `Append()` requires an active lock; sequence advances only after
+  successful fsync; failed `Open()` validation releases the lock; blank records,
+  invalid event types and unsupported schemas are rejected. A two-writer
+  ownership regression was added.
+- Backtest failures halt the affected simulation instead of orphaning the open
+  position; gross P&L is recorded only after a successful sale; terminal
+  liquidation failures are reported; sizing receives the configured delivery
+  product; gross profit factor is `NOT_MEANINGFUL` without gross losses.
+- Configuration validation now rejects non-finite spread, slippage, stop
+  distance, participation and traded value, plus zero queue, timeout and batch
+  settings.
+- Python and q now agree on the volume-weighted typical-price proxy on an
+  unequal-volume fixture.
+
+Status remains TESTED. Independent acceptance is not recorded. DP settlement
+aggregation is explicitly NOT IMPLEMENTED and the cost-model version string now
+states this. Daily-risk persistence, operational q recovery, real provider-to-q
+ingestion and genuine paper execution remain BLOCKED / NOT IMPLEMENTED.

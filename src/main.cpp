@@ -900,8 +900,11 @@ int CommandResearch(App& app) {
       << "max_drawdown_inr=" << metrics.max_drawdown.rupees() << "\n"
       << "final_equity_inr=" << metrics.final_equity << "\n"
       << "sharpe=" << metrics.sharpe << " sortino=" << metrics.sortino << "\n"
-      << "profit_factor_estimate=" << metrics.profit_factor << "\n"
-      << "cost_to_gross=" << metrics.cost_to_gross << "\n"
+      << "gross_profit_factor=" << metrics.profit_factor << " ("
+      << metrics.profit_factor_status << ")\n"
+      << "cost_to_gross=" << metrics.cost_to_gross << " ("
+      << metrics.cost_to_gross_status << ")\n"
+      << "halted=" << (metrics.halted ? "true" : "false") << "\n"
       << "labels: SIMULATED fills at next-day open, conservative 10 bps "
          "slippage, "
          "no order-book history, no survivorship-bias correction.\n";

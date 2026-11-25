@@ -25,20 +25,75 @@ namespace quant {
 // ---------------------------------------------------------------------------
 // Money: integer paise. Conversions are explicit to prevent unit confusion.
 // ---------------------------------------------------------------------------
+namespace money_detail {
+
+constexpr bool CheckedAdd(int64_t left, int64_t right, int64_t* out) {
+  if (out == nullptr)
+    return false;
+  if ((right > 0 && left > std::numeric_limits<int64_t>::max() - right) ||
+      (right < 0 && left < std::numeric_limits<int64_t>::min() - right)) {
+    return false;
+  }
+  *out = left + right;
+  return true;
+}
+
+constexpr bool CheckedMultiply(int64_t left, int64_t right, int64_t* out) {
+  if (out == nullptr)
+    return false;
+  if (left == 0 || right == 0) {
+    *out = 0;
+    return true;
+  }
+#if defined(__SIZEOF_INT128__)
+  const __int128 product = static_cast<__int128>(left) * right;
+  if (product > std::numeric_limits<int64_t>::max() ||
+      product < std::numeric_limits<int64_t>::min()) {
+    return false;
+  }
+  *out = static_cast<int64_t>(product);
+  return true;
+#else
+  if (left == -1 || right == -1) {
+    if (left == std::numeric_limits<int64_t>::min() ||
+        right == std::numeric_limits<int64_t>::min()) {
+      return false;
+    }
+  }
+  if (left > 0) {
+    if (right > 0 && left > std::numeric_limits<int64_t>::max() / right)
+      return false;
+    if (right < 0 && right < std::numeric_limits<int64_t>::min() / left)
+      return false;
+  } else {
+    if (right > 0 && left < std::numeric_limits<int64_t>::min() / right)
+      return false;
+    if (right < 0 && left < std::numeric_limits<int64_t>::max() / right)
+      return false;
+  }
+  *out = left * right;
+  return true;
+#endif
+}
+
+}  // namespace money_detail
+
+// Money carries its validity state. Invalid values propagate through all
+// arithmetic; they never silently become a valid zero.
 class Money {
  public:
-  constexpr Money() : paise_(0) {
+  constexpr Money() : paise_(0), valid_(true) {
   }
   static constexpr Money FromPaise(int64_t paise) {
-    return Money(paise);
+    return Money(paise, true);
   }
   static Money FromRupees(double rupees);
   static bool TryFromRupees(double rupees, Money* out);
-  static Money Invalid() {
-    return FromPaise(std::numeric_limits<int64_t>::min());
+  static constexpr Money Invalid() {
+    return Money(0, false);
   }
-  bool valid() const {
-    return paise_ != std::numeric_limits<int64_t>::min();
+  constexpr bool valid() const {
+    return valid_;
   }
   constexpr int64_t paise() const {
     return paise_;
@@ -48,18 +103,33 @@ class Money {
   }
 
   constexpr Money& operator+=(const Money& other) {
-    paise_ += other.paise_;
+    int64_t result = 0;
+    if (!valid_ || !other.valid_ ||
+        !money_detail::CheckedAdd(paise_, other.paise_, &result)) {
+      paise_ = 0;
+      valid_ = false;
+      return *this;
+    }
+    paise_ = result;
     return *this;
   }
   constexpr Money& operator-=(const Money& other) {
-    paise_ -= other.paise_;
+    int64_t result = 0;
+    if (!valid_ || !other.valid_ ||
+        !money_detail::CheckedAdd(paise_, -other.paise_, &result)) {
+      paise_ = 0;
+      valid_ = false;
+      return *this;
+    }
+    paise_ = result;
     return *this;
   }
 
  private:
-  explicit constexpr Money(int64_t paise) : paise_(paise) {
+  constexpr Money(int64_t paise, bool valid) : paise_(paise), valid_(valid) {
   }
   int64_t paise_;
+  bool valid_;
 };
 
 constexpr Money operator+(Money a, Money b) {
@@ -69,13 +139,13 @@ constexpr Money operator-(Money a, Money b) {
   return a -= b;
 }
 constexpr bool operator==(Money a, Money b) {
-  return a.paise() == b.paise();
+  return a.valid() == b.valid() && (!a.valid() || a.paise() == b.paise());
 }
 constexpr bool operator!=(Money a, Money b) {
   return !(a == b);
 }
 constexpr bool operator<(Money a, Money b) {
-  return a.paise() < b.paise();
+  return a.valid() && b.valid() && a.paise() < b.paise();
 }
 constexpr bool operator>(Money a, Money b) {
   return b < a;
@@ -337,7 +407,8 @@ struct CostBreakdown {
   Money dp;
   Money slippage;
   Money total;
-  std::string version = "ZERODHA-EQ-2026-11-25-v1";
+  std::string version =
+      "ZERODHA-EQ-2026-11-25-v1 (DP settlement aggregation NOT IMPLEMENTED)";
 };
 
 // ---------------------------------------------------------------------------
@@ -498,6 +569,9 @@ struct BacktestMetrics {
   Money slippage;
   Money max_drawdown;
   bool terminal_liquidation = false;
+  bool halted = false;
+  std::string profit_factor_status = "UNDEFINED";
+  std::string cost_to_gross_status = "NOT_MEANINGFUL";
   std::vector<std::string> warnings;
   std::vector<std::string> audit;
   double sharpe = 0.0;
@@ -571,6 +645,7 @@ class Journal {
   uint64_t next_sequence_ = 1;
   size_t size_ = 0;
   bool healthy_ = false;
+  bool locked_ = false;
   int lock_fd_ = -1;
 };
 

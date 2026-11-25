@@ -149,6 +149,15 @@ void TestConfigParsing() {
   bad = TestConfig();
   bad.live_trading_enabled = true;
   Check(!ValidateConfig(bad).empty(), "config rejects unauthorised live");
+  Config invalid_numbers = TestConfig();
+  invalid_numbers.slippage_bps = std::numeric_limits<double>::quiet_NaN();
+  Check(!ValidateConfig(invalid_numbers).empty(), "NaN slippage rejected");
+  invalid_numbers = TestConfig();
+  invalid_numbers.stop_loss_fraction = 0.0;
+  Check(!ValidateConfig(invalid_numbers).empty(), "zero stop rejected");
+  invalid_numbers = TestConfig();
+  invalid_numbers.queue_capacity = 0;
+  Check(!ValidateConfig(invalid_numbers).empty(), "zero queue rejected");
   Check(ParseMode("LIVE") == Mode::kLive, "mode parse live");
   Check(ModeName(Mode::kDisabled) == "DISABLED", "mode name disabled");
 }
