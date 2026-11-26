@@ -108,3 +108,44 @@ jobs:
         env:
           QHOME: ${{ secrets.QUANT_QHOME }}
         run: python3 -m pytest tests/test_kdbx.py -q
+
+  style-contract:
+    name: Style contract (reference guides)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install pinned style tools
+        run: |
+          python3 -m pip install --quiet -r requirements.txt
+
+      - name: Reference-library and documentation contract
+        run: python3 scripts/style_contract.py
+
+      - name: C++ format contract (Google C++ style guide)
+        run: clang-format --dry-run --Werror include/quant.hpp src/*.cpp tests/tests.cpp
+
+      - name: Python contract (Google Python style guide)
+        run: |
+          ruff check .
+          black --check .
+
+      - name: Python lint contract (no disabled messages)
+        run: pylint python/research.py scripts/*.py --rcfile=.pylintrc --score=no
+
+      - name: Shell contract (Google Shell style guide)
+        run: |
+          files=$(git ls-files '*.sh')
+          if [ -n "$files" ]; then
+            printf '%s\n' "$files" | xargs shellcheck
+          fi
+
+      - name: Single-file assurance gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/assurance.py check --allow-dirty

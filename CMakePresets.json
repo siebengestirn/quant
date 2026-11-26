@@ -1,5 +1,22 @@
 {
-  "version": 3,
+  "buildPresets": [
+    {
+      "configurePreset": "default",
+      "name": "default"
+    },
+    {
+      "configurePreset": "release",
+      "name": "release"
+    },
+    {
+      "configurePreset": "sanitizers",
+      "name": "sanitizers"
+    },
+    {
+      "configurePreset": "portable-ci",
+      "name": "portable-ci"
+    }
+  ],
   "cmakeMinimumRequired": {
     "major": 3,
     "minor": 20,
@@ -7,76 +24,59 @@
   },
   "configurePresets": [
     {
-      "name": "default",
-      "displayName": "QUANT local default",
-      "generator": "Ninja",
       "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
-      }
+      },
+      "displayName": "QUANT local default",
+      "generator": "Ninja",
+      "name": "default"
     },
     {
-      "name": "release",
-      "displayName": "QUANT portable release",
-      "inherits": "default",
       "binaryDir": "${sourceDir}/build-release",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "QUANT_WITH_KDBX": "OFF"
-      }
+      },
+      "displayName": "QUANT portable release",
+      "inherits": "default",
+      "name": "release"
     },
     {
-      "name": "sanitizers",
-      "displayName": "QUANT ASan/UBSan",
-      "inherits": "default",
       "binaryDir": "${sourceDir}/build-san",
       "cacheVariables": {
         "QUANT_SANITIZERS": "ON"
-      }
+      },
+      "displayName": "QUANT ASan/UBSan",
+      "inherits": "default",
+      "name": "sanitizers"
     },
     {
-      "name": "portable-ci",
-      "displayName": "QUANT portable CI parity",
-      "inherits": "release",
       "binaryDir": "${sourceDir}/build-ci",
       "cacheVariables": {
         "QUANT_WITH_KDBX": "OFF"
-      }
-    }
-  ],
-  "buildPresets": [
-    {
-      "name": "default",
-      "configurePreset": "default"
-    },
-    {
-      "name": "release",
-      "configurePreset": "release"
-    },
-    {
-      "name": "sanitizers",
-      "configurePreset": "sanitizers"
-    },
-    {
-      "name": "portable-ci",
-      "configurePreset": "portable-ci"
+      },
+      "displayName": "QUANT portable CI parity",
+      "inherits": "release",
+      "name": "portable-ci"
     }
   ],
   "testPresets": [
     {
-      "name": "default",
       "configurePreset": "default",
+      "name": "default",
       "output": {
         "outputOnFailure": true
       }
     },
     {
-      "name": "portable-ci",
       "configurePreset": "portable-ci",
+      "name": "portable-ci",
       "output": {
         "outputOnFailure": true
       }
     }
-  ]
+  ],
+  "version": 3
 }
