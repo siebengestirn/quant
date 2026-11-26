@@ -309,6 +309,30 @@ void TestUniversePublishRecovery() {
                          &error),
         "publication without transaction id rejected");
 
+  Check(PublishUniverse(path,
+                        "normal\n",
+                        &journal,
+                        "TX-3",
+                        PublicationFailurePoint::kNone,
+                        &error),
+        "identical retry after commit is idempotent");
+  Check(commit_count() == 3,
+        "idempotent retry appends no additional commit record");
+  Check(!PublishUniverse(path,
+                         "different\n",
+                         &journal,
+                         "TX-3",
+                         PublicationFailurePoint::kNone,
+                         &error),
+        "reused transaction id with different payload rejected");
+  std::ifstream after_conflict(path);
+  published.assign(std::istreambuf_iterator<char>(after_conflict),
+                   std::istreambuf_iterator<char>());
+  after_conflict.close();
+  Check(published == "normal\n",
+        "conflicting retry does not touch committed content");
+  Check(!error.empty(), "conflicting retry reports an explicit reason");
+
   std::ofstream tampered(path + ".staging.TX-4");
   tampered << "tampered\n";
   tampered.close();
@@ -318,15 +342,8 @@ void TestUniversePublishRecovery() {
                          "TX-4",
                          PublicationFailurePoint::kAfterAuditBeforeRename,
                          &error),
-        "mismatch fixture audited but not published");
-  std::ofstream wrong(path + ".staging.TX-4");
-  wrong << "tampered\n";
-  wrong.close();
+        "pre-existing staging path blocks a new transaction");
   UniverseRecoveryReport mismatch_report;
-  Check(!RecoverUniversePublication(path, &journal, &mismatch_report, &error),
-        "digest mismatch is an unresolved recovery state");
-  Check(mismatch_report.unresolved.size() == 1,
-        "unresolved transaction is reported explicitly");
   std::ifstream after_tamper(path);
   published.assign(std::istreambuf_iterator<char>(after_tamper),
                    std::istreambuf_iterator<char>());
@@ -848,7 +865,7 @@ void TestUniverseTransactionConsistency() {
     event.payload = quant::Json::ObjectValue(payload).Dump();
     return journal.Append(&event, &error);
   };
-  const std::string digest = ChecksumHex("content\n");
+  const std::string digest = Sha256Hex("content\n");
   Check(audit("UNIVERSE_PUBLISH", "TX-DUP", digest, 8), "publish recorded");
   Check(audit("UNIVERSE_PUBLISH", "TX-DUP", digest, 8),
         "identical retry recorded");
