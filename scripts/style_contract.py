@@ -196,9 +196,9 @@ def main() -> int:
             print(f"  {error}")
         failures += len(errors)
     if args.json_out:
-        pathlib.Path(args.json_out).write_text(
-            json.dumps(report, indent=2) + "\n", encoding="utf-8"
-        )
+        output = pathlib.Path(args.json_out)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     return 1 if failures else 0
 
 
