@@ -1233,6 +1233,7 @@ class PaperBroker {
   std::map<std::string, PaperOrder> orders_;
   std::set<std::string> posted_ids_;
   std::set<std::string> consumed_authorizations_;
+  std::set<std::string> all_fill_ids_;
   uint64_t next_id_ = 1;
 };
 

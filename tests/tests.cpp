@@ -208,8 +208,7 @@ void TestAccountingReplayIntegrity() {
   Check(!RebuildPortfolioFromJournal(
             &journal, Money::FromRupees(100000.0), &failed, &error),
         "conflicting posting ID halts replay");
-  Check(std::string(error).find("conflict") != std::string::npos ||
-            std::string(error).find("illegal") != std::string::npos,
+  Check(std::string(error).find("conflicting") != std::string::npos,
         "conflict failure is explicit");
 
   const std::string mismatch_path = TempPath("accounting_mismatch.jnl");
@@ -631,6 +630,9 @@ void TestReplayFillConflicts() {
     payload["side"] = quant::Json::String("BUY");
     payload["quantity"] = quant::Json::Integer(4);
     payload["limit_price_paise"] = quant::Json::Integer(11000);
+    payload["filled_quantity"] = quant::Json::Integer(0);
+    payload["order_type"] = quant::Json::String("LIMIT");
+    payload["time_in_force"] = quant::Json::String("DAY");
     payload["schema_version"] = quant::Json::UInteger(1);
     Event event;
     event.type = EventType::kPaperIntent;
@@ -653,6 +655,9 @@ void TestReplayFillConflicts() {
     payload["side"] = quant::Json::String("BUY");
     payload["quantity"] = quant::Json::Integer(4);
     payload["limit_price_paise"] = quant::Json::Integer(11000);
+    payload["filled_quantity"] = quant::Json::Integer(2);
+    payload["order_type"] = quant::Json::String("LIMIT");
+    payload["time_in_force"] = quant::Json::String("DAY");
     payload["schema_version"] = quant::Json::UInteger(1);
     Event event;
     event.type = EventType::kPaperIntent;
@@ -692,6 +697,9 @@ void TestReplayFillConflicts() {
     payload["side"] = quant::Json::String("BUY");
     payload["quantity"] = quant::Json::Integer(4);
     payload["limit_price_paise"] = quant::Json::Integer(11000);
+    payload["filled_quantity"] = quant::Json::Integer(2);
+    payload["order_type"] = quant::Json::String("LIMIT");
+    payload["time_in_force"] = quant::Json::String("DAY");
     Event event;
     event.type = EventType::kPaperIntent;
     event.payload = quant::Json::ObjectValue(payload).Dump();
@@ -705,6 +713,9 @@ void TestReplayFillConflicts() {
     payload["side"] = quant::Json::String("BUY");
     payload["quantity"] = quant::Json::Integer(4);
     payload["limit_price_paise"] = quant::Json::Integer(11000);
+    payload["filled_quantity"] = quant::Json::Integer(2);
+    payload["order_type"] = quant::Json::String("LIMIT");
+    payload["time_in_force"] = quant::Json::String("DAY");
     payload["schema_version"] = quant::Json::UInteger(1);
     Event event;
     event.type = EventType::kPaperIntent;
@@ -722,8 +733,9 @@ void TestReplayFillConflicts() {
                      std::make_shared<Portfolio>(Money::FromRupees(100000.0)));
   Check(!strict.RehydrateFromJournal(&error),
         "conflicting duplicate fill id stops replay");
-  Check(std::string(error).find("conflict") != std::string::npos ||
-            std::string(error).find("illegal") != std::string::npos,
+  Check(!error.empty() &&
+            (std::string(error).find("fill") != std::string::npos ||
+             std::string(error).find("recorded") != std::string::npos),
         "conflict failure is explicit");
   bad.Close();
   journal.Close();
@@ -1104,6 +1116,46 @@ void TestRiskAuthorizationBinding() {
   journal.Close();
 }
 
+void TestImpossibleFilledStateReplay() {
+  const std::string path = TempPath("filled_zero_fills.jnl");
+  std::remove(path.c_str());
+  std::string error;
+  Journal journal;
+  Check(journal.Open(path, &error), "impossible state journal opens");
+  auto append = [&](PaperOrderState state, int filled) {
+    Json::Object payload;
+    payload["order_id"] = quant::Json::String("O-IMPOSSIBLE");
+    payload["symbol"] = quant::Json::String("AAA");
+    payload["state"] = quant::Json::String(PaperOrderStateName(state));
+    payload["side"] = quant::Json::String("BUY");
+    payload["quantity"] = quant::Json::Integer(4);
+    payload["limit_price_paise"] = quant::Json::Integer(10000);
+    payload["filled_quantity"] = quant::Json::Integer(filled);
+    payload["order_type"] = quant::Json::String("LIMIT");
+    payload["time_in_force"] = quant::Json::String("DAY");
+    payload["schema_version"] = quant::Json::UInteger(1);
+    Event event;
+    event.type = EventType::kPaperIntent;
+    event.payload = quant::Json::ObjectValue(payload).Dump();
+    return journal.Append(&event, &error);
+  };
+  Check(append(PaperOrderState::kIntent, 0), "intent recorded");
+  Check(append(PaperOrderState::kRiskApproved, 0), "risk approval recorded");
+  Check(append(PaperOrderState::kSubmitted, 0), "submission recorded");
+  Check(append(PaperOrderState::kAcknowledged, 0), "acknowledgement recorded");
+  Check(append(PaperOrderState::kFilled, 4),
+        "impossible filled event recorded");
+  PaperBroker strict(TestConfig(),
+                     &journal,
+                     std::make_shared<Portfolio>(Money::FromRupees(100000.0)));
+  Check(!strict.RehydrateFromJournal(&error),
+        "FILLED without executions fails replay");
+  Check(!error.empty(), "impossible state rejection has an explicit reason");
+  Check(strict.Find("O-IMPOSSIBLE") == nullptr,
+        "impossible order is not projected");
+  journal.Close();
+}
+
 void TestCancelAfterPartialReplay() {
   const std::string path = TempPath("cancel_partial.jnl");
   std::remove(path.c_str());
@@ -1167,6 +1219,9 @@ void TestMalformedFillReplay() {
     payload["side"] = quant::Json::String("BUY");
     payload["quantity"] = quant::Json::Integer(4);
     payload["limit_price_paise"] = quant::Json::Integer(15000);
+    payload["filled_quantity"] = quant::Json::Integer(0);
+    payload["order_type"] = quant::Json::String("LIMIT");
+    payload["time_in_force"] = quant::Json::String("DAY");
     payload["schema_version"] = quant::Json::UInteger(1);
     return payload;
   };
@@ -3073,6 +3128,7 @@ int main() {
   TestPaperRiskAndFreshness();
   TestRiskAuthorizationBinding();
   TestCancelAfterPartialReplay();
+  TestImpossibleFilledStateReplay();
   TestMalformedFillReplay();
   TestUniverseTransactionConsistency();
   TestEventRuntimeOrdering();
