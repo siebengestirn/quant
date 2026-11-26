@@ -1318,6 +1318,133 @@ std::string DurableId(const char* prefix) {
 // Paper execution: local simulated order lifecycle. No broker endpoint is
 // reachable from this class by construction.
 // ---------------------------------------------------------------------------
+bool ParseFillRecord(const Json& payload, FillRecord* out, std::string* error) {
+  auto fail = [error](const char* reason) {
+    if (error)
+      *error = reason;
+    return false;
+  };
+  if (out == nullptr || payload.type() != Json::Type::kObject)
+    return fail("fill record must be an object");
+  int64_t parsed_quantity = 0;
+  const Json* version = payload.Find("fill_schema_version");
+  const Json* id = payload.Find("fill_id");
+  const Json* order_id = payload.Find("order_id");
+  const Json* symbol = payload.Find("symbol");
+  const Json* quantity = payload.Find("fill_quantity");
+  const Json* price = payload.Find("fill_price_paise");
+  const Json* notional = payload.Find("fill_notional_paise");
+  if (version == nullptr || !version->is_exact_integer() ||
+      version->as_int(0) != 2 || id == nullptr ||
+      id->type() != Json::Type::kString || id->as_string().empty() ||
+      order_id == nullptr || order_id->type() != Json::Type::kString ||
+      order_id->as_string().empty() || symbol == nullptr ||
+      symbol->type() != Json::Type::kString || symbol->as_string().empty() ||
+      quantity == nullptr || !quantity->as_integer(&parsed_quantity) ||
+      price == nullptr || !price->as_integer(&out->price_paise) ||
+      notional == nullptr || !notional->as_integer(&out->notional_paise))
+    return fail("malformed fill record");
+  if (parsed_quantity <= 0 || parsed_quantity > std::numeric_limits<int>::max())
+    return fail("fill quantity out of range");
+  out->quantity = static_cast<int>(parsed_quantity);
+  out->version = 2;
+  out->id = id->as_string();
+  out->order_id = order_id->as_string();
+  out->symbol = symbol->as_string();
+  return true;
+}
+
+Json::Object FillRecordJson(const FillRecord& record) {
+  Json::Object payload;
+  payload["fill_schema_version"] = Json::Integer(record.version);
+  payload["fill_id"] = Json::String(record.id);
+  payload["order_id"] = Json::String(record.order_id);
+  payload["symbol"] = Json::String(record.symbol);
+  payload["fill_quantity"] = Json::Integer(record.quantity);
+  payload["fill_price_paise"] = Json::Integer(record.price_paise);
+  payload["fill_notional_paise"] = Json::Integer(record.notional_paise);
+  return payload;
+}
+
+bool ValidateFillRecord(const FillRecord& record,
+                        const PaperOrder& order,
+                        std::string* error) {
+  auto fail = [error](const char* reason) {
+    if (error)
+      *error = reason;
+    return false;
+  };
+  if (record.version != 2 || record.id.empty() || record.order_id != order.id ||
+      record.symbol != order.symbol)
+    return fail("fill record does not bind to its parent order");
+  if (record.quantity <= 0 || record.price_paise <= 0 ||
+      record.notional_paise <= 0)
+    return fail("fill requires positive quantity and price");
+  if (record.quantity > order.quantity - order.filled_quantity)
+    return fail("fill quantity exceeds remaining order quantity");
+  int64_t expected = 0;
+  if (!money_detail::CheckedMultiply(record.price_paise,
+                                     static_cast<int64_t>(record.quantity),
+                                     &expected) ||
+      expected != record.notional_paise)
+    return fail("fill notional is not quantity times price");
+  for (const PaperOrder::Fill& existing : order.fills) {
+    if (existing.id != record.id)
+      continue;
+    if (existing.quantity != record.quantity ||
+        existing.price_paise != record.price_paise ||
+        existing.notional_paise != record.notional_paise)
+      return fail("conflicting duplicate fill identity");
+    return true;  // Identical retry: idempotent no-op.
+  }
+  return true;
+}
+
+bool PaperBroker::ApplyFillRecord(PaperOrder* order,
+                                  const FillRecord& record,
+                                  std::string* error) {
+  if (order == nullptr) {
+    if (error)
+      *error = "unknown order";
+    return false;
+  }
+  if (!ValidateFillRecord(record, *order, error))
+    return false;
+  for (const PaperOrder::Fill& existing : order->fills)
+    if (existing.id == record.id)
+      return true;  // Already applied; idempotent retry.
+  int64_t total_notional = 0;
+  int64_t total_quantity = 0;
+  if (!money_detail::CheckedAdd(order->cumulative_notional_paise,
+                                record.notional_paise,
+                                &total_notional) ||
+      !money_detail::CheckedAdd(static_cast<int64_t>(order->filled_quantity),
+                                static_cast<int64_t>(record.quantity),
+                                &total_quantity) ||
+      total_quantity > static_cast<int64_t>(order->quantity) ||
+      total_quantity <= 0) {
+    if (error)
+      *error = "fill accumulator overflow or overfill";
+    return false;
+  }
+  PaperOrder::Fill lot;
+  lot.id = record.id;
+  lot.quantity = record.quantity;
+  lot.price_paise = record.price_paise;
+  lot.notional_paise = record.notional_paise;
+  order->fills.push_back(lot);
+  order->filled_quantity = static_cast<int>(total_quantity);
+  order->cumulative_notional_paise = total_notional;
+  // Explicit rounding rule: integer floor division of exact cumulative paise.
+  order->average_fill = Money::FromPaise(total_notional / total_quantity);
+  if (!order->average_fill.valid()) {
+    if (error)
+      *error = "computed average fill is invalid";
+    return false;
+  }
+  return true;
+}
+
 const char* PaperOrderStateName(PaperOrderState state) {
   switch (state) {
     case PaperOrderState::kIntent:
@@ -1425,10 +1552,16 @@ bool PaperBroker::Transition(PaperOrder* order,
   payload["config_version"] = Json::String(order->config_version);
   payload["execution_model"] = Json::String(order->execution_model);
   if (fill != nullptr) {
-    payload["fill_id"] = Json::String(fill->id);
-    payload["fill_quantity"] = Json::Integer(fill->quantity);
-    payload["fill_price_paise"] = Json::Integer(fill->price_paise);
-    payload["fill_notional_paise"] = Json::Integer(fill->notional_paise);
+    FillRecord record;
+    record.version = 2;
+    record.id = fill->id;
+    record.order_id = order->id;
+    record.symbol = order->symbol;
+    record.quantity = fill->quantity;
+    record.price_paise = fill->price_paise;
+    record.notional_paise = fill->notional_paise;
+    for (const auto& [key, value] : FillRecordJson(record))
+      payload[key] = value;
   }
   payload["reason"] = Json::String(reason);
   Event event;
@@ -1592,29 +1725,23 @@ bool PaperBroker::ApplyQuote(const std::string& id,
       *error = "invalid fill price";
     return false;
   }
-  int64_t previous_notional = 0;
-  int64_t added_notional = 0;
-  int64_t total_notional = 0;
-  if (!money_detail::CheckedAdd(
-          order.cumulative_notional_paise, added_notional, &total_notional) ||
-      !money_detail::CheckedMultiply(
-          price.paise(), static_cast<int64_t>(fill), &added_notional) ||
-      !money_detail::CheckedAdd(
-          previous_notional, added_notional, &total_notional)) {
+  FillRecord record;
+  record.version = 2;
+  record.id = DurableId("FILL");
+  record.order_id = order.id;
+  record.symbol = order.symbol;
+  record.quantity = fill;
+  record.price_paise = price.paise();
+  if (!money_detail::CheckedMultiply(record.price_paise,
+                                     static_cast<int64_t>(fill),
+                                     &record.notional_paise)) {
     if (error)
       *error = "fill notional overflow";
     return false;
   }
-  PaperOrder::Fill lot;
-  lot.quantity = fill;
-  lot.price_paise = price.paise();
-  lot.notional_paise = added_notional;
-  lot.id = DurableId("FILL");
-  order.fills.push_back(lot);
-  order.filled_quantity += fill;
-  order.cumulative_notional_paise += added_notional;
-  order.average_fill = Money::FromPaise(
-      total_notional / static_cast<int64_t>(order.filled_quantity));
+  if (!ApplyFillRecord(&order, record, error))
+    return false;
+  const PaperOrder::Fill& lot = order.fills.back();
   const PaperOrderState state = order.filled_quantity >= order.quantity
                                     ? PaperOrderState::kFilled
                                     : PaperOrderState::kPartiallyFilled;
@@ -1752,86 +1879,75 @@ PaperOrderState ParsePaperState(const std::string& name) {
 }
 
 bool PaperBroker::RehydrateFromJournal(std::string* error) {
-  if (journal_ == nullptr) {
+  auto fail = [error](const char* reason) {
     if (error)
-      *error = "rehydration requires a journal";
+      *error = reason;
     return false;
-  }
+  };
+  if (journal_ == nullptr)
+    return fail("rehydration requires a journal");
   const std::vector<Event> events = journal_->Replay(error);
-  if (!error->empty())
+  if (error != nullptr && !error->empty())
     return false;
   orders_.clear();
   posted_ids_.clear();
   for (const Event& event : events) {
     Json payload;
     if (!Json::Parse(event.payload, &payload, error))
-      return false;
+      return fail("paper journal event is not valid JSON");
     if (event.type == EventType::kAccounting) {
       AccountingPosting posting;
       if (!ParseAccountingPosting(event, &posting, error))
         return false;
-      posted_ids_.insert(posting.posting_id);
+      const auto already = posted_ids_.insert(posting.posting_id);
+      if (!already.second)
+        return fail("duplicate accounting posting identity");
       continue;
     }
     if (event.type == EventType::kFill) {
-      const Json* order_id = payload.Find("order_id");
-      const Json* fill_id = payload.Find("fill_id");
-      if (order_id == nullptr || fill_id == nullptr)
-        continue;
-      auto order = orders_.find(order_id->as_string());
-      if (order == orders_.end()) {
-        if (error)
-          *error = "fill event references missing parent order";
+      FillRecord record;
+      if (!ParseFillRecord(payload, &record, error))
         return false;
-      }
-      PaperOrder::Fill lot;
-      lot.id = fill_id->as_string();
-      auto integer = [&payload](const char* key) {
-        const Json* value = payload.Find(key);
-        return value == nullptr ? 0 : static_cast<int>(value->as_int(0));
-      };
-      lot.quantity = integer("fill_quantity");
-      lot.price_paise = integer("fill_price_paise");
-      lot.notional_paise = integer("fill_notional_paise");
-      order->second.fills.push_back(lot);
-      order->second.filled_quantity += lot.quantity;
-      order->second.cumulative_notional_paise += lot.notional_paise;
+      auto order = orders_.find(record.order_id);
+      if (order == orders_.end())
+        return fail("fill event references missing parent order");
+      if (!ApplyFillRecord(&order->second, record, error))
+        return false;
       continue;
     }
     if (event.type != EventType::kPaperIntent)
       continue;
+    PaperOrder order;
     const Json* order_id = payload.Find("order_id");
     const Json* symbol = payload.Find("symbol");
     const Json* state = payload.Find("state");
-    if (order_id == nullptr || symbol == nullptr || state == nullptr)
-      continue;
-    PaperOrder order;
+    const Json* side = payload.Find("side");
+    const Json* limit = payload.Find("limit_price_paise");
+    const Json* quantity = payload.Find("quantity");
+    if (order_id == nullptr || symbol == nullptr || state == nullptr ||
+        side == nullptr || limit == nullptr || quantity == nullptr ||
+        order_id->type() != Json::Type::kString ||
+        symbol->type() != Json::Type::kString ||
+        side->type() != Json::Type::kString ||
+        state->type() != Json::Type::kString)
+      return fail("malformed paper order transition");
     order.id = order_id->as_string();
     order.client_order_id = order.id;
     order.causation_id = order.id;
     order.correlation_id = order.id;
     order.symbol = symbol->as_string();
-    const Json* side = payload.Find("side");
-    if (side == nullptr || side->type() != Json::Type::kString) {
-      if (error)
-        *error = "order transition missing side";
-      return false;
-    }
     order.side =
         side->as_string() == "SELL" ? OrderSide::kSell : OrderSide::kBuy;
-    const Json* limit = payload.Find("limit_price_paise");
     int64_t order_limit = 0;
-    if (limit == nullptr || !limit->as_integer(&order_limit)) {
-      if (error)
-        *error = "order transition missing limit price";
-      return false;
-    }
+    int64_t order_quantity = 0;
+    if (!limit->as_integer(&order_limit) ||
+        !quantity->as_integer(&order_quantity) || order_limit <= 0 ||
+        order_quantity <= 0 || order_quantity > std::numeric_limits<int>::max())
+      return fail("invalid order limit or quantity in journal");
     order.limit_price = Money::FromPaise(order_limit);
-    if (!order.limit_price.valid()) {
-      if (error)
-        *error = "order transition has invalid limit price";
-      return false;
-    }
+    order.quantity = static_cast<int>(order_quantity);
+    if (!order.limit_price.valid())
+      return fail("invalid limit price in journal");
     auto optional_text = [&payload](const char* key, std::string* out) {
       const Json* value = payload.Find(key);
       if (value == nullptr || value->type() != Json::Type::kString)
@@ -1845,65 +1961,38 @@ bool PaperBroker::RehydrateFromJournal(std::string* error) {
     optional_text("risk_policy_id", &order.risk_policy_id);
     optional_text("config_version", &order.config_version);
     optional_text("execution_model", &order.execution_model);
-    order.state = ParsePaperState(state->as_string());
-    if (order.state == PaperOrderState::kAmbiguous) {
-      if (error)
-        *error = "unknown paper order state in journal";
-      return false;
-    }
-    const Json* quantity = payload.Find("quantity");
-    order.quantity =
-        quantity == nullptr ? 0 : static_cast<int>(quantity->as_int(0));
+    const PaperOrderState next_state = ParsePaperState(state->as_string());
+    if (next_state == PaperOrderState::kAmbiguous)
+      return fail("unknown paper order state in journal");
     auto existing = orders_.find(order.id);
     if (existing == orders_.end()) {
-      orders_[order.id] = order;
+      if (next_state != PaperOrderState::kIntent)
+        return fail("first order transition is not INTENT");
+      orders_.emplace(order.id, order);
     } else {
-      std::vector<PaperOrder::Fill> preserved =
-          std::move(existing->second.fills);
-      const int preserved_quantity = existing->second.filled_quantity;
-      const int64_t preserved_notional =
-          existing->second.cumulative_notional_paise;
-      const size_t preserved_posted = existing->second.posted_fill_count;
-      existing->second = order;
-      existing->second.fills = std::move(preserved);
-      existing->second.filled_quantity = preserved_quantity;
-      existing->second.cumulative_notional_paise = preserved_notional;
-      existing->second.posted_fill_count = preserved_posted;
+      PaperOrder& restored = existing->second;
+      if (restored.symbol != order.symbol || restored.side != order.side ||
+          restored.quantity != order.quantity ||
+          restored.limit_price != order.limit_price)
+        return fail("order identity mutated across transitions");
+      if (!IsValidPaperTransition(restored.state, next_state))
+        return fail("illegal paper order state transition in journal");
+      restored.state = next_state;
+      restored.risk_policy_id = order.risk_policy_id;
+      restored.instrument_key = order.instrument_key;
+      restored.order_type = order.order_type;
+      restored.time_in_force = order.time_in_force;
+      restored.config_version = order.config_version;
+      restored.execution_model = order.execution_model;
     }
     PaperOrder& restored = orders_[order.id];
     const Json* fill_id = payload.Find("fill_id");
     if (fill_id != nullptr) {
-      if (fill_id->type() != Json::Type::kString) {
-        if (error)
-          *error = "malformed fill identity in order transition";
+      FillRecord record;
+      if (!ParseFillRecord(payload, &record, error))
+        return fail("malformed fill record in order transition");
+      if (!ApplyFillRecord(&restored, record, error))
         return false;
-      }
-      PaperOrder::Fill lot;
-      lot.id = fill_id->as_string();
-      auto fill_integer = [&payload](const char* key, int64_t* out) {
-        const Json* value = payload.Find(key);
-        return value != nullptr && value->as_integer(out);
-      };
-      int64_t quantity = 0;
-      if (!fill_integer("fill_quantity", &quantity) || quantity <= 0 ||
-          quantity > std::numeric_limits<int>::max() ||
-          !fill_integer("fill_price_paise", &lot.price_paise) ||
-          !fill_integer("fill_notional_paise", &lot.notional_paise) ||
-          lot.price_paise <= 0 || lot.notional_paise <= 0) {
-        if (error)
-          *error = "malformed fill fields in order transition";
-        return false;
-      }
-      bool already = false;
-      for (const auto& existing_fill : restored.fills)
-        if (existing_fill.id == lot.id)
-          already = true;
-      lot.quantity = static_cast<int>(quantity);
-      if (!already) {
-        restored.fills.push_back(lot);
-        restored.filled_quantity += lot.quantity;
-        restored.cumulative_notional_paise += lot.notional_paise;
-      }
     }
     next_id_ = std::max(next_id_, static_cast<uint64_t>(orders_.size() + 1));
   }
@@ -1916,13 +2005,18 @@ bool PaperBroker::RehydrateFromJournal(std::string* error) {
       ++posted;
     }
     order.posted_fill_count = posted;
-    if (order.fills.empty() || order.filled_quantity == 0)
-      continue;
-    int64_t weighted = 0;
-    for (const auto& lot : order.fills)
-      weighted += lot.price_paise * static_cast<int64_t>(lot.quantity);
-    order.average_fill = Money::FromPaise(
-        weighted / static_cast<int64_t>(order.filled_quantity));
+    if (!order.fills.empty() && order.filled_quantity > 0) {
+      int64_t total = 0;
+      if (!money_detail::CheckedAdd(
+              0, order.cumulative_notional_paise, &total) ||
+          !order.average_fill.valid())
+        return fail("rehydrated fill arithmetic is invalid");
+      order.average_fill =
+          Money::FromPaise(order.cumulative_notional_paise /
+                           static_cast<int64_t>(order.filled_quantity));
+      if (!order.average_fill.valid())
+        return fail("rehydrated average fill is invalid");
+    }
   }
   return true;
 }

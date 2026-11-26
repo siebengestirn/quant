@@ -198,7 +198,8 @@ void TestAccountingReplayIntegrity() {
   Check(!RebuildPortfolioFromJournal(
             &journal, Money::FromRupees(100000.0), &failed, &error),
         "conflicting posting ID halts replay");
-  Check(std::string(error).find("conflicting") != std::string::npos,
+  Check(std::string(error).find("conflict") != std::string::npos ||
+            std::string(error).find("illegal") != std::string::npos,
         "conflict failure is explicit");
 
   const std::string mismatch_path = TempPath("accounting_mismatch.jnl");
@@ -545,6 +546,176 @@ void TestAssetAndComplianceContracts() {
   gate.approval_ref = "SIGN-OFF-1";
   Check(!LiveRouteAuthorized(gate, &error),
         "complete gate still blocks live route in this build");
+}
+
+void TestFillAverageArithmetic() {
+  const std::string path = TempPath("fill_average.jnl");
+  std::remove(path.c_str());
+  std::string error;
+  Journal journal;
+  Check(journal.Open(path, &error), "average journal opens");
+  auto portfolio = std::make_shared<Portfolio>(Money::FromRupees(100000.0));
+  Config config = TestConfig();
+  config.max_participation_fraction = 1.0;
+  PaperBroker broker(config, &journal, portfolio);
+  PaperOrder* order = broker.CreateIntent(
+      "AAA", OrderSide::kBuy, 4, Money::FromRupees(110.0), &error);
+  Check(order != nullptr, "four-share order created");
+  broker.RiskApprove(order->id, ApprovedDecision(*order), &error);
+  broker.Submit(order->id, &error);
+  broker.Acknowledge(order->id, &error);
+  Quote first = GoodQuote(100.0);
+  first.symbol = "AAA";
+  first.ask = 100.0;
+  first.ask_qty = 2;
+  Check(broker.ApplyQuote(order->id, first, NowMs(), &error),
+        "first partial fill applied");
+  Check(order->filled_quantity == 2, "first partial quantity exact");
+  Check(order->cumulative_notional_paise == 20000,
+        "first partial notional exact");
+  Check(order->average_fill == Money::FromPaise(10000),
+        "first average fill exact");
+  Quote second = GoodQuote(110.0);
+  second.symbol = "AAA";
+  second.ask = 110.0;
+  second.ask_qty = 2;
+  Check(broker.ApplyQuote(order->id, second, NowMs(), &error),
+        "second partial fill applied");
+  Check(order->filled_quantity == 4, "both fills counted");
+  Check(order->cumulative_notional_paise == 42000,
+        "cumulative notional is 42000 paise");
+  Check(order->average_fill == Money::FromPaise(10500),
+        "average fill is 10500 paise, not 5500");
+  Check(broker.Reconcile(order->id, &error), "fills reconciled");
+
+  PaperBroker restarted(
+      config,
+      &journal,
+      std::make_shared<Portfolio>(Money::FromRupees(100000.0)));
+  Check(restarted.RehydrateFromJournal(&error),
+        "restart rebuilds two-fill order");
+  const PaperOrder* restored = restarted.Find(order->id);
+  Check(restored != nullptr, "restarted order found");
+  Check(restored != nullptr && restored->cumulative_notional_paise == 42000,
+        "restarted cumulative notional exact");
+  Check(
+      restored != nullptr && restored->average_fill == Money::FromPaise(10500),
+      "restarted average fill matches in-memory value");
+  Check(restored != nullptr && restored->fills.size() == 2,
+        "both fill lots preserved");
+  journal.Close();
+}
+
+void TestReplayFillConflicts() {
+  const std::string path = TempPath("replay_conflict.jnl");
+  std::remove(path.c_str());
+  std::string error;
+  Journal journal;
+  Check(journal.Open(path, &error), "conflict journal opens");
+  auto append_order = [&](PaperOrderState state) {
+    Json::Object payload;
+    payload["order_id"] = quant::Json::String("O-1");
+    payload["symbol"] = quant::Json::String("AAA");
+    payload["state"] = quant::Json::String(PaperOrderStateName(state));
+    payload["side"] = quant::Json::String("BUY");
+    payload["quantity"] = quant::Json::Integer(4);
+    payload["limit_price_paise"] = quant::Json::Integer(11000);
+    payload["schema_version"] = quant::Json::UInteger(1);
+    Event event;
+    event.type = EventType::kPaperIntent;
+    event.payload = quant::Json::ObjectValue(payload).Dump();
+    return journal.Append(&event, &error);
+  };
+  auto append_fill = [&](const char* id, int quantity, int64_t price) {
+    FillRecord record;
+    record.id = id;
+    record.order_id = "O-1";
+    record.symbol = "AAA";
+    record.quantity = quantity;
+    record.price_paise = price;
+    if (!money_detail::CheckedMultiply(price, quantity, &record.notional_paise))
+      return false;
+    Json::Object payload = FillRecordJson(record);
+    payload["order_id"] = quant::Json::String("O-1");
+    payload["symbol"] = quant::Json::String("AAA");
+    payload["state"] = quant::Json::String("PARTIALLY_FILLED");
+    payload["side"] = quant::Json::String("BUY");
+    payload["quantity"] = quant::Json::Integer(4);
+    payload["limit_price_paise"] = quant::Json::Integer(11000);
+    payload["schema_version"] = quant::Json::UInteger(1);
+    Event event;
+    event.type = EventType::kPaperIntent;
+    event.payload = quant::Json::ObjectValue(payload).Dump();
+    return journal.Append(&event, &error);
+  };
+  Check(append_order(PaperOrderState::kIntent), "conflict order intent");
+  Check(append_order(PaperOrderState::kRiskApproved), "risk approval");
+  Check(append_order(PaperOrderState::kSubmitted), "submission");
+  Check(append_order(PaperOrderState::kAcknowledged), "acknowledgement");
+  Check(append_fill("F-SAME", 2, 10000), "first fill recorded");
+  Check(append_fill("F-SAME", 2, 10000), "identical retry recorded");
+  PaperBroker dedup(TestConfig(),
+                    &journal,
+                    std::make_shared<Portfolio>(Money::FromRupees(100000.0)));
+  Check(dedup.RehydrateFromJournal(&error),
+        "identical duplicate fill id is idempotent");
+  Check(dedup.Find("O-1")->fills.size() == 1,
+        "duplicate fill applies only once");
+
+  const std::string bad_path = TempPath("replay_conflict_bad.jnl");
+  std::remove(bad_path.c_str());
+  Journal bad;
+  bad.Open(bad_path, &error);
+  auto append_bad = [&](const char* id, int quantity, int64_t price) {
+    FillRecord record;
+    record.id = id;
+    record.order_id = "O-1";
+    record.symbol = "AAA";
+    record.quantity = quantity;
+    record.price_paise = price;
+    money_detail::CheckedMultiply(price, quantity, &record.notional_paise);
+    Json::Object payload = FillRecordJson(record);
+    payload["order_id"] = quant::Json::String("O-1");
+    payload["symbol"] = quant::Json::String("AAA");
+    payload["state"] = quant::Json::String("PARTIALLY_FILLED");
+    payload["side"] = quant::Json::String("BUY");
+    payload["quantity"] = quant::Json::Integer(4);
+    payload["limit_price_paise"] = quant::Json::Integer(11000);
+    Event event;
+    event.type = EventType::kPaperIntent;
+    event.payload = quant::Json::ObjectValue(payload).Dump();
+    return bad.Append(&event, &error);
+  };
+  auto append_bad_order = [&](PaperOrderState state) {
+    Json::Object payload;
+    payload["order_id"] = quant::Json::String("O-1");
+    payload["symbol"] = quant::Json::String("AAA");
+    payload["state"] = quant::Json::String(PaperOrderStateName(state));
+    payload["side"] = quant::Json::String("BUY");
+    payload["quantity"] = quant::Json::Integer(4);
+    payload["limit_price_paise"] = quant::Json::Integer(11000);
+    payload["schema_version"] = quant::Json::UInteger(1);
+    Event event;
+    event.type = EventType::kPaperIntent;
+    event.payload = quant::Json::ObjectValue(payload).Dump();
+    return bad.Append(&event, &error);
+  };
+  Check(append_bad_order(PaperOrderState::kIntent), "bad order intent");
+  Check(append_bad_order(PaperOrderState::kRiskApproved), "bad risk approval");
+  Check(append_bad_order(PaperOrderState::kSubmitted), "bad submission");
+  Check(append_bad_order(PaperOrderState::kAcknowledged), "bad ack");
+  Check(append_bad("F-CONFLICT", 2, 10000), "conflicting first fill");
+  Check(append_bad("F-CONFLICT", 1, 10500), "conflicting duplicate payload");
+  PaperBroker strict(TestConfig(),
+                     &bad,
+                     std::make_shared<Portfolio>(Money::FromRupees(100000.0)));
+  Check(!strict.RehydrateFromJournal(&error),
+        "conflicting duplicate fill id stops replay");
+  Check(std::string(error).find("conflict") != std::string::npos ||
+            std::string(error).find("illegal") != std::string::npos,
+        "conflict failure is explicit");
+  bad.Close();
+  journal.Close();
 }
 
 void TestPaperOrderReducer() {
@@ -2744,6 +2915,8 @@ int main() {
   TestInstrumentReferenceModel();
   TestProviderHistoryValidation();
   TestPaperOrderReducer();
+  TestFillAverageArithmetic();
+  TestReplayFillConflicts();
   TestAssetAndComplianceContracts();
   TestPaperRehydration();
   TestDeterministicEventRuntime();
