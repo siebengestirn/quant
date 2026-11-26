@@ -1211,6 +1211,11 @@ class PaperBroker {
   bool Cancel(const std::string& id, std::string* error);
   bool Expire(const std::string& id, std::string* error);
   bool MarkAmbiguous(const std::string& id, std::string* error);
+  bool ResolveAmbiguous(const std::string& id,
+                        PaperOrderState resolved_state,
+                        const std::string& operator_id,
+                        const std::string& reason,
+                        std::string* error);
   bool Reconcile(const std::string& id, std::string* error);
   bool RehydrateFromJournal(std::string* error);
   const PaperOrder* Find(const std::string& id) const;

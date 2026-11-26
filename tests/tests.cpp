@@ -1116,6 +1116,90 @@ void TestRiskAuthorizationBinding() {
   journal.Close();
 }
 
+void TestAmbiguousStateRecovery() {
+  const std::string path = TempPath("ambiguous_replay.jnl");
+  std::remove(path.c_str());
+  std::string error;
+  Journal journal;
+  Check(journal.Open(path, &error), "ambiguous journal opens");
+  auto append = [&](PaperOrderState state, int filled) {
+    Json::Object payload;
+    payload["order_id"] = quant::Json::String("O-AMB");
+    payload["symbol"] = quant::Json::String("AAA");
+    payload["state"] = quant::Json::String(PaperOrderStateName(state));
+    payload["side"] = quant::Json::String("BUY");
+    payload["quantity"] = quant::Json::Integer(4);
+    payload["limit_price_paise"] = quant::Json::Integer(10000);
+    payload["filled_quantity"] = quant::Json::Integer(filled);
+    payload["order_type"] = quant::Json::String("LIMIT");
+    payload["time_in_force"] = quant::Json::String("DAY");
+    payload["schema_version"] = quant::Json::UInteger(1);
+    Event event;
+    event.type = EventType::kPaperIntent;
+    event.payload = quant::Json::ObjectValue(payload).Dump();
+    return journal.Append(&event, &error);
+  };
+  Check(append(PaperOrderState::kIntent, 0), "ambiguous intent");
+  Check(append(PaperOrderState::kRiskApproved, 0), "ambiguous risk approval");
+  Check(append(PaperOrderState::kSubmitted, 0), "ambiguous submission");
+  Check(append(PaperOrderState::kAcknowledged, 0), "ambiguous ack");
+  Check(append(PaperOrderState::kAmbiguous, 0), "ambiguous state recorded");
+  auto portfolio = std::make_shared<Portfolio>(Money::FromRupees(100000.0));
+  PaperBroker broker(TestConfig(), &journal, portfolio);
+  Check(broker.RehydrateFromJournal(&error),
+        "zero-fill ambiguous order rehydrates");
+  const PaperOrder* restored = broker.Find("O-AMB");
+  Check(restored != nullptr && restored->state == PaperOrderState::kAmbiguous,
+        "ambiguous state is preserved");
+  Check(!broker.Submit("O-AMB", &error), "ambiguous order cannot be submitted");
+  Check(!broker.Cancel("O-AMB", &error), "ambiguous order cannot be cancelled");
+  Check(!broker.Expire("O-AMB", &error), "ambiguous order cannot be expired");
+  Check(broker.ResolveAmbiguous("O-AMB",
+                                PaperOrderState::kCancelled,
+                                "OPERATOR-1",
+                                "no broker confirmation",
+                                &error),
+        "operator resolves ambiguous order");
+  Check(broker.Find("O-AMB")->state == PaperOrderState::kCancelled,
+        "resolution produces cancelled state");
+
+  const std::string partial_path = TempPath("ambiguous_partial.jnl");
+  std::remove(partial_path.c_str());
+  Journal partial;
+  partial.Open(partial_path, &error);
+  auto append_to = [&](Journal* target, PaperOrderState state, int filled) {
+    Json::Object payload;
+    payload["order_id"] = quant::Json::String("O-AMB2");
+    payload["symbol"] = quant::Json::String("AAA");
+    payload["state"] = quant::Json::String(PaperOrderStateName(state));
+    payload["side"] = quant::Json::String("BUY");
+    payload["quantity"] = quant::Json::Integer(4);
+    payload["limit_price_paise"] = quant::Json::Integer(10000);
+    payload["filled_quantity"] = quant::Json::Integer(filled);
+    payload["order_type"] = quant::Json::String("LIMIT");
+    payload["time_in_force"] = quant::Json::String("DAY");
+    Event event;
+    event.type = EventType::kPaperIntent;
+    event.payload = quant::Json::ObjectValue(payload).Dump();
+    return target->Append(&event, &error);
+  };
+  Check(append_to(&partial, PaperOrderState::kIntent, 0), "partial intent");
+  Check(append_to(&partial, PaperOrderState::kAmbiguous, 2),
+        "partially filled ambiguous state");
+  PaperBroker partial_broker(
+      TestConfig(),
+      &partial,
+      std::make_shared<Portfolio>(Money::FromRupees(100000.0)));
+  Check(partial_broker.RehydrateFromJournal(&error),
+        "partially filled ambiguous order rehydrates");
+  Check(partial_broker.Find("O-AMB2")->state == PaperOrderState::kAmbiguous,
+        "partial ambiguous state is not upgraded");
+  Check(!partial_broker.ApplyQuote("O-AMB2", GoodQuote(100.0), NowMs(), &error),
+        "ambiguous order cannot receive fills");
+  journal.Close();
+  partial.Close();
+}
+
 void TestImpossibleFilledStateReplay() {
   const std::string path = TempPath("filled_zero_fills.jnl");
   std::remove(path.c_str());
@@ -3129,6 +3213,7 @@ int main() {
   TestRiskAuthorizationBinding();
   TestCancelAfterPartialReplay();
   TestImpossibleFilledStateReplay();
+  TestAmbiguousStateRecovery();
   TestMalformedFillReplay();
   TestUniverseTransactionConsistency();
   TestEventRuntimeOrdering();

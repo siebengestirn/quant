@@ -1534,11 +1534,13 @@ bool IsValidPaperTransition(PaperOrderState from, PaperOrderState to) {
              to == PaperOrderState::kCancelled ||
              to == PaperOrderState::kExpired ||
              to == PaperOrderState::kAmbiguous;
+    case PaperOrderState::kAmbiguous:
+      return to == PaperOrderState::kCancelled ||
+             to == PaperOrderState::kRejected;
     case PaperOrderState::kFilled:
     case PaperOrderState::kRejected:
     case PaperOrderState::kCancelled:
     case PaperOrderState::kExpired:
-    case PaperOrderState::kAmbiguous:
       return false;
   }
   return false;
@@ -1808,6 +1810,11 @@ bool PaperBroker::Expire(const std::string& id, std::string* error) {
       *error = "unknown order";
     return false;
   }
+  if (it->second.state == PaperOrderState::kAmbiguous) {
+    if (error)
+      *error = "ambiguous order requires operator resolution";
+    return false;
+  }
   return Transition(
       &it->second, PaperOrderState::kExpired, "session expired", error);
 }
@@ -1910,6 +1917,37 @@ PaperOrderState ParsePaperState(const std::string& name) {
   return it == names.end() ? PaperOrderState::kAmbiguous : it->second;
 }
 
+bool PaperBroker::ResolveAmbiguous(const std::string& id,
+                                   PaperOrderState resolved_state,
+                                   const std::string& operator_id,
+                                   const std::string& reason,
+                                   std::string* error) {
+  auto it = orders_.find(id);
+  if (it == orders_.end()) {
+    if (error)
+      *error = "unknown order";
+    return false;
+  }
+  if (it->second.state != PaperOrderState::kAmbiguous) {
+    if (error)
+      *error = "order is not in AMBIGUOUS state";
+    return false;
+  }
+  if (resolved_state != PaperOrderState::kCancelled &&
+      resolved_state != PaperOrderState::kRejected) {
+    if (error)
+      *error = "operator resolution must cancel or reject the order";
+    return false;
+  }
+  if (operator_id.empty() || reason.empty()) {
+    if (error)
+      *error = "operator identity and reason are required";
+    return false;
+  }
+  const std::string detail = "operator=" + operator_id + " reason=" + reason;
+  return Transition(&it->second, resolved_state, detail, error);
+}
+
 bool PaperBroker::RehydrateFromJournal(std::string* error) {
   auto fail = [this, error](const char* reason) {
     if (error)
@@ -2005,8 +2043,6 @@ bool PaperBroker::RehydrateFromJournal(std::string* error) {
     optional_text("config_version", &order.config_version);
     optional_text("execution_model", &order.execution_model);
     const PaperOrderState next_state = ParsePaperState(state->as_string());
-    if (next_state == PaperOrderState::kAmbiguous)
-      return fail("unknown paper order state in journal");
     auto existing = orders_.find(order.id);
     if (existing == orders_.end()) {
       if (next_state != PaperOrderState::kIntent)
