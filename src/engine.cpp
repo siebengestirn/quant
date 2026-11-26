@@ -210,12 +210,6 @@ std::string HexDecode(std::string_view input) {
   return out;
 }
 
-std::string ChecksumHex(std::string_view text) {
-  std::ostringstream oss;
-  oss << std::hex << std::setw(16) << std::setfill('0') << Checksum(text);
-  return oss.str();
-}
-
 size_t CurlWrite(void* contents, size_t size, size_t nmemb, void* userdata) {
   const size_t bytes = size * nmemb;
   auto* body = static_cast<std::string*>(userdata);
@@ -251,6 +245,12 @@ double Clamp(double value, double low, double high) {
 }
 
 }  // namespace
+
+std::string ChecksumHex(std::string_view text) {
+  std::ostringstream oss;
+  oss << std::hex << std::setw(16) << std::setfill('0') << Checksum(text);
+  return oss.str();
+}
 
 // ---------------------------------------------------------------------------
 // Money.

@@ -1,6 +1,7 @@
 #include "quant.hpp"
 
 #include <fcntl.h>
+#include <filesystem>
 #include <unistd.h>
 
 #include <chrono>
@@ -50,9 +51,7 @@ std::string CsvEscape(std::string value) {
   return out + "\"";
 }
 
-bool WriteUniverseCsv(const std::string& path,
-                      const std::vector<Instrument>& instruments,
-                      std::string* error) {
+std::string UniverseCsvContent(const std::vector<Instrument>& instruments) {
   std::ostringstream oss;
   oss << "symbol,exchange,isin,provider_key,name,security_type,tick_size,"
          "cas_eligible,eligible,reason,instrument_class\n";
@@ -66,7 +65,15 @@ bool WriteUniverseCsv(const std::string& path,
         << CsvEscape(instrument.eligibility_reason) << ','
         << static_cast<int>(instrument.instrument_class) << '\n';
   }
-  const std::string error_text = WriteTextFile(path, oss.str());
+  return oss.str();
+}
+
+[[maybe_unused]] bool WriteUniverseCsv(
+    const std::string& path,
+    const std::vector<Instrument>& instruments,
+    std::string* error) {
+  const std::string error_text =
+      WriteTextFile(path, UniverseCsvContent(instruments));
   if (!error_text.empty()) {
     if (error)
       *error = error_text;
@@ -171,8 +178,207 @@ bool DownloadGzipJson(const HttpClient& http,
 
 }  // namespace
 
+namespace {
+
+std::string UniverseAuditDigest(const std::string& content) {
+  return ChecksumHex(content);
+}
+
+bool AppendUniverseAudit(Journal* journal,
+                         const char* action,
+                         const std::string& transaction_id,
+                         const std::string& digest,
+                         size_t records,
+                         std::string* error) {
+  if (journal == nullptr) {
+    if (error)
+      *error = "universe publication requires an audit journal";
+    return false;
+  }
+  Json::Object payload;
+  payload["action"] = Json::String(action);
+  payload["transaction_id"] = Json::String(transaction_id);
+  payload["content_digest"] = Json::String(digest);
+  payload["schema_version"] = Json::UInteger(1);
+  payload["records"] = Json::UInteger(static_cast<uint64_t>(records));
+  Event event;
+  event.type = EventType::kHeartbeat;
+  event.payload = Json::ObjectValue(payload).Dump();
+  return journal->Append(&event, error);
+}
+
+bool SyncDirectory(const std::string& path, std::string* error) {
+  const size_t slash = path.find_last_of('/');
+  const std::string directory =
+      slash == std::string::npos ? "." : path.substr(0, slash);
+  const int fd = open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (fd < 0 || fsync(fd) != 0) {
+    if (fd >= 0)
+      close(fd);
+    if (error)
+      *error = "universe directory synchronization failed";
+    return false;
+  }
+  close(fd);
+  return true;
+}
+
+}  // namespace
+
+bool WriteAndSyncFile(const std::string& path,
+                      const std::string& content,
+                      std::string* error) {
+  const int fd =
+      open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+  if (fd < 0) {
+    if (error)
+      *error = "cannot open staged universe file";
+    return false;
+  }
+  size_t written = 0;
+  while (written < content.size()) {
+    const ssize_t count =
+        write(fd, content.data() + written, content.size() - written);
+    if (count < 0 && errno == EINTR)
+      continue;
+    if (count <= 0) {
+      close(fd);
+      if (error)
+        *error = "staged universe write failed";
+      return false;
+    }
+    written += static_cast<size_t>(count);
+  }
+  if (fsync(fd) != 0) {
+    close(fd);
+    if (error)
+      *error = "staged universe fsync failed";
+    return false;
+  }
+  if (close(fd) != 0) {
+    if (error)
+      *error = "staged universe close failed";
+    return false;
+  }
+  return true;
+}
+
+bool PublishUniverse(const std::string& path,
+                     const std::string& content,
+                     Journal* journal,
+                     const std::string& transaction_id,
+                     PublicationFailurePoint inject,
+                     std::string* error) {
+  if (transaction_id.empty()) {
+    if (error)
+      *error = "publication transaction id required";
+    return false;
+  }
+  const std::string staged = path + ".staging";
+  if (!WriteAndSyncFile(staged, content, error))
+    return false;
+  if (!SyncDirectory(staged, error))
+    return false;
+  const std::string digest = UniverseAuditDigest(content);
+  if (!AppendUniverseAudit(journal,
+                           "UNIVERSE_PUBLISH",
+                           transaction_id,
+                           digest,
+                           content.size(),
+                           error))
+    return false;
+  if (inject == PublicationFailurePoint::kAfterAuditBeforeRename)
+    return false;
+  if (rename(staged.c_str(), path.c_str()) != 0) {
+    if (error)
+      *error = "universe publication rename failed";
+    return false;
+  }
+  if (!SyncDirectory(path, error))
+    return false;
+  if (inject == PublicationFailurePoint::kAfterRenameBeforeCommit)
+    return false;
+  return AppendUniverseAudit(journal,
+                             "UNIVERSE_PUBLISH_COMMIT",
+                             transaction_id,
+                             digest,
+                             content.size(),
+                             error);
+}
+
+bool RecoverUniversePublication(const std::string& path,
+                                Journal* journal,
+                                std::string* error) {
+  if (journal == nullptr) {
+    if (error)
+      *error = "recovery requires a journal";
+    return false;
+  }
+  const std::vector<Event> events = journal->Replay(error);
+  if (!error->empty())
+    return false;
+  std::set<std::string> committed;
+  for (const Event& event : events) {
+    if (event.type != EventType::kHeartbeat)
+      continue;
+    Json payload;
+    if (!Json::Parse(event.payload, &payload, error))
+      return false;
+    const Json* action = payload.Find("action");
+    const Json* tx = payload.Find("transaction_id");
+    if (action == nullptr || tx == nullptr ||
+        action->type() != Json::Type::kString ||
+        tx->type() != Json::Type::kString)
+      continue;
+    if (action->as_string() == "UNIVERSE_PUBLISH_COMMIT")
+      committed.insert(tx->as_string());
+  }
+  for (const Event& event : events) {
+    if (event.type != EventType::kHeartbeat)
+      continue;
+    Json payload;
+    if (!Json::Parse(event.payload, &payload, error))
+      return false;
+    const Json* action = payload.Find("action");
+    if (action == nullptr || action->as_string() != "UNIVERSE_PUBLISH")
+      continue;
+    const Json* tx = payload.Find("transaction_id");
+    const Json* digest = payload.Find("content_digest");
+    if (tx == nullptr || digest == nullptr)
+      continue;
+    const std::string id = tx->as_string();
+    if (committed.find(id) != committed.end())
+      continue;
+    const std::string staged = path + ".staging";
+    if (!std::filesystem::exists(staged))
+      continue;
+    std::ifstream input(staged, std::ios::binary);
+    const std::string content((std::istreambuf_iterator<char>(input)),
+                              std::istreambuf_iterator<char>());
+    input.close();
+    if (UniverseAuditDigest(content) != digest->as_string())
+      continue;
+    if (rename(staged.c_str(), path.c_str()) != 0) {
+      if (error)
+        *error = "universe recovery rename failed";
+      return false;
+    }
+    if (!SyncDirectory(path, error))
+      return false;
+    if (!AppendUniverseAudit(journal,
+                             "UNIVERSE_PUBLISH_COMMIT",
+                             id,
+                             digest->as_string(),
+                             content.size(),
+                             error))
+      return false;
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Normalisation helpers.
+
 // ---------------------------------------------------------------------------
 Quote NormalizeUpstoxQuote(const Json& item,
                            const std::string& symbol,
@@ -394,33 +600,6 @@ std::vector<FeedStatus> MarketDataService::CheckFeeds() const {
   return statuses;
 }
 
-bool PublishStagedUniverse(const std::string& path, std::string* error) {
-  const std::string staged = path + ".staging";
-  if (rename(staged.c_str(), path.c_str()) != 0) {
-    if (error)
-      *error = "universe publication failed";
-    return false;
-  }
-  const size_t slash = path.find_last_of('/');
-  const std::string directory =
-      slash == std::string::npos ? "." : path.substr(0, slash);
-  const int fd = open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-  if (fd < 0) {
-    if (error)
-      *error = "universe directory unavailable";
-    return false;
-  }
-  const bool ok = fsync(fd) == 0;
-  close(fd);
-  if (!ok && error)
-    *error = "universe directory synchronization failed";
-  return ok;
-}
-
-void RemoveStagedUniverse(const std::string& path) {
-  std::remove((path + ".staging").c_str());
-}
-
 UniverseResult MarketDataService::SyncUniverse() const {
   UniverseResult result;
   const HttpClient http(config_.http_timeout_seconds);
@@ -452,38 +631,22 @@ UniverseResult MarketDataService::SyncUniverse() const {
                                         status_data_available,
                                         config_);
   result.source = "Upstox BOD NSE.json.gz (public, refreshed daily ~06:00 IST)";
-  RemoveStagedUniverse(config_.universe_path);
-  if (!WriteUniverseCsv(config_.universe_path + ".staging",
-                        result.instruments,
-                        &result.error)) {
-    return result;
-  }
+  const std::string content = UniverseCsvContent(result.instruments);
+  const std::string transaction_id =
+      "UNIV-" +
+      std::to_string(static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::system_clock::now().time_since_epoch())
+              .count())) +
+      "-" + ChecksumHex(content);
 
-  if (journal_ != nullptr) {
-    Json::Object payload;
-    payload["total_fetched"] =
-        Json::Number(static_cast<double>(result.total_fetched));
-    size_t eligible_count = 0;
-    for (const Instrument& instrument : result.instruments) {
-      if (instrument.eligible)
-        ++eligible_count;
-    }
-    payload["eligible"] = Json::Number(static_cast<double>(eligible_count));
-    payload["normalised"] =
-        Json::Number(static_cast<double>(result.instruments.size()));
-    payload["source"] = Json::String(result.source);
-    Event event;
-    event.type = EventType::kHeartbeat;
-    event.payload = Json::ObjectValue(payload).Dump();
-    std::string journal_error;
-    if (!journal_->Append(&event, &journal_error)) {
-      RemoveStagedUniverse(config_.universe_path);
-      result.error = "universe audit event not committed: " + journal_error;
-      return result;
-    }
-  }
-  if (!PublishStagedUniverse(config_.universe_path, &result.error))
-    result.error = "universe staged but not published: " + result.error;
+  if (!PublishUniverse(config_.universe_path,
+                       content,
+                       journal_,
+                       transaction_id,
+                       PublicationFailurePoint::kNone,
+                       &result.error))
+    return result;
   return result;
 }
 

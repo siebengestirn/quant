@@ -844,6 +844,7 @@ bool ApplyAccountingPosting(const AccountingPosting& posting,
                             std::string* error);
 
 uint64_t Checksum(std::string_view text);
+std::string ChecksumHex(std::string_view text);
 std::string EventId(uint64_t sequence, std::string_view payload);
 
 class Journal {
@@ -1157,6 +1158,25 @@ struct UniverseResult {
   std::string source;
   std::string error;
 };
+
+enum class PublicationFailurePoint {
+  kNone,
+  kAfterAuditBeforeRename,
+  kAfterRenameBeforeCommit,
+};
+
+bool WriteAndSyncFile(const std::string& path,
+                      const std::string& content,
+                      std::string* error);
+bool PublishUniverse(const std::string& path,
+                     const std::string& content,
+                     Journal* journal,
+                     const std::string& transaction_id,
+                     PublicationFailurePoint inject,
+                     std::string* error);
+bool RecoverUniversePublication(const std::string& path,
+                                Journal* journal,
+                                std::string* error);
 
 class MarketDataService {
  public:
