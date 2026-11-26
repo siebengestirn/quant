@@ -33,6 +33,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Any
 
 # Research constants (ESTIMATED). They are not trading parameters.
 KDBX_WHITELIST = (
@@ -1180,6 +1181,142 @@ def purged_walk_forward(
     }
 
 
+def _score_label_maps(
+    history: dict[str, list[dict[str, float]]],
+    score_fn: Callable[[dict[str, float]], float],
+) -> dict[str, dict[str, tuple[float, float]]]:
+    """Compute finite score-label pairs per symbol and date."""
+    result: dict[str, dict[str, tuple[float, float]]] = {}
+    for symbol, rows in history.items():
+        if symbol in ("NIFTY 50", "INDIA VIX"):
+            continue
+        result[symbol] = {}
+        for index, row in enumerate(rows):
+            label = forward_label(rows, index, HOLDING_SESSIONS)
+            if index < MIN_HISTORY or label is None:
+                continue
+            score = score_fn(features(rows, index))
+            if math.isfinite(score):
+                result[symbol][row["date"]] = (score, label)
+    return result
+
+
+def _ic_for_dates(
+    maps: dict[str, dict[str, tuple[float, float]]],
+    dates: list[str],
+    min_instruments: int = 5,
+) -> list[float]:
+    """Compute per-session Spearman IC over the requested dates only."""
+    daily: list[float] = []
+    for session_date in dates:
+        xs: list[float] = []
+        ys: list[float] = []
+        for series in maps.values():
+            if session_date not in series:
+                continue
+            score, label = series[session_date]
+            xs.append(score)
+            ys.append(label)
+        if len(xs) < min_instruments:
+            continue
+        ic = spearman_strict(xs, ys)
+        if ic is not None:
+            daily.append(ic)
+    return daily
+
+
+def nested_walk_forward(
+    development: dict[str, list[dict[str, float]]],
+    strategies: dict[str, Callable[[dict[str, float]], float]] | None = None,
+    train_window: int = 130,
+    test_window: int = 20,
+    purge_sessions: int = HOLDING_SESSIONS,
+    embargo_sessions: int = HOLDING_SESSIONS,
+) -> dict[str, Any]:
+    """Run selection strictly inside each outer training window."""
+    universe = strategies if strategies is not None else STRATEGIES
+    dates = sorted(
+        {row["date"] for rows in development.values() for row in rows}
+    )
+    maps = {
+        name: _score_label_maps(development, fn)
+        for name, fn in universe.items()
+    }
+    folds: list[dict[str, Any]] = []
+    start = train_window
+    while start + test_window <= len(dates):
+        train_dates = dates[: max(0, start - purge_sessions)]
+        test_dates = dates[start : start + test_window]
+        train_ics = {
+            name: _ic_for_dates(maps[name], train_dates) for name in universe
+        }
+        means = {
+            name: statistics.fmean(values) if values else None
+            for name, values in train_ics.items()
+        }
+        eligible_names = [
+            name for name, value in means.items() if value is not None
+        ]
+        selected = (
+            max(eligible_names, key=lambda name: means[name])
+            if eligible_names
+            else "none"
+        )
+        oos_ic = (
+            _ic_for_dates(maps[selected], test_dates)
+            if selected != "none"
+            else []
+        )
+        folds.append(
+            {
+                "fold": len(folds),
+                "train_sessions": len(train_dates),
+                "test_sessions": len(test_dates),
+                "purged": purge_sessions,
+                "embargoed": embargo_sessions,
+                "train_mean_ic": means,
+                "selected_strategy": selected,
+                "test_ic": oos_ic,
+                "daily_ic": (statistics.fmean(oos_ic) if oos_ic else 0.0),
+                "test_mean_ic": statistics.fmean(oos_ic) if oos_ic else None,
+            }
+        )
+        start += test_window + embargo_sessions
+    if not folds:
+        return {"status": "UNDEFINED", "folds": []}
+    oos_values = [value for fold in folds for value in fold["test_ic"]]
+    selected_values = [
+        value
+        for fold in folds
+        if fold["selected_strategy"] != "none"
+        for value in fold["test_ic"]
+    ]
+    return {
+        "status": "CALCULATED",
+        "protocol": "nested chronological purged walk-forward",
+        "selection_scope": "training window only, per outer fold",
+        "evaluation_scope": "outer test window only",
+        "folds": folds,
+        "outer_test_observations": len(oos_values),
+        "outer_test_mean_ic": (
+            statistics.fmean(oos_values) if oos_values else None
+        ),
+        "selected_strategy_test_mean_ic": (
+            statistics.fmean(selected_values) if selected_values else None
+        ),
+        "selected_strategy_test_observations": len(selected_values),
+        "selection_counts": {
+            name: sum(1 for fold in folds if fold["selected_strategy"] == name)
+            for name in universe
+        },
+        "full_trial_matrix": [
+            fold["train_mean_ic"].get(name) or 0.0
+            for fold in folds
+            for name in universe
+        ],
+    }
+
+
 def selection_test_status(trial_matrix: list[list[float]] | None) -> dict:
     """White Reality Check / Hansen SPA status for a complete trial universe."""
     if not trial_matrix or len(trial_matrix) < 8 or len(trial_matrix[0]) < 8:
@@ -1551,49 +1688,52 @@ def analyze(
         "note": "VERIFIED benchmark; always available",
     }
 
-    selected_name, _selection_stats = select_on_development(development)
-    best_name, _best_stats = max(
-        report["walk_forward"].items(),
-        key=lambda item: item[1].get("mean_ic", 0),
-        default=("none", {}),
+    nested = nested_walk_forward(development)
+    report["methodology_nested"] = nested
+    trial_matrix = nested.get("full_trial_matrix", [])
+    report["multiple_testing"]["selection_tests"] = selection_test_status(
+        [trial_matrix] if trial_matrix else None
     )
-    if selected_name != best_name:
-        report["rejections"].append(
-            "strategy selection disagrees with development-only selector"
-        )
-    fold_results: dict[str, dict] = {}
-    for name, score_fn in STRATEGIES.items():
-        result = purged_walk_forward(development, score_fn, final_holdout=0)
-        fold_results[name] = result
+    report["multiple_testing"]["registered_trials"] = len(trial_matrix)
+    for name in STRATEGIES:
+        selected_folds = [
+            fold
+            for fold in nested.get("folds", [])
+            if fold["selected_strategy"] == name
+        ]
+        oos_values = [
+            value for fold in selected_folds for value in fold["test_ic"]
+        ]
         target = report["walk_forward"][name]
-        count = len(result.get("folds", []))
-        target["folds"] = count
+        target["folds"] = len(selected_folds)
+        target["fold_ics"] = oos_values
         target["scope"] = "OUT_OF_SAMPLE_FOLDS"
         target["oos_status"] = (
-            "CALCULATED" if count >= 3 else "INSUFFICIENT_FOLDS"
+            "CALCULATED" if len(selected_folds) >= 3 else "INSUFFICIENT_FOLDS"
         )
-        oos_ics = [fold["daily_ic"] for fold in result.get("folds", [])]
-        target["fold_ics"] = oos_ics
-        target["mean_ic"] = statistics.fmean(oos_ics) if oos_ics else None
-        target["ic_bootstrap_95ci"] = block_bootstrap_ci(oos_ics)
-        target["ic_hac_se"] = hac_standard_error(oos_ics)
+        target["mean_ic"] = statistics.fmean(oos_values) if oos_values else None
+        target["ic_bootstrap_95ci"] = block_bootstrap_ci(oos_values)
+        target["ic_hac_se"] = hac_standard_error(oos_values)
         target["deflated_mean_ic"] = (
-            deflated(target["mean_ic"], TRIALS, max(1, len(oos_ics)))
+            deflated(target["mean_ic"], TRIALS, max(1, len(oos_values)))
             if target["mean_ic"] is not None
             else None
         )
-    fold_result = fold_results[best_name]
-    fold_count = len(fold_result.get("folds", []))
-    oos_ic = report["walk_forward"][best_name]["mean_ic"]
-    if fold_count < 3 or oos_ic is None:
+        all_folds = nested.get("folds", [])
+        all_values = [value for fold in all_folds for value in fold["test_ic"]]
+        target["all_fold_count"] = len(all_folds)
+        target["all_observation_count"] = len(all_values)
+    counts = nested.get("selection_counts", {})
+    best_name = max(counts, key=counts.get) if counts else "none"
+    oos_ic = nested.get("outer_test_mean_ic")
+    if nested.get("status") != "CALCULATED" or oos_ic is None:
         report["conclusion"] = "INCONCLUSIVE: insufficient independent folds"
     elif oos_ic <= 0:
         report["conclusion"] = "NO TRADE: no positive out-of-sample IC"
     else:
         report["conclusion"] = (
-            f"ESTIMATED: {best_name} shows positive purged out-of-sample IC; "
-            "not deployable until cost-adjusted walk-forward P&L is "
-            "independently verified"
+            "ESTIMATED: nested outer-test IC is positive; not deployable "
+            "until cost-adjusted walk-forward P&L is independently verified"
         )
     report["best_strategy"] = best_name
     report["methodology"] = {
@@ -1606,13 +1746,14 @@ def analyze(
             "block bootstrap/HAC, White Reality Check and Hansen SPA "
             "required before any promotion decision"
         ),
-        "selection_tests": selection_test_status(None),
-        "purged_walk_forward": fold_result,
-        "all_strategy_folds": {
-            name: len(value.get("folds", []))
-            for name, value in fold_results.items()
-        },
-        "fold_count": fold_count,
+        "selection_tests": selection_test_status(
+            [nested["full_trial_matrix"]]
+            if nested.get("full_trial_matrix")
+            else None
+        ),
+        "nested_validation": nested,
+        "purged_walk_forward": nested,
+        "nested_fold_count": len(nested.get("folds", [])),
         "bootstrap": "moving-block, 5-session blocks",
         "cost_model": (
             "GROSS_ONLY: no turnover, fees, taxes, spread, impact or "
@@ -1622,7 +1763,11 @@ def analyze(
         "holdout_sessions": len(holdout_dates),
         "holdout_used_for_selection": False,
         "holdout_status": "SEALED_NOT_EVALUATED",
-        "oos_metric": "mean of purged fold daily IC",
+        "oos_metric": "mean of nested outer-test fold daily IC",
+        "strategy_selection_scope": (
+            "INSIDE_TRAINING_WINDOW_ONLY: selection repeats per outer fold"
+        ),
+        "outer_test_observations": nested.get("outer_test_observations", 0),
         "holdout_labels": {
             symbol: len(rows) for symbol, rows in holdout.items()
         },
