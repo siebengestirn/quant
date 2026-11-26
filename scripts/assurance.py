@@ -288,6 +288,36 @@ def check_generated_paths() -> bool:
     return not bad
 
 
+def check_reference_integrity() -> bool:
+    directory = ROOT / "references"
+    index = directory / "index.md"
+    if not index.is_file():
+        print("references/index.md missing")
+        return False
+    text = index.read_text(encoding="utf-8")
+    rows = re.findall(r"\| `([^`]+)` \| <([^>]+)> \| `([0-9a-f]{64})` \|", text)
+    if not rows:
+        print("references/index.md has no verified entries")
+        return False
+    expected = {name for name, _source, _digest in rows}
+    actual = {path.name for path in directory.iterdir() if path.is_file()}
+    actual.discard("index.md")
+    ok = True
+    if actual != expected:
+        print(f"references file set mismatch: {sorted(actual ^ expected)}")
+        ok = False
+    for name, _source, digest in rows:
+        path = directory / name
+        if not path.is_file():
+            print(f"reference missing: {name}")
+            ok = False
+            continue
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            print(f"reference digest mismatch: {name}")
+            ok = False
+    return ok
+
+
 def check_q_style() -> bool:
     rules = tomllib.loads((ROOT / "q" / "qstyle.toml").read_text())
     text = (ROOT / "q" / "quant.q").read_text(encoding="utf-8")
@@ -462,6 +492,7 @@ def apply_format() -> bool:
 def run_checks(gate: Gate, allow_dirty: bool) -> None:
     gate.run("style reference integrity", check_style_references)
     gate.run("generated-path policy", check_generated_paths)
+    gate.run("reference integrity", check_reference_integrity)
     gate.run("q style contract", check_q_style)
     gate.run("git policy", lambda: check_git_policy(allow_dirty))
     if shutil.which("clang-format"):

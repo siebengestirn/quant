@@ -13,6 +13,3 @@ __pycache__/
 
 # Owner-provided prompt backups (local only)
 Pasted *.textClipping
-
-# Generated reference renders
-references/*.html
