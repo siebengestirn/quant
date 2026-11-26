@@ -1076,7 +1076,12 @@ struct PaperOrder {
     int64_t notional_paise = 0;
   };
   std::string client_order_id;
+  std::string instrument_key;
+  std::string order_type = "LIMIT";
+  std::string time_in_force = "DAY";
   std::string risk_policy_id;
+  std::string config_version;
+  std::string execution_model;
   std::string causation_id;
   std::string correlation_id;
   int64_t cumulative_notional_paise = 0;
@@ -1120,7 +1125,8 @@ class PaperBroker {
   bool Transition(PaperOrder* order,
                   PaperOrderState state,
                   const std::string& reason,
-                  std::string* error);
+                  std::string* error,
+                  const PaperOrder::Fill* fill = nullptr);
   Config config_;
   Journal* journal_;
   std::shared_ptr<Portfolio> portfolio_;

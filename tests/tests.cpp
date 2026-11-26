@@ -513,6 +513,79 @@ void TestAssetAndComplianceContracts() {
         "complete gate still blocks live route in this build");
 }
 
+void TestPaperOrderReducer() {
+  const std::string path = TempPath("paper_reducer.jnl");
+  std::remove(path.c_str());
+  std::string error;
+  Journal journal;
+  Check(journal.Open(path, &error), "reducer journal opens");
+  auto portfolio = std::make_shared<Portfolio>(Money::FromRupees(100000.0));
+  Config config = TestConfig();
+  config.max_participation_fraction = 0.5;
+  PaperBroker broker(config, &journal, portfolio);
+  PaperOrder* order = broker.CreateIntent(
+      "AAA", OrderSide::kBuy, 4, Money::FromRupees(200.0), &error);
+  Check(order != nullptr, "order intent created");
+  broker.RiskApprove(order->id, &error);
+  broker.Submit(order->id, &error);
+  broker.Acknowledge(order->id, &error);
+  const size_t events_before = journal.Replay(&error).size();
+  Quote quote = GoodQuote(100.0);
+  quote.symbol = "AAA";
+  quote.ask = 100.0;
+  quote.ask_qty = 4;
+  Check(broker.ApplyQuote(order->id, quote, 1000, &error), "fill applied");
+  Check(journal.Replay(&error).size() == events_before + 1,
+        "fill and state transition recorded in one event");
+  Check(broker.Reconcile(order->id, &error), "fill reconciled");
+
+  PaperBroker restarted(
+      config,
+      &journal,
+      std::make_shared<Portfolio>(Money::FromRupees(100000.0)));
+  Check(restarted.RehydrateFromJournal(&error), "reducer rehydrates");
+  const PaperOrder* restored = restarted.Find(order->id);
+  Check(
+      restored != nullptr && restored->limit_price == Money::FromRupees(200.0),
+      "working order parameters restored");
+  Check(restored != nullptr && restored->order_type == "LIMIT" &&
+            restored->time_in_force == "DAY",
+        "order type and TIF restored");
+
+  Portfolio rebuilt(Money::FromRupees(100000.0));
+  for (const Event& event : journal.Replay(&error)) {
+    if (event.type != EventType::kAccounting)
+      continue;
+    AccountingPosting posting;
+    Check(ParseAccountingPosting(event, &posting, &error),
+          "reducer accounting event parses strictly");
+    Check(ApplyAccountingPosting(posting, &rebuilt, &error),
+          "reducer posting applies");
+  }
+  Check(rebuilt.open_position_count() == portfolio->open_position_count() &&
+            rebuilt.ledger().cash == portfolio->ledger().cash,
+        "fresh portfolio projection matches original ledger");
+
+  const std::string corrupt_path = TempPath("paper_reducer_corrupt.jnl");
+  std::remove(corrupt_path.c_str());
+  Journal corrupt;
+  corrupt.Open(corrupt_path, &error);
+  Json::Object payload;
+  payload["order_id"] = quant::Json::String("X");
+  payload["symbol"] = quant::Json::String("AAA");
+  payload["state"] = quant::Json::String("INTENT");
+  payload["quantity"] = quant::Json::Integer(1);
+  Event bad;
+  bad.type = EventType::kPaperIntent;
+  bad.payload = Json::ObjectValue(payload).Dump();
+  corrupt.Append(&bad, &error);
+  PaperBroker strict(config, &corrupt, portfolio);
+  Check(!strict.RehydrateFromJournal(&error),
+        "incomplete order record fails rehydration closed");
+  corrupt.Close();
+  journal.Close();
+}
+
 void TestMoney() {
   Check(Money::FromRupees(500.0).paise() == 50000,
         "money 500 INR -> 50000 paise");
@@ -2311,6 +2384,7 @@ void TestTerminalAccounting() {
 int main() {
   using namespace quant;
   TestMoney();
+  TestPaperOrderReducer();
   TestAssetAndComplianceContracts();
   TestPaperRehydration();
   TestDeterministicEventRuntime();
