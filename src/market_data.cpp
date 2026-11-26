@@ -308,16 +308,20 @@ bool PublishUniverse(const std::string& path,
 
 bool RecoverUniversePublication(const std::string& path,
                                 Journal* journal,
+                                UniverseRecoveryReport* report,
                                 std::string* error) {
   if (journal == nullptr) {
     if (error)
       *error = "recovery requires a journal";
     return false;
   }
+  UniverseRecoveryReport local;
   const std::vector<Event> events = journal->Replay(error);
   if (!error->empty())
     return false;
   std::set<std::string> committed;
+  std::map<std::string, std::string> publish_digests;
+  std::vector<std::pair<std::string, std::string>> pending;
   for (const Event& event : events) {
     if (event.type != EventType::kHeartbeat)
       continue;
@@ -330,48 +334,72 @@ bool RecoverUniversePublication(const std::string& path,
         action->type() != Json::Type::kString ||
         tx->type() != Json::Type::kString)
       continue;
-    if (action->as_string() == "UNIVERSE_PUBLISH_COMMIT")
+    if (action->as_string() == "UNIVERSE_PUBLISH_COMMIT") {
       committed.insert(tx->as_string());
-  }
-  for (const Event& event : events) {
-    if (event.type != EventType::kHeartbeat)
       continue;
-    Json payload;
-    if (!Json::Parse(event.payload, &payload, error))
-      return false;
-    const Json* action = payload.Find("action");
-    if (action == nullptr || action->as_string() != "UNIVERSE_PUBLISH")
+    }
+    if (action->as_string() != "UNIVERSE_PUBLISH")
       continue;
-    const Json* tx = payload.Find("transaction_id");
     const Json* digest = payload.Find("content_digest");
-    if (tx == nullptr || digest == nullptr)
-      continue;
+    if (digest == nullptr || digest->type() != Json::Type::kString)
+      return false;
     const std::string id = tx->as_string();
+    const std::string value = digest->as_string();
+    const auto prior = publish_digests.find(id);
+    if (prior != publish_digests.end() && prior->second != value) {
+      if (error)
+        *error = "universe transaction id reused with a different digest";
+      return false;
+    }
+    publish_digests[id] = value;
+    pending.emplace_back(id, value);
+  }
+  local.committed = committed.size();
+  for (const auto& [id, digest] : pending) {
     if (committed.find(id) != committed.end())
       continue;
     const std::string staged = path + ".staging";
-    if (!std::filesystem::exists(staged))
+    bool published = false;
+    if (std::filesystem::exists(staged)) {
+      std::ifstream input(staged, std::ios::binary);
+      const std::string content((std::istreambuf_iterator<char>(input)),
+                                std::istreambuf_iterator<char>());
+      input.close();
+      if (UniverseAuditDigest(content) == digest) {
+        if (rename(staged.c_str(), path.c_str()) != 0) {
+          if (error)
+            *error = "universe recovery rename failed";
+          return false;
+        }
+        published = true;
+      }
+    }
+    if (!published && std::filesystem::exists(path)) {
+      std::ifstream input(path, std::ios::binary);
+      const std::string content((std::istreambuf_iterator<char>(input)),
+                                std::istreambuf_iterator<char>());
+      input.close();
+      if (UniverseAuditDigest(content) == digest)
+        published = true;  // Rename completed before the crash.
+    }
+    if (!published) {
+      local.unresolved.push_back(id);
       continue;
-    std::ifstream input(staged, std::ios::binary);
-    const std::string content((std::istreambuf_iterator<char>(input)),
-                              std::istreambuf_iterator<char>());
-    input.close();
-    if (UniverseAuditDigest(content) != digest->as_string())
-      continue;
-    if (rename(staged.c_str(), path.c_str()) != 0) {
-      if (error)
-        *error = "universe recovery rename failed";
-      return false;
     }
     if (!SyncDirectory(path, error))
       return false;
-    if (!AppendUniverseAudit(journal,
-                             "UNIVERSE_PUBLISH_COMMIT",
-                             id,
-                             digest->as_string(),
-                             content.size(),
-                             error))
+    if (!AppendUniverseAudit(
+            journal, "UNIVERSE_PUBLISH_COMMIT", id, digest, 0, error))
       return false;
+    ++local.recovered;
+  }
+  if (report)
+    *report = local;
+  if (!local.unresolved.empty()) {
+    if (error)
+      *error = "unresolved universe publication transactions: " +
+               std::to_string(local.unresolved.size());
+    return false;
   }
   return true;
 }

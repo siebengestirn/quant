@@ -233,7 +233,7 @@ void TestUniversePublishRecovery() {
   Check(std::filesystem::exists(path + ".staging"),
         "audited staging artifact retained for recovery");
 
-  Check(RecoverUniversePublication(path, &journal, &error),
+  Check(RecoverUniversePublication(path, &journal, nullptr, &error),
         "startup reconciliation completes pending publication");
   std::ifstream recovered(path);
   published.assign(std::istreambuf_iterator<char>(recovered),
@@ -242,7 +242,7 @@ void TestUniversePublishRecovery() {
   Check(published == "new\n", "recovered publication has audited content");
   Check(!std::filesystem::exists(path + ".staging"),
         "staging artifact consumed by recovery");
-  Check(RecoverUniversePublication(path, &journal, &error),
+  Check(RecoverUniversePublication(path, &journal, nullptr, &error),
         "second reconciliation is idempotent");
 
   Check(!PublishUniverse(path,
@@ -252,8 +252,26 @@ void TestUniversePublishRecovery() {
                          PublicationFailurePoint::kAfterRenameBeforeCommit,
                          &error),
         "injected rename/commit failure reported");
-  Check(RecoverUniversePublication(path, &journal, &error),
+  UniverseRecoveryReport recovery_report;
+  Check(RecoverUniversePublication(path, &journal, &recovery_report, &error),
         "post-rename failure reconciles");
+  Check(recovery_report.recovered == 1,
+        "rename-before-commit transaction is committed on recovery");
+  auto commit_count = [&]() {
+    size_t count = 0;
+    for (const Event& event : journal.Replay(&error)) {
+      Json payload;
+      if (event.type != EventType::kHeartbeat ||
+          !Json::Parse(event.payload, &payload, &error))
+        continue;
+      const Json* action = payload.Find("action");
+      if (action != nullptr && action->as_string() == "UNIVERSE_PUBLISH_COMMIT")
+        ++count;
+    }
+    return count;
+  };
+  Check(commit_count() == 2,
+        "recovery appends exactly one missing commit record");
   std::ifstream final_input(path);
   published.assign(std::istreambuf_iterator<char>(final_input),
                    std::istreambuf_iterator<char>());
@@ -288,8 +306,11 @@ void TestUniversePublishRecovery() {
   std::ofstream wrong(path + ".staging");
   wrong << "tampered\n";
   wrong.close();
-  Check(RecoverUniversePublication(path, &journal, &error),
-        "recovery skips digest mismatch without failing");
+  UniverseRecoveryReport mismatch_report;
+  Check(!RecoverUniversePublication(path, &journal, &mismatch_report, &error),
+        "digest mismatch is an unresolved recovery state");
+  Check(mismatch_report.unresolved.size() == 1,
+        "unresolved transaction is reported explicitly");
   std::ifstream after_tamper(path);
   published.assign(std::istreambuf_iterator<char>(after_tamper),
                    std::istreambuf_iterator<char>());
