@@ -304,6 +304,7 @@ struct Config {
   std::string account_id = "PRIMARY";
   std::string universe_path = "data/cache/universe.csv";
   std::string history_dir = "data/cache/history";
+  std::string history_raw_dir = "data/cache/raw";
   std::string report_dir = "data/reports";
   std::vector<std::string> seed_symbols;
   std::vector<std::string> index_symbols;
@@ -1296,6 +1297,17 @@ bool RecoverUniversePublication(const std::string& path,
                                 Journal* journal,
                                 UniverseRecoveryReport* report,
                                 std::string* error);
+
+struct HistoryParseResult {
+  std::string csv;
+  size_t accepted = 0;
+  std::vector<std::string> errors;
+};
+HistoryParseResult BuildHistoryCsv(const Json& candles,
+                                   const std::string& symbol);
+bool PublishHistoryFile(const std::string& path,
+                        const std::string& content,
+                        std::string* error);
 
 class MarketDataService {
  public:
