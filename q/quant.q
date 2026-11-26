@@ -85,8 +85,8 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
   qual:.quant.asSymbol[x 12];
   ekey:.quant.eventKey[src;seq];
   if[ekey in key .quant.seen;
-     .quant.duplicates::.quant.duplicates+1;
-     :`duplicate];
+      .quant.duplicates::.quant.duplicates+1;
+      :`duplicate];
   ooo:seq<.quant.maxSeq;
   if[ooo; .quant.outOfOrder::.quant.outOfOrder+1];
   if[not ooo; .quant.maxSeq::seq];
@@ -109,7 +109,7 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
 .quant.ingestStatus:{[ns;ex;st]
   marketStatus::marketStatus upsert
     ([]ts:enlist `timestamp$ns;
-     exchange:enlist ex;status:enlist st);
+      exchange:enlist ex;status:enlist st);
   `ok}
 
 
@@ -133,7 +133,7 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
 .quant.counts:{[]
   `quotes`trades`depth`bars`instruments`marketStatus`signals`features!
     (count quotes;count trades;count depth;count bars;count instruments;
-     count marketStatus;count signals;count features)}
+      count marketStatus;count signals;count features)}
 
 .quant.state:{[]
   `schemaVersion`generation`maxSeq`duplicates`outOfOrder!(
@@ -172,11 +172,11 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
   keys2:`vol20`volSurprise`vwapDev`dailyVwapProxyDev;
   (keys1,keys2)!
     (dates[n-1]; sym; featureTs; .quant.safeRet[cp;n;20];
-     .quant.safeRet[cp;n;60]; .quant.safeRet[cp;n;120];
-     $[n>=21; last mdev[20;r]; $[count r>0; dev r; 0f]];
-     $[avgv>0; ((last vp)%avgv)-1; 0f];
-     $[vw>0; ((last cp)%vw)-1; 0f];
-     $[vw>0; ((last cp)%vw)-1; 0f])}
+      .quant.safeRet[cp;n;60]; .quant.safeRet[cp;n;120];
+      $[n>=21; last mdev[20;r]; $[count r>0; dev r; 0f]];
+      $[avgv>0; ((last vp)%avgv)-1; 0f];
+      $[vw>0; ((last cp)%vw)-1; 0f];
+      $[vw>0; ((last cp)%vw)-1; 0f])}
 
 .quant.symbolFeatureHistory:{[sym]
   b:select from bars where symbol=sym;
@@ -292,8 +292,8 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
   existingGenerations:key hsym `$p;
   finalName:`$("gen-",genText);
   if[finalName in existingGenerations;
-     .quant.writerRelease[p];
-     :`generation_conflict];
+      .quant.writerRelease[p];
+      :`generation_conflict];
   system ("mkdir ",stagedPath);
   root:hsym stagingDir;
   .quant.generation::gen;
