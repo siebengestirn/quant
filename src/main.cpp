@@ -96,7 +96,8 @@ App Initialize(std::string* error) {
   app.paper_broker = std::make_shared<PaperBroker>(
       app.config,
       &app.journal,
-      std::make_shared<Portfolio>(app.config.initial_capital));
+      std::make_shared<Portfolio>(app.config.initial_capital),
+      app.risk_state);
   std::string paper_error;
   if (!app.paper_broker->RehydrateFromJournal(&paper_error)) {
     app.journal.Close();

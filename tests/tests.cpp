@@ -1197,6 +1197,86 @@ void TestMalformedFillReplay() {
   journal.Close();
 }
 
+void TestRiskAuthorizationContext() {
+  const std::string path = TempPath("risk_context.jnl");
+  std::remove(path.c_str());
+  std::string error;
+  Journal journal;
+  Check(journal.Open(path, &error), "risk context journal opens");
+  auto state = std::make_shared<DailyRiskState>();
+  auto portfolio = std::make_shared<Portfolio>(Money::FromRupees(100000.0));
+  PaperBroker broker(TestConfig(), &journal, portfolio, state);
+  PaperOrder* order = broker.CreateIntent(
+      "AAA", OrderSide::kBuy, 2, Money::FromRupees(100.0), &error);
+  Check(order != nullptr, "context order created");
+  order->instrument_key = "INSTRUMENT-AAA";
+
+  Config config = TestConfig();
+  config.max_participation_fraction = 1.0;
+  RiskEngine authority(config, state);
+  Signal wrong_signal;
+  wrong_signal.symbol = "BBB";
+  wrong_signal.permanent_id = "INSTRUMENT-BBB";
+  wrong_signal.tradable = true;
+  Quote wrong_quote = GoodQuote(100.0);
+  wrong_quote.symbol = "BBB";
+  wrong_quote.provider_key = "INSTRUMENT-BBB";
+  const RiskAuthorization mismatched = authority.Authorize(
+      wrong_signal, wrong_quote, *portfolio, *order, NowMs());
+  Check(!mismatched.valid(),
+        "authorization from another instrument is refused at issuance");
+
+  Signal signal;
+  signal.symbol = "AAA";
+  signal.permanent_id = "INSTRUMENT-AAA";
+  signal.tradable = true;
+  Quote quote = GoodQuote(100.0);
+  quote.symbol = "AAA";
+  quote.provider_key = "INSTRUMENT-AAA";
+  quote.ask = 100.0;
+  quote.bid = 99.9;
+  quote.last = 100.0;
+  quote.ask_qty = 1000000;
+  quote.bid_qty = 1000000;
+  const int64_t now = NowMs();
+  const RiskAuthorization valid =
+      authority.Authorize(signal, quote, *portfolio, *order, now);
+  Check(valid.valid(), "matching context issues authorization");
+
+  state->policy_version = "RISK-POLICY-CHANGED";
+  Check(!broker.RiskApprove(order->id, valid, now, &error),
+        "policy change revokes outstanding authorization");
+  Check(std::string(error).find("policy") != std::string::npos,
+        "policy revocation reason is explicit");
+  state->policy_version = "RISK-2026-11-26-v1";
+
+  state->journal_sequence += 1;
+  Check(!broker.RiskApprove(order->id, valid, now, &error),
+        "state revision change revokes outstanding authorization");
+  state->journal_sequence -= 1;
+
+  state->halted = true;
+  state->halt_reason = "test kill switch";
+  Check(!broker.RiskApprove(order->id, valid, now, &error),
+        "kill switch revokes outstanding authorization");
+  state->halted = false;
+
+  Quote changed = quote;
+  changed.sequence = quote.sequence + 1;
+  const RiskAuthorization second =
+      authority.Authorize(signal, changed, *portfolio, *order, NowMs());
+  Check(second.valid(), "second authorization issued");
+  Check(broker.RiskApprove(order->id, second, NowMs(), &error),
+        "current authorization accepted");
+
+  PaperBroker restarted(TestConfig(), &journal, portfolio, state);
+  Check(restarted.RehydrateFromJournal(&error),
+        "consumption record survives restart");
+  Check(!restarted.RiskApprove(order->id, second, NowMs(), &error),
+        "consumed authorization cannot be replayed after restart");
+  journal.Close();
+}
+
 void TestPaperRiskAndFreshness() {
   const std::string path = TempPath("paper_fresh.jnl");
   std::remove(path.c_str());
@@ -1870,6 +1950,7 @@ void TestDailyRiskLimit() {
   auto state = std::make_shared<DailyRiskState>();
   RiskEngine first(config, state);
   Signal signal;
+  signal.symbol = "TEST";
   signal.tradable = true;
   Portfolio opening(Money::FromRupees(1000.0));
   const int64_t now = 1795400000000;  // 2026-11-23 UTC.
@@ -1919,6 +2000,7 @@ void TestFreshnessSemantics() {
   Config config = TestConfig();
   Portfolio portfolio(config.initial_capital);
   Signal signal;
+  signal.symbol = "TEST";
   signal.tradable = true;
   Quote unknown = GoodQuote();
   unknown.provider_timestamp_ms = 0;
@@ -2793,6 +2875,7 @@ void TestRiskPersistence() {
   signal.tradable = false;
   signal.rejection_reason = "test";
   Quote quote;
+  quote.symbol = "AAA";
   quote.last = 100.0;
   quote.bid = 99.9;
   quote.ask = 100.1;
@@ -3072,6 +3155,7 @@ int main() {
   TestMoney();
   TestPaperRiskAndFreshness();
   TestRiskAuthorizationBinding();
+  TestRiskAuthorizationContext();
   TestCancelAfterPartialReplay();
   TestMalformedFillReplay();
   TestUniverseTransactionConsistency();

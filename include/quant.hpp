@@ -30,6 +30,7 @@ namespace quant {
 class Journal;
 struct Event;
 struct PaperOrder;
+struct DailyRiskState;
 
 // ---------------------------------------------------------------------------
 // Money: integer paise. Conversions are explicit to prevent unit confusion.
@@ -462,6 +463,8 @@ struct FeatureSet {
 
 struct Signal {
   std::string symbol;
+  std::string permanent_id;
+  std::string venue = "NSE";
   std::string strategy;
   double score = 0.0;
   double confidence = 0.0;
@@ -770,6 +773,9 @@ class RiskAuthorization {
               const Config& config,
               int64_t now_ms,
               std::string* error) const;
+  bool VerifyRiskState(const DailyRiskState& state,
+                       int64_t now_ms,
+                       std::string* error) const;
 
  private:
   friend class RiskEngine;
@@ -778,6 +784,8 @@ class RiskAuthorization {
   std::string order_id_;
   std::string account_id_;
   std::string instrument_id_;
+  std::string venue_;
+  int64_t market_data_version_ = 0;
   std::string symbol_;
   OrderSide side_ = OrderSide::kBuy;
   int quantity_ = 0;
@@ -903,7 +911,8 @@ class RiskEngine {
   RiskDecision Evaluate(const Signal& signal,
                         const Quote& quote,
                         const Portfolio& portfolio,
-                        int64_t now_ms);
+                        int64_t now_ms,
+                        OrderSide side = OrderSide::kBuy);
   // The only way to create a RiskAuthorization. Re-evaluates the decision
   // from authoritative inputs, then binds it to the exact order snapshot.
   RiskAuthorization Authorize(const Signal& signal,
@@ -1171,6 +1180,7 @@ struct PaperOrder {
   };
   std::string client_order_id;
   std::string instrument_key;
+  std::string venue = "NSE";
   std::string order_type = "LIMIT";
   std::string time_in_force = "DAY";
   std::string risk_policy_id;
@@ -1189,7 +1199,8 @@ class PaperBroker {
  public:
   PaperBroker(Config config,
               Journal* journal,
-              std::shared_ptr<Portfolio> portfolio);
+              std::shared_ptr<Portfolio> portfolio,
+              std::shared_ptr<DailyRiskState> risk_state = nullptr);
   PaperOrder* CreateIntent(const std::string& symbol,
                            OrderSide side,
                            int quantity,
@@ -1230,6 +1241,7 @@ class PaperBroker {
   Config config_;
   Journal* journal_;
   std::shared_ptr<Portfolio> portfolio_;
+  std::shared_ptr<DailyRiskState> risk_state_;
   std::map<std::string, PaperOrder> orders_;
   std::set<std::string> posted_ids_;
   std::set<std::string> consumed_authorizations_;
