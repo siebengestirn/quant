@@ -231,6 +231,41 @@ def load_session_calendar(path: Path) -> tuple[list[str], list[str]]:
     return (sorted(set(values)) if not errors else []), errors
 
 
+def verify_history_manifest(
+    directory: Path,
+) -> tuple[dict[str, dict], list[str]]:
+    """Verify the canonical dataset manifest before any engine reads CSVs."""
+    manifest_path = directory / "manifest.json"
+    if not manifest_path.is_file():
+        return {}, [f"{manifest_path.name}: dataset manifest absent"]
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {}, [f"manifest invalid: {exc}"]
+    if manifest.get("schema_version") != 1:
+        return {}, ["unsupported dataset manifest schema"]
+    errors: list[str] = []
+    verified: dict[str, dict] = {}
+    for symbol, entry in sorted(manifest.items()):
+        if symbol == "schema_version" or not isinstance(entry, dict):
+            continue
+        path = directory / f"{symbol}.csv"
+        if not path.is_file():
+            errors.append(f"{symbol}: manifest references missing file")
+            continue
+        content = path.read_bytes()
+        digest = hashlib.sha256(content).hexdigest()
+        if digest != entry.get("digest"):
+            errors.append(f"{symbol}: dataset digest mismatch")
+            continue
+        rows = content.decode("utf-8").splitlines()
+        if len(rows) - 1 != entry.get("rows"):
+            errors.append(f"{symbol}: dataset row count mismatch")
+            continue
+        verified[symbol] = entry
+    return verified, errors
+
+
 def load_history(directory: Path) -> dict[str, list[dict[str, float]]]:
     """Load history using the strict contract."""
     history, _errors, _detail = load_history_with_errors(directory)
@@ -275,16 +310,33 @@ def load_history_validated(
     status_errors: list[str] | None = None,
     calendar_errors: list[str] | None = None,
     diagnostic: bool = False,
+    manifest: bool = True,
 ) -> ValidatedDataset:
     """Fail-closed dataset contract with mandatory PIT and calendar gates."""
     raw_history, parse_errors, _detail = load_history_with_errors(directory)
-    status_errors = list(status_errors or []) + list(calendar_errors or [])
+    verified_files: dict[str, dict] = {}
+    manifest_errors: list[str] = []
+    if manifest:
+        verified_files, manifest_errors = verify_history_manifest(directory)
+    if manifest and not verified_files:
+        manifest_errors.append("no verified dataset files")
+    status_errors = (
+        list(status_errors or [])
+        + list(calendar_errors or [])
+        + manifest_errors
+    )
     calendar_errors = list(calendar_errors or [])
     expected = sorted(session_calendar or [])
     calendar_basis = (
         "EXCHANGE_CALENDAR" if session_calendar else "OBSERVED_ONLY"
     )
     quality: dict[str, dict] = {}
+    if manifest:
+        raw_history = {
+            symbol: rows
+            for symbol, rows in raw_history.items()
+            if symbol in verified_files
+        }
     for symbol, rows in raw_history.items():
         quality[symbol] = dataset_quality(rows, expected)
     eligible_dates: dict[str, list[str]] = {}

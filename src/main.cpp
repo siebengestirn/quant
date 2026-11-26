@@ -32,11 +32,26 @@ namespace {
 
 const char* kConfigPath = "config.toml";
 
+const char* StatusName(DatasetStatus status) {
+  switch (status) {
+    case DatasetStatus::kComplete:
+      return "COMPLETE";
+    case DatasetStatus::kPartial:
+      return "PARTIAL";
+    case DatasetStatus::kBlocked:
+      return "BLOCKED";
+    case DatasetStatus::kFailed:
+      return "FAILED";
+  }
+  return "UNKNOWN";
+}
+
 struct App {
   Config config;
   Journal journal;
   std::shared_ptr<DailyRiskState> risk_state =
       std::make_shared<DailyRiskState>();
+  DatasetVerification dataset_status;
   std::shared_ptr<PaperBroker> paper_broker;
   bool ready = false;
 };
@@ -563,13 +578,32 @@ int CommandDataSync(App& app) {
   std::cout << "  source: " << result.source << "\n";
   std::cout << "syncing daily history for seed symbols...\n";
   std::string history_error;
-  const bool ok = service.SyncHistory(result.instruments, &history_error);
-  const char* status =
-      result.instruments.empty()
-          ? "BLOCKED"
-          : (!ok || !history_error.empty() ? "PARTIAL" : "COMPLETE");
-  std::cout << "  " << status << ": " << history_error << "\n";
-  return (ok && !result.instruments.empty()) ? 0 : 1;
+  const HistorySyncResult sync =
+      service.SyncHistory(result.instruments, &history_error);
+  const char* status = "FAILED";
+  switch (sync.status) {
+    case HistorySyncStatus::kComplete:
+      status = "COMPLETE";
+      break;
+    case HistorySyncStatus::kPartial:
+      status = "PARTIAL";
+      break;
+    case HistorySyncStatus::kBlocked:
+      status = "BLOCKED";
+      break;
+    case HistorySyncStatus::kFailed:
+      status = "FAILED";
+      break;
+  }
+  std::cout << "  " << status << ": expected=" << sync.expected
+            << " fetched=" << sync.fetched << " failed=" << sync.failed
+            << " digest=" << sync.manifest_digest << " " << history_error
+            << "\n";
+  if (sync.status == HistorySyncStatus::kComplete)
+    return 0;
+  if (sync.status == HistorySyncStatus::kPartial)
+    return 3;
+  return 2;
 }
 
 std::string IndexProviderName(const std::string& symbol) {
@@ -656,24 +690,27 @@ std::vector<Instrument> LoadUniverse(App& app, std::string* error) {
 
 std::map<std::string, std::vector<Candle>> LoadHistory(App& app) {
   std::map<std::string, std::vector<Candle>> history;
-  std::ifstream directory_list;
-  for (const std::string& symbol : app.config.seed_symbols) {
+  std::string verification_error;
+  const DatasetVerification verification =
+      VerifyDataset(app.config.history_dir, &verification_error);
+  app.dataset_status = verification;
+  if (verification.status != DatasetStatus::kComplete &&
+      verification.status != DatasetStatus::kPartial)
+    return history;
+  std::set<std::string> symbols(app.config.seed_symbols.begin(),
+                                app.config.seed_symbols.end());
+  symbols.insert(app.config.index_symbols.begin(),
+                 app.config.index_symbols.end());
+  for (const std::string& symbol : symbols) {
+    if (verification.file_digests.find(symbol) ==
+        verification.file_digests.end())
+      continue;
     std::string error;
     std::vector<Candle> candles;
     if (ReadCsvCandles(
-            app.config.history_dir + "/" + symbol + ".csv", &candles, &error)) {
+            app.config.history_dir + "/" + symbol + ".csv", &candles, &error))
       history[symbol] = candles;
-    }
   }
-  for (const std::string& symbol : app.config.index_symbols) {
-    std::string error;
-    std::vector<Candle> candles;
-    if (ReadCsvCandles(
-            app.config.history_dir + "/" + symbol + ".csv", &candles, &error)) {
-      history[symbol] = candles;
-    }
-  }
-  (void)directory_list;
   return history;
 }
 
@@ -779,6 +816,15 @@ DailyReport BuildReport(App& app, bool* ok) {
   }
 
   const auto history = LoadHistory(app);
+  report.dataset_status = StatusName(app.dataset_status.status);
+  report.data_provenance = "dataset_digest=" + app.dataset_status.digest;
+  if (!app.dataset_status.errors.empty()) {
+    report.decision = "NO TRADE";
+    report.decision_reason =
+        "dataset contract failed: " + app.dataset_status.errors.front();
+    *ok = false;
+    return report;
+  }
   auto index_it = history.find("NIFTY 50");
   const std::vector<Candle> no_candles;
   report.regime =

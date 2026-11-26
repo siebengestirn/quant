@@ -698,6 +698,47 @@ void TestInstrumentReferenceModel() {
         "missing permanent identity rejected");
 }
 
+void TestDatasetManifestContract() {
+  const std::string dir = TempPath("dataset_manifest");
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+  const std::string csv =
+      "date,open,high,low,close,volume\n"
+      "2026-01-01,100,103,99,102,1000\n";
+  const std::string path = dir + "/AAA.csv";
+  std::ofstream(path) << csv;
+  std::string error;
+  Check(VerifyDataset(dir, &error).status == DatasetStatus::kBlocked,
+        "dataset without manifest is blocked");
+  std::ofstream(dir + "/manifest.json")
+      << "{\"schema_version\":1,\"AAA\":{\"digest\":\"" << ChecksumHex(csv)
+      << "\",\"rows\":1}}";
+  DatasetVerification verified = VerifyDataset(dir, &error);
+  Check(verified.status == DatasetStatus::kComplete,
+        "verified manifest is complete");
+  Check(verified.file_digests.at("AAA") == ChecksumHex(csv),
+        "manifest digest recorded");
+  std::ofstream(path) << "date,open,high,low,close,volume\n"
+                      << "2026-01-01,100,103,99,999,1000\n";
+  verified = VerifyDataset(dir, &error);
+  Check((verified.status == DatasetStatus::kPartial ||
+         verified.status == DatasetStatus::kFailed) &&
+            !verified.errors.empty(),
+        "tampered dataset is rejected with explicit errors");
+  std::filesystem::remove_all(dir);
+
+  Json candles = Json::Array({Json::Array({Json::String("2026-01-01"),
+                                           Json::Number(1234.56789),
+                                           Json::Number(1240.0),
+                                           Json::Number(1230.0),
+                                           Json::Number(1235.0),
+                                           Json::Number(1000.0)})});
+  HistoryParseResult parsed = BuildHistoryCsv(candles, "PREC");
+  Check(parsed.errors.empty(), "precision fixture accepted");
+  Check(parsed.csv.find("1234.56789") != std::string::npos,
+        "provider value serialized round-trip safe");
+}
+
 void TestMoney() {
   Check(Money::FromRupees(500.0).paise() == 50000,
         "money 500 INR -> 50000 paise");
@@ -2496,6 +2537,7 @@ void TestTerminalAccounting() {
 int main() {
   using namespace quant;
   TestMoney();
+  TestDatasetManifestContract();
   TestInstrumentReferenceModel();
   TestProviderHistoryValidation();
   TestPaperOrderReducer();
