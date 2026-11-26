@@ -118,14 +118,24 @@ Config TestConfig() {
   return config;
 }
 
-RiskDecision ApprovedDecision(const PaperOrder& order) {
-  RiskDecision decision;
-  decision.approved = true;
-  decision.quantity = order.quantity;
-  decision.notional = Money::FromPaise(order.limit_price.paise() *
-                                       static_cast<int64_t>(order.quantity));
-  decision.reason = "RISK-POLICY-TEST-v1";
-  return decision;
+RiskAuthorization ApprovedAuthorization(const PaperOrder& order) {
+  Config config = TestConfig();
+  config.max_participation_fraction = 1.0;
+  config.max_open_positions = 100;
+  auto state = std::make_shared<DailyRiskState>();
+  RiskEngine authority(config, state);
+  Portfolio deep(Money::FromRupees(100000000.0));
+  Signal signal;
+  signal.symbol = order.symbol;
+  signal.tradable = true;
+  Quote quote = GoodQuote(order.limit_price.rupees());
+  quote.symbol = order.symbol;
+  quote.ask = order.limit_price.rupees();
+  quote.bid = quote.ask * 0.999;
+  quote.last = quote.ask;
+  quote.ask_qty = 1000000;
+  quote.bid_qty = 1000000;
+  return authority.Authorize(signal, quote, deep, order, NowMs());
 }
 
 void TestCanonicalDateFixture() {
@@ -448,7 +458,8 @@ void TestPaperRehydration() {
       "AAA", OrderSide::kBuy, 4, Money::FromRupees(200.0), &error);
   Check(order != nullptr, "order created for rehydration");
   const std::string original_id = order->id;
-  Check(first.RiskApprove(order->id, ApprovedDecision(*order), &error) &&
+  Check(first.RiskApprove(
+            order->id, ApprovedAuthorization(*order), NowMs(), &error) &&
             first.Submit(order->id, &error) &&
             first.Acknowledge(order->id, &error),
         "order advanced for rehydration");
@@ -494,11 +505,11 @@ void TestPaperRehydration() {
   PaperOrder* too_big = preflight.CreateIntent(
       "CCC", OrderSide::kBuy, 1000, Money::FromRupees(100.0), &error);
   Check(too_big != nullptr, "oversized intent accepted for preflight test");
-  Check(
-      preflight.RiskApprove(too_big->id, ApprovedDecision(*too_big), &error) &&
-          preflight.Submit(too_big->id, &error) &&
-          preflight.Acknowledge(too_big->id, &error),
-      "oversized order advanced");
+  Check(preflight.RiskApprove(
+            too_big->id, ApprovedAuthorization(*too_big), NowMs(), &error) &&
+            preflight.Submit(too_big->id, &error) &&
+            preflight.Acknowledge(too_big->id, &error),
+        "oversized order advanced");
   Quote affordable = GoodQuote(100.0);
   affordable.symbol = "CCC";
   affordable.ask = 100.0;
@@ -561,7 +572,7 @@ void TestFillAverageArithmetic() {
   PaperOrder* order = broker.CreateIntent(
       "AAA", OrderSide::kBuy, 4, Money::FromRupees(110.0), &error);
   Check(order != nullptr, "four-share order created");
-  broker.RiskApprove(order->id, ApprovedDecision(*order), &error);
+  broker.RiskApprove(order->id, ApprovedAuthorization(*order), NowMs(), &error);
   broker.Submit(order->id, &error);
   broker.Acknowledge(order->id, &error);
   Quote first = GoodQuote(100.0);
@@ -731,7 +742,7 @@ void TestPaperOrderReducer() {
   PaperOrder* order = broker.CreateIntent(
       "AAA", OrderSide::kBuy, 4, Money::FromRupees(200.0), &error);
   Check(order != nullptr, "order intent created");
-  broker.RiskApprove(order->id, ApprovedDecision(*order), &error);
+  broker.RiskApprove(order->id, ApprovedAuthorization(*order), NowMs(), &error);
   broker.Submit(order->id, &error);
   broker.Acknowledge(order->id, &error);
   const size_t events_before = journal.Replay(&error).size();
@@ -1058,6 +1069,41 @@ void TestUniverseTransactionConsistency() {
   journal.Close();
 }
 
+void TestRiskAuthorizationBinding() {
+  const std::string path = TempPath("risk_auth.jnl");
+  std::remove(path.c_str());
+  std::string error;
+  Journal journal;
+  Check(journal.Open(path, &error), "risk authorization journal opens");
+  auto portfolio = std::make_shared<Portfolio>(Money::FromRupees(100000.0));
+  PaperBroker broker(TestConfig(), &journal, portfolio);
+  PaperOrder* order = broker.CreateIntent(
+      "AAA", OrderSide::kBuy, 2, Money::FromRupees(100.0), &error);
+  Check(order != nullptr, "authorization order created");
+  const RiskAuthorization good = ApprovedAuthorization(*order);
+  Check(good.valid(), "risk engine produces a valid capability");
+  const int64_t now = NowMs();
+
+  PaperOrder* other = broker.CreateIntent(
+      "BBB", OrderSide::kBuy, 2, Money::FromRupees(100.0), &error);
+  Check(other != nullptr, "second order created");
+  Check(!broker.RiskApprove(other->id, good, now, &error),
+        "authorization bound to another order is rejected");
+  Check(broker.RiskApprove(order->id, good, now, &error),
+        "authorization accepted for its own order");
+  Check(!broker.RiskApprove(order->id, good, now, &error),
+        "consumed authorization cannot be replayed");
+
+  PaperOrder* tampered = broker.CreateIntent(
+      "CCC", OrderSide::kBuy, 2, Money::FromRupees(100.0), &error);
+  Check(tampered != nullptr, "tamper fixture created");
+  RiskAuthorization for_tampered = ApprovedAuthorization(*tampered);
+  tampered->quantity = 3;
+  Check(!broker.RiskApprove(tampered->id, for_tampered, now, &error),
+        "order mutation invalidates the authorization");
+  journal.Close();
+}
+
 void TestPaperRiskAndFreshness() {
   const std::string path = TempPath("paper_fresh.jnl");
   std::remove(path.c_str());
@@ -1069,11 +1115,28 @@ void TestPaperRiskAndFreshness() {
   PaperOrder* order = broker.CreateIntent(
       "AAA", OrderSide::kBuy, 2, Money::FromRupees(100.0), &error);
   Check(order != nullptr, "freshness order created");
-  RiskDecision wrong = ApprovedDecision(*order);
-  wrong.approved = false;
-  Check(!broker.RiskApprove(order->id, wrong, &error),
-        "unapproved risk decision rejected");
-  Check(broker.RiskApprove(order->id, ApprovedDecision(*order), &error),
+  Config authority_config = TestConfig();
+  authority_config.max_participation_fraction = 1.0;
+  auto state = std::make_shared<DailyRiskState>();
+  RiskEngine authority(authority_config, state);
+  Portfolio deep(Money::FromRupees(100000000.0));
+  Signal signal;
+  signal.symbol = "AAA";
+  signal.tradable = true;
+  Quote quote = GoodQuote(100.0);
+  quote.symbol = "AAA";
+  quote.ask = 100.0;
+  quote.bid = 99.9;
+  quote.last = 100.0;
+  quote.ask_qty = 1000000;
+  quote.bid_qty = 1000000;
+  const int64_t now = NowMs();
+  const RiskAuthorization expired =
+      authority.Authorize(signal, quote, deep, *order, now - 600000);
+  Check(!broker.RiskApprove(order->id, expired, now, &error),
+        "expired authorization is rejected");
+  Check(broker.RiskApprove(
+            order->id, ApprovedAuthorization(*order), NowMs(), &error),
         "approved risk decision accepted");
   broker.Submit(order->id, &error);
   broker.Acknowledge(order->id, &error);
@@ -2228,7 +2291,8 @@ void TestPaperPartialAndReplay() {
   PaperOrder* order = broker.CreateIntent(
       "AAA", OrderSide::kBuy, 4, Money::FromRupees(200.0), &error);
   Check(order != nullptr, "partial-fill order created");
-  Check(broker.RiskApprove(order->id, ApprovedDecision(*order), &error) &&
+  Check(broker.RiskApprove(
+            order->id, ApprovedAuthorization(*order), NowMs(), &error) &&
             broker.Submit(order->id, &error) &&
             broker.Acknowledge(order->id, &error),
         "partial-fill order working");
@@ -2317,7 +2381,8 @@ void TestPaperExecution() {
   Check(intent->state == PaperOrderState::kIntent, "intent starts at INTENT");
   Check(broker.Submit(intent->id, &error) == false,
         "unapproved intent cannot be submitted");
-  Check(broker.RiskApprove(intent->id, ApprovedDecision(*intent), &error),
+  Check(broker.RiskApprove(
+            intent->id, ApprovedAuthorization(*intent), NowMs(), &error),
         "risk approves intent");
   Check(broker.Submit(intent->id, &error), "approved order submitted");
   Check(broker.Acknowledge(intent->id, &error), "submission acknowledged");
@@ -2358,7 +2423,8 @@ void TestPaperExecution() {
   Check(portfolio->available_cash() == cash_after_reconcile &&
             portfolio->open_position_count() == 1,
         "repeated reconciliation cannot duplicate a fill");
-  Check(!broker.RiskApprove(intent->id, ApprovedDecision(*intent), &error),
+  Check(!broker.RiskApprove(
+            intent->id, ApprovedAuthorization(*intent), NowMs(), &error),
         "filled order cannot return to an earlier state");
   Check(!broker.Cancel(intent->id, &error), "filled order cannot be cancelled");
 
@@ -2375,7 +2441,8 @@ void TestPaperExecution() {
   PaperOrder* cancelled = broker.CreateIntent(
       "BBB", OrderSide::kBuy, 1, Money::FromRupees(10.0), &error);
   Check(
-      broker.RiskApprove(cancelled->id, ApprovedDecision(*cancelled), &error) &&
+      broker.RiskApprove(
+          cancelled->id, ApprovedAuthorization(*cancelled), NowMs(), &error) &&
           broker.Submit(cancelled->id, &error) &&
           broker.Acknowledge(cancelled->id, &error),
       "cancel fixture working");
@@ -2386,7 +2453,8 @@ void TestPaperExecution() {
   PaperOrder* ambiguous = broker.CreateIntent(
       "BBB", OrderSide::kBuy, 1, Money::FromRupees(10.0), &error);
   Check(
-      broker.RiskApprove(ambiguous->id, ApprovedDecision(*ambiguous), &error) &&
+      broker.RiskApprove(
+          ambiguous->id, ApprovedAuthorization(*ambiguous), NowMs(), &error) &&
           broker.Submit(ambiguous->id, &error) &&
           broker.Acknowledge(ambiguous->id, &error),
       "ambiguous fixture working");
@@ -2396,7 +2464,8 @@ void TestPaperExecution() {
         "ambiguous order cannot be auto-reconciled");
   PaperOrder* expiring = broker.CreateIntent(
       "BBB", OrderSide::kBuy, 1, Money::FromRupees(10.0), &error);
-  Check(broker.RiskApprove(expiring->id, ApprovedDecision(*expiring), &error) &&
+  Check(broker.RiskApprove(
+            expiring->id, ApprovedAuthorization(*expiring), NowMs(), &error) &&
             broker.Submit(expiring->id, &error) &&
             broker.Acknowledge(expiring->id, &error),
         "expiry fixture working");
@@ -2909,6 +2978,7 @@ int main() {
   using namespace quant;
   TestMoney();
   TestPaperRiskAndFreshness();
+  TestRiskAuthorizationBinding();
   TestUniverseTransactionConsistency();
   TestEventRuntimeOrdering();
   TestDatasetManifestContract();
