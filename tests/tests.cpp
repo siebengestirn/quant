@@ -1178,6 +1178,18 @@ void TestAmbiguousStateRecovery() {
     payload["filled_quantity"] = quant::Json::Integer(filled);
     payload["order_type"] = quant::Json::String("LIMIT");
     payload["time_in_force"] = quant::Json::String("DAY");
+    if (filled > 0) {
+      FillRecord lot;
+      lot.version = 2;
+      lot.id = "F-AMB";
+      lot.order_id = "O-AMB2";
+      lot.symbol = "AAA";
+      lot.quantity = filled;
+      lot.price_paise = 10000;
+      lot.notional_paise = 10000 * filled;
+      for (const auto& [key, value] : FillRecordJson(lot))
+        payload[key] = value;
+    }
     Event event;
     event.type = EventType::kPaperIntent;
     event.payload = quant::Json::ObjectValue(payload).Dump();
