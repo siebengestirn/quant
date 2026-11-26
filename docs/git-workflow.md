@@ -32,8 +32,9 @@ machine-readable policy is `git-policy.json`; this document must agree with it.
 | Stashes / worktrees | Zero stashes; one worktree unless justified |
 
 Branch prefixes: `feat/`, `fix/`, `docs/`, `test/`, `ci/`, `chore/` and
-`correctness/`. The active `correctness/gate0` branch is the one bounded review
-epic documented in PR #1.
+`correctness/`. No topic branch is permanently active: the current final local
+branch is `main` only. The historical `correctness/gate0` work was recorded in
+PR #1 and is closed.
 
 Commit subjects use conventional prefixes. Published correctness commits through
 `f321d0c` predate this policy and are grandfathered; no published commit is
