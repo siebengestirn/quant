@@ -1213,6 +1213,59 @@ int CommandReport(App& app) {
 
 }  // namespace
 
+// Filesystem primitives used by the q persistence layer. They replace
+// unchecked shell interpolation with explicit, checked operations.
+int CommandDigest(const std::string& path) {
+  if (path.empty())
+    return 2;
+  std::ifstream input(path, std::ios::binary);
+  if (!input.is_open()) {
+    std::cout << "FAILED: cannot open " << path << "\n";
+    return 1;
+  }
+  const std::string bytes((std::istreambuf_iterator<char>(input)),
+                          std::istreambuf_iterator<char>());
+  std::cout << Sha256Hex(bytes) << "\n";
+  return 0;
+}
+
+bool SyncParentDirectory(const std::string& path, std::string* error) {
+  const size_t slash = path.find_last_of('/');
+  const std::string directory =
+      slash == std::string::npos ? "." : path.substr(0, slash);
+  const int fd = open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (fd < 0) {
+    if (error)
+      *error = "cannot open parent directory for fsync";
+    return false;
+  }
+  const bool ok = fsync(fd) == 0;
+  close(fd);
+  if (!ok && error)
+    *error = "parent directory fsync failed";
+  return ok;
+}
+
+int CommandFsync(const std::string& path) {
+  if (path.empty())
+    return 2;
+  const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd < 0 || fsync(fd) != 0) {
+    if (fd >= 0)
+      close(fd);
+    std::cout << "FAILED: file fsync failed for " << path << "\n";
+    return 1;
+  }
+  close(fd);
+  std::string error;
+  if (!SyncParentDirectory(path, &error)) {
+    std::cout << "FAILED: " << error << "\n";
+    return 1;
+  }
+  std::cout << "ok\n";
+  return 0;
+}
+
 int RunCli(int argc, char** argv) {
   if (argc < 2) {
     PrintHelp();
@@ -1223,6 +1276,10 @@ int RunCli(int argc, char** argv) {
     PrintHelp();
     return 0;
   }
+  if (command == "digest" && argc == 3)
+    return CommandDigest(argv[2]);
+  if (command == "fsync" && argc == 3)
+    return CommandFsync(argv[2]);
   std::string error;
   App app = Initialize(&error);
   if (!app.ready) {
