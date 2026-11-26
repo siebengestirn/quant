@@ -1076,7 +1076,53 @@ void TestPublicationFilesystemBoundary() {
                         PublicationFailurePoint::kNone,
                         &error),
         "valid transaction publishes after symlink removal");
+
+  const std::string external = TempPath("publish_external_content");
+  std::ofstream(external) << "safe\n";
+  const std::string recover_path = TempPath("publish_recover.csv");
+  const std::string recover_journal_path = TempPath("publish_recover.jnl");
+  std::remove(recover_path.c_str());
+  std::remove(recover_journal_path.c_str());
+  Journal recover_journal;
+  Check(recover_journal.Open(recover_journal_path, &error),
+        "recovery journal opens");
+  {
+    Json::Object payload;
+    payload["action"] = quant::Json::String("UNIVERSE_PUBLISH");
+    payload["transaction_id"] = quant::Json::String("TX-REC");
+    payload["content_digest"] = quant::Json::String(Sha256Hex("safe\n"));
+    payload["schema_version"] = quant::Json::UInteger(1);
+    payload["records"] = quant::Json::UInteger(5);
+    Event event;
+    event.type = EventType::kHeartbeat;
+    event.payload = quant::Json::ObjectValue(payload).Dump();
+    Check(recover_journal.Append(&event, &error), "pending publish recorded");
+  }
+  const std::string recover_staging = StagingPath(recover_path, "TX-REC");
+  std::filesystem::create_symlink(external, recover_staging);
+  Check(!RecoverUniversePublication(
+            recover_path, &recover_journal, nullptr, &error),
+        "staged symlink is rejected during recovery");
+  Check(std::filesystem::is_symlink(recover_staging),
+        "staged symlink is left intact");
+  std::filesystem::remove(recover_staging);
+  std::ofstream(recover_staging) << "safe\n";
+  Check(!RecoverUniversePublication(
+            recover_path,
+            &recover_journal,
+            nullptr,
+            &error,
+            PublicationFailurePoint::kAfterRecoveryVerificationBeforeRename),
+        "recovery fault before rename is explicit");
+  Check(RecoverUniversePublication(
+            recover_path, &recover_journal, nullptr, &error),
+        "recovery completes after fault is cleared");
+  std::ifstream recovered(recover_path);
+  std::string recovered_content((std::istreambuf_iterator<char>(recovered)),
+                                std::istreambuf_iterator<char>());
+  Check(recovered_content == "safe\n", "recovered content exact");
   journal.Close();
+  recover_journal.Close();
 }
 
 void TestUniverseTransactionConsistency() {

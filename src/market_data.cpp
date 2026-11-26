@@ -359,6 +359,61 @@ bool WriteStagedExclusive(const std::string& directory,
   return true;
 }
 
+bool ReadNoFollow(int dir_fd,
+                  const std::string& name,
+                  std::string* content,
+                  std::string* error) {
+  int fd = openat(
+      dir_fd, name.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+  if (fd < 0) {
+    if (error)
+      *error = "publication object rejected: " + name;
+    return false;
+  }
+  struct stat metadata{};
+  if (fstat(fd, &metadata) != 0 || !S_ISREG(metadata.st_mode)) {
+    close(fd);
+    if (error)
+      *error = "publication object is not a regular file: " + name;
+    return false;
+  }
+  content->clear();
+  char buffer[16384];
+  while (true) {
+    const ssize_t count = read(fd, buffer, sizeof(buffer));
+    if (count < 0 && errno == EINTR)
+      continue;
+    if (count < 0) {
+      close(fd);
+      if (error)
+        *error = "publication object read failed: " + name;
+      return false;
+    }
+    if (count == 0)
+      break;
+    content->append(buffer, static_cast<size_t>(count));
+  }
+  close(fd);
+  return true;
+}
+
+int ObjectTypeNoFollow(int dir_fd, const std::string& name) {
+  struct stat metadata{};
+  if (fstatat(dir_fd, name.c_str(), &metadata, AT_SYMLINK_NOFOLLOW) != 0)
+    return -1;
+  return S_ISREG(metadata.st_mode) ? 0 : 1;
+}
+
+int OpenPublicationDirectory(const std::string& path, std::string* error) {
+  const size_t separator = path.find_last_of('/');
+  const std::string directory =
+      separator == std::string::npos ? "." : path.substr(0, separator);
+  int fd = open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (fd < 0 && error)
+    *error = "cannot pin publication directory";
+  return fd;
+}
+
 bool RenameStaged(const std::string& directory,
                   const std::string& from,
                   const std::string& to,
@@ -482,9 +537,15 @@ bool PublishUniverse(const std::string& path,
   }
   if (inject == PublicationFailurePoint::kAfterRenameBeforeCommit)
     return false;
-  std::ifstream final_input(path, std::ios::binary);
-  const std::string final_content((std::istreambuf_iterator<char>(final_input)),
-                                  std::istreambuf_iterator<char>());
+  std::string final_content;
+  int publish_dir_fd = OpenPublicationDirectory(path, error);
+  if (publish_dir_fd < 0)
+    return false;
+  const bool final_ok =
+      ReadNoFollow(publish_dir_fd, final_name, &final_content, error);
+  close(publish_dir_fd);
+  if (!final_ok)
+    return false;
   if (UniverseAuditDigest(final_content) != digest ||
       final_content.size() != content.size())
     return fail("published content digest does not match transaction identity");
@@ -499,7 +560,8 @@ bool PublishUniverse(const std::string& path,
 bool RecoverUniversePublication(const std::string& path,
                                 Journal* journal,
                                 UniverseRecoveryReport* report,
-                                std::string* error) {
+                                std::string* error,
+                                PublicationFailurePoint inject) {
   auto fail = [error](const std::string& reason) {
     if (error)
       *error = reason;
@@ -509,55 +571,83 @@ bool RecoverUniversePublication(const std::string& path,
   std::map<std::string, UniverseTransaction> transactions;
   if (!BuildUniverseTransactions(journal, &transactions, error))
     return false;
+  int dir_fd = OpenPublicationDirectory(path, error);
+  if (dir_fd < 0)
+    return false;
+  const size_t separator = path.find_last_of('/');
+  const std::string directory =
+      separator == std::string::npos ? "." : path.substr(0, separator);
+  const std::string final_name =
+      separator == std::string::npos ? path : path.substr(separator + 1);
   for (const auto& [id, transaction] : transactions) {
     if (transaction.committed) {
       ++local.committed;
       continue;
     }
-    const size_t separator = path.find_last_of('/');
-    const std::string directory =
-        separator == std::string::npos ? "." : path.substr(0, separator);
-    const std::string staged = directory + "/.staging." + id;
+    const std::string staging_name = ".staging." + id;
     bool published = false;
-    std::string content;
-    if (std::filesystem::exists(staged)) {
-      std::ifstream input(staged, std::ios::binary);
-      content.assign(std::istreambuf_iterator<char>(input),
-                     std::istreambuf_iterator<char>());
-      if (UniverseAuditDigest(content) == transaction.digest &&
-          content.size() == transaction.size) {
-        const size_t final_separator = path.find_last_of('/');
-        const std::string final_name = final_separator == std::string::npos
-                                           ? path
-                                           : path.substr(final_separator + 1);
-        if (!RenameStaged(directory, ".staging." + id, final_name, error))
+    const int staged_type = ObjectTypeNoFollow(dir_fd, staging_name);
+    if (staged_type == 1) {
+      close(dir_fd);
+      return fail("staged publication object is not a regular file");
+    }
+    if (staged_type == 0) {
+      std::string staged_content;
+      if (!ReadNoFollow(dir_fd, staging_name, &staged_content, error)) {
+        close(dir_fd);
+        return false;
+      }
+      if (UniverseAuditDigest(staged_content) == transaction.digest &&
+          staged_content.size() == transaction.size) {
+        if (inject ==
+            PublicationFailurePoint::kAfterRecoveryVerificationBeforeRename) {
+          close(dir_fd);
+          return fail("recovery fault injected before rename");
+        }
+        if (!RenameStaged(directory, staging_name, final_name, error)) {
+          close(dir_fd);
           return false;
+        }
         published = true;
       }
     }
-    if (!published && std::filesystem::exists(path)) {
-      std::ifstream input(path, std::ios::binary);
-      content.assign(std::istreambuf_iterator<char>(input),
-                     std::istreambuf_iterator<char>());
-      if (UniverseAuditDigest(content) == transaction.digest &&
-          content.size() == transaction.size)
-        published = true;
+    if (!published) {
+      const int final_type = ObjectTypeNoFollow(dir_fd, final_name);
+      if (final_type == 1) {
+        close(dir_fd);
+        return fail("final publication object is not a regular file");
+      }
+      if (final_type == 0) {
+        std::string final_content;
+        if (!ReadNoFollow(dir_fd, final_name, &final_content, error)) {
+          close(dir_fd);
+          return false;
+        }
+        if (UniverseAuditDigest(final_content) == transaction.digest &&
+            final_content.size() == transaction.size)
+          published = true;
+      }
     }
     if (!published) {
       local.unresolved.push_back(id);
       continue;
     }
-    if (!SyncDirectory(path, error))
+    if (!SyncDirectory(path, error)) {
+      close(dir_fd);
       return false;
+    }
     if (!AppendUniverseAudit(journal,
                              "UNIVERSE_PUBLISH_COMMIT",
                              id,
                              transaction.digest,
                              transaction.size,
-                             error))
+                             error)) {
+      close(dir_fd);
       return false;
+    }
     ++local.recovered;
   }
+  close(dir_fd);
   if (report)
     *report = local;
   if (!local.unresolved.empty())
