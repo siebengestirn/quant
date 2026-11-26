@@ -329,9 +329,7 @@ bool WriteStagedExclusive(const std::string& directory,
                   0600);
   if (fd < 0) {
     close(dirfd);
-    return fail(("exclusive staging creation failed: " +
-                 std::string(std::strerror(errno)))
-                    .c_str());
+    return fail("exclusive staging creation failed");
   }
   struct stat metadata{};
   if (fstat(fd, &metadata) != 0 || !S_ISREG(metadata.st_mode)) {
