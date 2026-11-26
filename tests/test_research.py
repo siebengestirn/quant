@@ -185,6 +185,21 @@ def _write_pit_fixtures(tmp_path: Path, dates: list[str]) -> tuple[Path, Path]:
     return status, calendar
 
 
+def _write_manifest(directory: Path) -> None:
+    import hashlib
+
+    manifest: dict[str, object] = {"schema_version": 1}
+    for path in sorted(directory.glob("*.csv")):
+        content = path.read_bytes()
+        manifest[path.stem] = {
+            "digest": hashlib.sha256(content).hexdigest(),
+            "rows": len(content.decode("utf-8").splitlines()) - 1,
+        }
+    (directory / "manifest.json").write_text(
+        research.json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    )
+
+
 def test_dataset_quality_reports_missing_and_malformed():
     """Enforce the QUANT style contract."""
     rows = [
@@ -274,6 +289,7 @@ def test_validated_dataset_rejects_blocked_input(tmp_path):
         "2026-01-01,100,102,99,101,1000\n"
         "2026-01-02,101,103,100,102,1000\n"
     )
+    _write_manifest(tmp_path)
     status, calendar = _write_pit_fixtures(
         tmp_path, ["2026-01-01", "2026-01-02"]
     )
@@ -299,6 +315,7 @@ def test_validated_dataset_flags_malformed_ohlc(tmp_path):
         "2026-01-01,100,102,99,101,1000\n"
         "2026-01-02,50,103,100,102,1000\n"
     )
+    _write_manifest(tmp_path)
     status, calendar = _write_pit_fixtures(
         tmp_path, ["2026-01-01", "2026-01-02"]
     )
@@ -394,6 +411,7 @@ def test_cli_exit_codes_reflect_dataset_status(tmp_path):
         "2026-01-01,100,102,99,101,1000\n"
         "2026-01-02,101,103,100,102,1000\n"
     )
+    _write_manifest(data)
     code, report = _run_cli(
         data, out, "--universe-status", str(status), "--sessions", str(calendar)
     )
@@ -405,6 +423,7 @@ def test_cli_exit_codes_reflect_dataset_status(tmp_path):
         "2026-01-01,100,102,99,101,1000\n"
         "2026-01-02,50,103,100,102,1000\n"
     )
+    _write_manifest(data)
     code, report = _run_cli(
         data, out, "--universe-status", str(status), "--sessions", str(calendar)
     )
@@ -415,6 +434,7 @@ def test_cli_exit_codes_reflect_dataset_status(tmp_path):
         "date,open,high,low,close,volume\n"
         "2026-01-01,100,102,not-a-number,101,1000\n"
     )
+    _write_manifest(data)
     code, report = _run_cli(
         data, out, "--universe-status", str(status), "--sessions", str(calendar)
     )

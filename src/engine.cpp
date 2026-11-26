@@ -4892,15 +4892,38 @@ bool ReadCsvCandles(const std::string& path,
     return false;
   }
   std::string line;
-  std::getline(input, line);  // header.
+  if (!std::getline(input, line) || line != "date,open,high,low,close,volume") {
+    if (error)
+      *error = "invalid candle header in " + path;
+    return false;
+  }
+  std::set<std::string> dates;
+  int line_number = 1;
   while (std::getline(input, line)) {
+    ++line_number;
     std::vector<std::string> fields;
     std::stringstream ss(line);
     std::string field;
     while (std::getline(ss, field, ','))
       fields.push_back(field);
-    if (fields.size() < 6)
-      continue;
+    if (fields.size() != 6) {
+      if (error)
+        *error = "candle row width mismatch in " + path + ":" +
+                 std::to_string(line_number);
+      return false;
+    }
+    if (!IsCanonicalExchangeDate(fields[0])) {
+      if (error)
+        *error = "invalid calendar date in " + path + ":" +
+                 std::to_string(line_number);
+      return false;
+    }
+    if (!dates.insert(fields[0]).second) {
+      if (error)
+        *error = "duplicate session date in " + path + ":" +
+                 std::to_string(line_number);
+      return false;
+    }
     Candle candle;
     candle.date = fields[0];
     if (!ParseFloating(fields[1], &candle.open) ||
@@ -4909,7 +4932,20 @@ bool ReadCsvCandles(const std::string& path,
         !ParseFloating(fields[4], &candle.close) ||
         !ParseFloating(fields[5], &candle.volume)) {
       if (error)
-        *error = "malformed candle row in " + path;
+        *error = "malformed candle row in " + path + ":" +
+                 std::to_string(line_number);
+      return false;
+    }
+    if (!std::isfinite(candle.open) || !std::isfinite(candle.high) ||
+        !std::isfinite(candle.low) || !std::isfinite(candle.close) ||
+        !std::isfinite(candle.volume) || candle.low <= 0.0 ||
+        candle.close <= 0.0 ||
+        candle.low > std::min(candle.open, candle.close) ||
+        std::max(candle.open, candle.close) > candle.high ||
+        candle.volume < 0.0) {
+      if (error)
+        *error = "invalid OHLCV relationship in " + path + ":" +
+                 std::to_string(line_number);
       return false;
     }
     candles->push_back(candle);
@@ -4918,6 +4954,80 @@ bool ReadCsvCandles(const std::string& path,
             candles->end(),
             [](const Candle& a, const Candle& b) { return a.date < b.date; });
   return true;
+}
+
+DatasetVerification VerifyDataset(const std::string& history_dir,
+                                  std::string* error) {
+  DatasetVerification result;
+  const std::string manifest_path = history_dir + "/manifest.json";
+  std::ifstream input(manifest_path);
+  if (!input.is_open()) {
+    result.errors.push_back("dataset manifest missing");
+    result.status = DatasetStatus::kBlocked;
+    if (error)
+      *error = "dataset manifest missing";
+    return result;
+  }
+  const std::string content((std::istreambuf_iterator<char>(input)),
+                            std::istreambuf_iterator<char>());
+  Json manifest;
+  if (!Json::Parse(content, &manifest, error)) {
+    result.status = DatasetStatus::kBlocked;
+    result.errors.push_back("dataset manifest invalid");
+    return result;
+  }
+  const Json* schema = manifest.Find("schema_version");
+  if (schema == nullptr || !schema->is_exact_integer() ||
+      schema->as_int(0) != 1) {
+    result.status = DatasetStatus::kBlocked;
+    result.errors.push_back("unsupported dataset schema");
+    return result;
+  }
+  std::string combined;
+  for (const auto& [symbol, value] : manifest.object()) {
+    if (value.type() != Json::Type::kObject)
+      continue;
+    const Json* digest = value.Find("digest");
+    const Json* rows = value.Find("rows");
+    if (digest == nullptr || rows == nullptr) {
+      result.errors.push_back("manifest entry incomplete: " + symbol);
+      continue;
+    }
+    const std::string path = history_dir + "/" + symbol + ".csv";
+    std::ifstream file(path, std::ios::binary);
+    if (!file.is_open()) {
+      result.errors.push_back("dataset file missing: " + symbol);
+      continue;
+    }
+    const std::string bytes((std::istreambuf_iterator<char>(file)),
+                            std::istreambuf_iterator<char>());
+    const std::string actual = ChecksumHex(bytes);
+    if (actual != digest->as_string()) {
+      result.errors.push_back("dataset digest mismatch: " + symbol);
+      continue;
+    }
+    std::vector<Candle> candles;
+    std::string parse_error;
+    if (!ReadCsvCandles(path, &candles, &parse_error)) {
+      result.errors.push_back(parse_error);
+      continue;
+    }
+    int64_t expected_rows = rows->as_int(0);
+    if (expected_rows != static_cast<int64_t>(candles.size())) {
+      result.errors.push_back("dataset row count mismatch: " + symbol);
+      continue;
+    }
+    result.file_digests[symbol] = actual;
+    combined += symbol + ":" + actual + ";";
+  }
+  result.digest = ChecksumHex(combined);
+  result.status = result.file_digests.empty()
+                      ? DatasetStatus::kFailed
+                      : (result.errors.empty() ? DatasetStatus::kComplete
+                                               : DatasetStatus::kPartial);
+  if (error)
+    error->clear();
+  return result;
 }
 
 std::string RenderReport(const DailyReport& report) {

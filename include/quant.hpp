@@ -1335,13 +1335,24 @@ bool PublishHistoryFile(const std::string& path,
                         const std::string& content,
                         std::string* error);
 
+enum class HistorySyncStatus { kComplete, kPartial, kBlocked, kFailed };
+
+struct HistorySyncResult {
+  HistorySyncStatus status = HistorySyncStatus::kFailed;
+  size_t expected = 0;
+  size_t fetched = 0;
+  size_t failed = 0;
+  std::vector<std::string> failures;
+  std::string manifest_digest;
+};
+
 class MarketDataService {
  public:
   MarketDataService(Config config, Journal* journal);
   std::vector<FeedStatus> CheckFeeds() const;
   UniverseResult SyncUniverse() const;
-  bool SyncHistory(const std::vector<Instrument>& instruments,
-                   std::string* error) const;
+  HistorySyncResult SyncHistory(const std::vector<Instrument>& instruments,
+                                std::string* error) const;
   bool FetchQuotes(const std::vector<Instrument>& instruments,
                    std::vector<Quote>* quotes,
                    std::string* error) const;
@@ -1472,10 +1483,23 @@ struct DailyReport {
   std::string decision = "NO TRADE";
   std::string decision_reason;
   std::string data_provenance;
+  std::string dataset_status = "NOT_VERIFIED";
 };
 
 std::string RenderReport(const DailyReport& report);
 std::string WriteTextFile(const std::string& path, const std::string& content);
+enum class DatasetStatus { kComplete, kPartial, kBlocked, kFailed };
+
+struct DatasetVerification {
+  DatasetStatus status = DatasetStatus::kFailed;
+  std::string digest;
+  std::vector<std::string> errors;
+  std::map<std::string, std::string> file_digests;
+};
+
+DatasetVerification VerifyDataset(const std::string& history_dir,
+                                  std::string* error);
+
 bool ReadCsvCandles(const std::string& path,
                     std::vector<Candle>* candles,
                     std::string* error);

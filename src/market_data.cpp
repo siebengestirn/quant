@@ -741,6 +741,8 @@ HistoryParseResult BuildHistoryCsv(const Json& candles,
       return result;
     }
     std::ostringstream line;
+    line.imbue(std::locale::classic());
+    line << std::setprecision(std::numeric_limits<double>::max_digits10);
     line << date << ',' << open << ',' << high << ',' << low << ',' << close
          << ',' << volume << '\n';
     result.csv += line.str();
@@ -765,13 +767,15 @@ bool PublishHistoryFile(const std::string& path,
   return SyncDirectory(path, error);
 }
 
-bool MarketDataService::SyncHistory(const std::vector<Instrument>& instruments,
-                                    std::string* error) const {
+HistorySyncResult MarketDataService::SyncHistory(
+    const std::vector<Instrument>& instruments, std::string* error) const {
   const Secret token = ResolveSecret(config_, "UPSTOX_ANALYTICS_TOKEN");
+  HistorySyncResult sync;
   if (token.value.empty()) {
+    sync.status = HistorySyncStatus::kBlocked;
     if (error)
       *error = "Upstox analytics token absent";
-    return false;
+    return sync;
   }
   const HttpClient http(config_.http_timeout_seconds);
   const std::time_t now_time = std::time(nullptr);
@@ -883,20 +887,30 @@ bool MarketDataService::SyncHistory(const std::vector<Instrument>& instruments,
                           &manifest_error)) {
     if (error)
       *error = "history manifest not published: " + manifest_error;
-    return false;
+    sync.status = HistorySyncStatus::kFailed;
+    return sync;
   }
 
-  if (fetched == 0) {
-    if (error)
-      *error = "no historical series fetched; failures=" +
-               std::to_string(failures.size());
-    return false;
-  }
+  sync.expected = targets.size() + config_.index_symbols.size();
+  sync.fetched = fetched;
+  sync.failures = failures;
+  sync.failed = sync.expected > fetched ? sync.expected - fetched : 0;
+  const std::string manifest_json = Json::ObjectValue(manifest).Dump();
+  sync.manifest_digest = ChecksumHex(manifest_json);
+  if (fetched == 0)
+    sync.status = HistorySyncStatus::kFailed;
+  else if (!failures.empty() || sync.failed != 0)
+    sync.status = HistorySyncStatus::kPartial;
+  else
+    sync.status = HistorySyncStatus::kComplete;
   if (error) {
-    *error = "fetched=" + std::to_string(fetched) +
-             " failed=" + std::to_string(failures.size());
+    if (sync.status == HistorySyncStatus::kComplete)
+      error->clear();
+    else
+      *error = "fetched=" + std::to_string(fetched) +
+               " failed=" + std::to_string(sync.failed);
   }
-  return true;
+  return sync;
 }
 
 bool MarketDataService::FetchQuotes(const std::vector<Instrument>& instruments,
