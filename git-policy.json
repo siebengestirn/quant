@@ -9,7 +9,7 @@
   },
   "branch": {
     "active_topic_branches": [],
-    "active_topic_rationale": "All nine stacked PRs and Gate 1 (research input contract) are merged; no active topic branches. New work uses short-lived branches from main.",
+    "active_topic_rationale": "Seven remediation PRs (#47-#53) are open and awaiting independent acceptance; no topic branch is merged. main remains the sole integration branch.",
     "allowed_topic_prefixes": [
       "feat",
       "fix",
@@ -146,12 +146,12 @@
     "required_approving_reviews": 1,
     "self_review_checklist_required": true,
     "single_maintainer_bootstrap_exception": {
-      "active": true,
+      "active": false,
       "after_expiry": "No further exception: every PR requires one independent approving review. The scope is exhausted by PRs #45 and #46.",
       "authorization": "One-time administrative merges recorded in docs/release-status-2026-11-26.md; all three required checks pass on each exact head.",
       "expires": "2026-12-31T23:59:59Z",
-      "scope": "Only PR #45 (installs the enforced review requirement) and PR #46 (final evidence reconciliation); both are docs/governance only, with no financial, recovery, data-contract or execution code.",
-      "status": "closed_by_scope_time_limited_not_expired"
+      "scope": "Closed: applied only to PRs #45 and #46. No further single-maintainer exception is available.",
+      "status": "closed_by_scope_time_limited"
     }
   },
   "schema_version": 1,
