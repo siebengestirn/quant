@@ -359,6 +359,32 @@ struct ComplianceGateState {
 };
 bool LiveRouteAuthorized(const ComplianceGateState& gate, std::string* error);
 
+struct ReferenceInstrument {
+  uint64_t schema_version = 1;
+  std::string permanent_id;
+  std::string venue;
+  std::string isin;
+  AssetClass asset_class = AssetClass::kCashEquity;
+  std::string currency;
+  int price_scale = 0;
+  int quantity_scale = 0;
+  int64_t tick_size_minor = 0;
+  int64_t lot_size = 0;
+  int64_t contract_multiplier = 0;
+  std::string calendar_id;
+  std::string session_model;
+  std::string settlement_model;
+  std::string margin_model;
+  std::string fee_schedule_id;
+  int64_t effective_from_ms = 0;
+  int64_t effective_to_ms = 0;
+};
+bool ValidateReferenceInstrument(const ReferenceInstrument& instrument,
+                                 std::string* error);
+bool VenueConformanceSupported(const std::string& venue,
+                               AssetClass asset_class,
+                               const std::string& calendar_id);
+
 enum class InstrumentClass {
   kUnknown,
   kEquity,

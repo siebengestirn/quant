@@ -655,6 +655,49 @@ void TestProviderHistoryValidation() {
   Check(!zero.errors.empty(), "zero close never coerced to valid data");
 }
 
+void TestInstrumentReferenceModel() {
+  ReferenceInstrument equity;
+  equity.permanent_id = "PERM-INE001A01DD1";
+  equity.venue = "NSE";
+  equity.isin = "INE001A01DD1";
+  equity.currency = "INR";
+  equity.price_scale = 2;
+  equity.quantity_scale = 0;
+  equity.tick_size_minor = 5;
+  equity.lot_size = 1;
+  equity.contract_multiplier = 1;
+  equity.calendar_id = "NSE-CALENDAR-v1";
+  equity.session_model = "NSE-CASH-v1";
+  equity.settlement_model = "T_PLUS_1";
+  equity.margin_model = "CASH_FULL";
+  equity.fee_schedule_id = "ZERODHA-EQ-2026-11-25-v1";
+  equity.effective_from_ms = 1;
+  std::string error;
+  Check(ValidateReferenceInstrument(equity, &error), "reference equity valid");
+  Check(VenueConformanceSupported(
+            "NSE", AssetClass::kCashEquity, "NSE-CALENDAR-v1"),
+        "NSE cash equity conformance available");
+  Check(!VenueConformanceSupported(
+            "NSE", AssetClass::kDerivative, "NSE-CALENDAR-v1"),
+        "derivative conformance not claimed");
+  Check(!VenueConformanceSupported(
+            "BSE", AssetClass::kCashEquity, "NSE-CALENDAR-v1"),
+        "BSE conformance not claimed");
+  ReferenceInstrument bad = equity;
+  bad.price_scale = -1;
+  Check(!ValidateReferenceInstrument(bad, &error), "negative scale rejected");
+  bad = equity;
+  bad.tick_size_minor = 0;
+  Check(!ValidateReferenceInstrument(bad, &error), "zero tick rejected");
+  bad = equity;
+  bad.currency = "RUPEE";
+  Check(!ValidateReferenceInstrument(bad, &error), "invalid currency rejected");
+  bad = equity;
+  bad.permanent_id.clear();
+  Check(!ValidateReferenceInstrument(bad, &error),
+        "missing permanent identity rejected");
+}
+
 void TestMoney() {
   Check(Money::FromRupees(500.0).paise() == 50000,
         "money 500 INR -> 50000 paise");
@@ -2453,6 +2496,7 @@ void TestTerminalAccounting() {
 int main() {
   using namespace quant;
   TestMoney();
+  TestInstrumentReferenceModel();
   TestProviderHistoryValidation();
   TestPaperOrderReducer();
   TestAssetAndComplianceContracts();

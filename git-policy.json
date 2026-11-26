@@ -85,7 +85,9 @@
       "build",
       "build-san",
       "dist",
-      "data"
+      "data",
+      "markdown-guide.html",
+      "verilogguide.html"
     ],
     "forbidden_component_prefixes": [
       "build-"

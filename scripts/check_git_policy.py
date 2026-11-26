@@ -32,6 +32,11 @@ def policy_consistency_violations() -> list[str]:
         out.append("policy target remote tracking must be only origin/main")
     if POLICY["pr_review"]["required_approving_reviews"] < 1:
         out.append("independent approving review must be required")
+    workflow = (ROOT / "docs" / "git-workflow.md").read_text()
+    if "Required approving reviews remain zero" in workflow:
+        out.append("git-workflow.md contradicts required review policy")
+    if "requires one independent approving review" not in workflow:
+        out.append("git-workflow.md does not state the required review policy")
     if not POLICY["pr_review"].get("ci_evidence_per_pr_head", False):
         out.append("CI evidence must be recorded per exact PR head")
     if POLICY["pr_review"].get("ci_evidence_reuse_final_main_run", True):
