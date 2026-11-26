@@ -147,10 +147,11 @@
     "self_review_checklist_required": true,
     "single_maintainer_bootstrap_exception": {
       "active": true,
-      "after_expiry": "No exception: every PR requires one independent approving review.",
+      "after_expiry": "No further exception: every PR requires one independent approving review. The scope is exhausted by PRs #45 and #46.",
       "authorization": "One-time administrative merges recorded in docs/release-status-2026-11-26.md; all three required checks pass on each exact head.",
       "expires": "2026-12-31T23:59:59Z",
-      "scope": "Only PR #45 (installs the enforced review requirement) and PR #46 (final evidence reconciliation); both are docs/governance only, with no financial, recovery, data-contract or execution code."
+      "scope": "Only PR #45 (installs the enforced review requirement) and PR #46 (final evidence reconciliation); both are docs/governance only, with no financial, recovery, data-contract or execution code.",
+      "status": "closed_by_scope_time_limited_not_expired"
     }
   },
   "schema_version": 1,
