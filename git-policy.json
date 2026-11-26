@@ -92,7 +92,8 @@
     ],
     "forbidden_suffixes": [
       ".pyc",
-      ".pyo"
+      ".pyo",
+      ".html"
     ]
   },
   "automation": {
