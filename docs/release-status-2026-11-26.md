@@ -2,7 +2,7 @@
 
 Final commit, hosted CI run and merged-PR count are generated from the exact
 final `main` head and the authenticated GitHub API in `MANIFEST.md` of the
-final evidence bundle; volatile identifiers are deliberately not copied here.
+final evidence bundle; volatile identifiers are not copied here.
 The public web PR index showed "29 closed" because it was not fully paginated;
 it is not the authoritative inventory. PR #44 was the last technical
 remediation; PR #45 enforced branch protection; PR #46 is this final evidence

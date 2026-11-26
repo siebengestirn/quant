@@ -15,7 +15,7 @@ POLICY = json.loads((ROOT / "git-policy.json").read_text())
 
 
 def git(*args: str) -> str:
-    """Enforce the QUANT style contract."""
+    """Run a Git command and return its standard output."""
     result = subprocess.run(
         ["git", *args], cwd=ROOT, capture_output=True, text=True, check=False
     )
@@ -25,7 +25,7 @@ def git(*args: str) -> str:
 
 
 def policy_consistency_violations() -> list[str]:
-    """Enforce the QUANT style contract."""
+    """Compare repository state with the machine policy."""
     out: list[str] = []
     inventory = POLICY["inventory"]
     if inventory["target_local_branches"] != ["main"]:
@@ -58,7 +58,7 @@ def policy_consistency_violations() -> list[str]:
 
 
 def violations(allow_dirty: bool) -> list[str]:
-    """Enforce the QUANT style contract."""
+    """Collect policy violations from the repository."""
     out: list[str] = policy_consistency_violations()
     branch = git("rev-parse", "--abbrev-ref", "HEAD")
     prefixes = tuple(POLICY["branch"]["allowed_topic_prefixes"])
@@ -128,7 +128,7 @@ def violations(allow_dirty: bool) -> list[str]:
 
 
 def main() -> int:
-    """Enforce the QUANT style contract."""
+    """Parse arguments and run the research command."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--allow-dirty", action="store_true", help="skip clean-tree requirement"
