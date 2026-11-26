@@ -1,4 +1,5 @@
-> **Current status (2026-11-26):** `main` at `2e50a35`. All documented
+> **Current status (2026-11-26):** `main` at `8a45da3`, PRs #1–#44 merged.
+> All documented
 > historical reports below are retained as evidence of earlier states, not as
 > the current status. The current gate results, limits and acceptance states
 > are recorded in `docs/release-status-2026-11-26.md`.

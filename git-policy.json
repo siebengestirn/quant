@@ -144,7 +144,14 @@
     "ci_evidence_reuse_final_main_run": false,
     "reason": "Independent review is required for every PR. At least one approving review from a reviewer other than the author is mandatory for financial-, recovery- and data-contract-changing work.",
     "required_approving_reviews": 1,
-    "self_review_checklist_required": true
+    "self_review_checklist_required": true,
+    "single_maintainer_bootstrap_exception": {
+      "active": true,
+      "after_expiry": "No exception: every PR requires one independent approving review.",
+      "authorization": "One-time administrative merge recorded in docs/release-status-2026-11-26.md; all three required checks must pass on the exact head.",
+      "expires": "2026-12-31T23:59:59Z",
+      "scope": "Only PR #45, which establishes the enforced GitHub review requirement; docs/governance only, no financial, recovery, data-contract or execution code."
+    }
   },
   "schema_version": 1,
   "working_tree": {
