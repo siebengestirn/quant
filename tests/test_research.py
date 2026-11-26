@@ -486,3 +486,53 @@ def test_shared_canonical_date_fixture():
     for row in rows:
         parsed = research.parse_iso_date(row["date"])
         assert (parsed is not None) == (row["valid"] == "true"), row["date"]
+
+
+def test_dependence_aware_uncertainty():
+    rng = __import__("random").Random(3)
+    values = [0.0]
+    for _ in range(119):
+        values.append(0.8 * values[-1] + rng.gauss(0, 0.01))
+    ci = research.block_bootstrap_ci(values, block_length=5, draws=500)
+    assert ci[0] <= ci[1] <= ci[2]
+    assert ci[2] > ci[0]
+    assert research.hac_standard_error(values, lags=5) > 0
+    assert research.block_bootstrap_ci([1.0, 2.0]) == [0.0, 0.0, 0.0]
+
+
+def test_purged_walk_forward_protocol():
+    history = research.synthetic_history()
+    result = research.purged_walk_forward(history, research.score_momentum)
+    assert result["status"] == "CALCULATED"
+    assert len(result["folds"]) > 0
+    assert result["holdout_used_for_selection"] is False
+    assert result["holdout_sessions"] == 20
+    for fold in result["folds"]:
+        assert fold["purged"] == research.HOLDING_SESSIONS
+        assert fold["embargoed"] == research.HOLDING_SESSIONS
+
+
+def test_selection_tests_are_not_overclaimed():
+    assert research.selection_test_status(None)["status"] == "UNAVAILABLE"
+    report = research.analyze(research.synthetic_history(), ROOT)
+    assert report["methodology"]["signal_diagnostics_scope"].startswith(
+        "DESCRIPTIVE"
+    )
+    assert report["methodology"]["formal_selection_scope"].startswith(
+        "NOT ESTABLISHED"
+    )
+    assert report["methodology"]["selection_tests"]["status"] == ("UNAVAILABLE")
+
+
+def test_experiment_registry_records_reproducibility_inputs(tmp_path):
+    identifier = research.register_experiment(tmp_path, {"strategy": "x"})
+    line = (
+        (tmp_path / "data" / "assurance" / "experiments.jsonl")
+        .read_text()
+        .splitlines()[0]
+    )
+    entry = research.json.loads(line)
+    assert entry["id"] == identifier
+    assert entry["random_seed"] == research.SEED
+    assert entry["trial_count"] == research.TRIALS
+    assert entry["code_commit"]
