@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import importlib.util
 import json
 import math
@@ -160,6 +161,18 @@ def test_experiment_registry_is_append_only(tmp_path):
     assert research.json.loads(lines[0])["id"] == first
 
 
+def _write_pit_fixtures(tmp_path: Path, dates: list[str]) -> tuple[Path, Path]:
+    status = tmp_path / "status.txt"
+    status.write_text(
+        "symbol,exchange,isin,effective_from,effective_to,eligible,"
+        "published_at,revision\n"
+        + "".join(f"AAA,NSE,INE001A01DD1,{dates[0]},,true,{dates[0]},1\n")
+    )
+    calendar = tmp_path / "sessions.txt"
+    calendar.write_text("\n".join(dates) + "\n")
+    return status, calendar
+
+
 def test_dataset_quality_reports_missing_and_malformed():
     rows = [
         {
@@ -195,13 +208,35 @@ def test_dataset_quality_reports_missing_and_malformed():
             "volume": 100,
         },
     ]
-    result = research.dataset_quality(rows, ["D1", "D2", "D3", "D4"])
+    for row, value in zip(
+        rows,
+        ["2026-01-01", "2026-01-02", "2026-01-02", "2026-01-03"],
+        strict=True,
+    ):
+        row["date"] = value
+    result = research.dataset_quality(
+        rows, ["2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04"]
+    )
     assert result["status"] == "PARTIAL"
-    assert result["missing_sessions"] == ["D4"]
+    assert result["missing_sessions"] == ["2026-01-04"]
     assert result["duplicate_count"] == 1
     assert result["invalid_bar_count"] == 1
-    complete = research.dataset_quality(rows[:1], ["D1"])
+    complete = research.dataset_quality(rows[:1], ["2026-01-01"])
     assert complete["status"] == "COMPLETE"
+    impossible = research.dataset_quality(
+        [
+            {
+                "date": "2026-02-31",
+                "open": 10,
+                "high": 11,
+                "low": 9,
+                "close": 10,
+                "volume": 100,
+            }
+        ],
+        ["2026-02-31"],
+    )
+    assert impossible["invalid_bar_count"] == 1
 
 
 def test_point_in_time_universe_ignores_future_status():
@@ -224,11 +259,22 @@ def test_validated_dataset_rejects_blocked_input(tmp_path):
         "2026-01-01,100,102,99,101,1000\n"
         "2026-01-02,101,103,100,102,1000\n"
     )
-    dataset = research.load_history_validated(tmp_path)
+    status, calendar = _write_pit_fixtures(
+        tmp_path, ["2026-01-01", "2026-01-02"]
+    )
+    records, errors = research.load_universe_status(status)
+    sessions, calendar_errors = research.load_session_calendar(calendar)
+    assert not errors and not calendar_errors
+    dataset = research.load_history_validated(
+        tmp_path, records, "TEST", sessions, errors, calendar_errors
+    )
     assert dataset.status == "COMPLETE"
     assert dataset.invalid_rows == 0
     report = research.analyze(dataset.history, ROOT, dataset)
     assert report["data_contract"]["status"] == "COMPLETE"
+    assert report["data_contract"]["digests"]["universe"]
+    assert report["data_contract"]["digests"]["calendar"]
+    assert report["data_contract"]["session_eligibility"] == "ENFORCED"
 
 
 def test_validated_dataset_flags_malformed_ohlc(tmp_path):
@@ -237,7 +283,14 @@ def test_validated_dataset_flags_malformed_ohlc(tmp_path):
         "2026-01-01,100,102,99,101,1000\n"
         "2026-01-02,50,103,100,102,1000\n"
     )
-    dataset = research.load_history_validated(tmp_path)
+    status, calendar = _write_pit_fixtures(
+        tmp_path, ["2026-01-01", "2026-01-02"]
+    )
+    records, errors = research.load_universe_status(status)
+    sessions, calendar_errors = research.load_session_calendar(calendar)
+    dataset = research.load_history_validated(
+        tmp_path, records, "TEST", sessions, errors, calendar_errors
+    )
     assert dataset.status == "PARTIAL"
     assert dataset.invalid_rows == 1
     report = research.analyze(dataset.history, ROOT, dataset)
@@ -313,12 +366,17 @@ def test_cli_exit_codes_reflect_dataset_status(tmp_path):
     data = tmp_path / "history"
     data.mkdir()
     out = tmp_path / "reports"
+    status, calendar = _write_pit_fixtures(
+        tmp_path, ["2026-01-01", "2026-01-02"]
+    )
     (data / "AAA.csv").write_text(
         "date,open,high,low,close,volume\n"
         "2026-01-01,100,102,99,101,1000\n"
         "2026-01-02,101,103,100,102,1000\n"
     )
-    code, report = _run_cli(data, out)
+    code, report = _run_cli(
+        data, out, "--universe-status", str(status), "--sessions", str(calendar)
+    )
     assert code == 0
     assert report["data_contract"]["status"] == "COMPLETE"
 
@@ -327,7 +385,9 @@ def test_cli_exit_codes_reflect_dataset_status(tmp_path):
         "2026-01-01,100,102,99,101,1000\n"
         "2026-01-02,50,103,100,102,1000\n"
     )
-    code, report = _run_cli(data, out)
+    code, report = _run_cli(
+        data, out, "--universe-status", str(status), "--sessions", str(calendar)
+    )
     assert code == 3
     assert report["conclusion"].startswith("PARTIAL")
 
@@ -335,26 +395,94 @@ def test_cli_exit_codes_reflect_dataset_status(tmp_path):
         "date,open,high,low,close,volume\n"
         "2026-01-01,100,102,not-a-number,101,1000\n"
     )
-    code, report = _run_cli(data, out)
+    code, report = _run_cli(
+        data, out, "--universe-status", str(status), "--sessions", str(calendar)
+    )
     assert code == 2
     assert report["conclusion"].startswith("BLOCKED")
     assert report["data_contract"]["invalid_rows"] >= 1
 
 
-def test_cli_enforces_point_in_time_status_file(tmp_path):
+def test_cli_fails_closed_without_pit_or_calendar(tmp_path):
     data = tmp_path / "history"
     data.mkdir()
     out = tmp_path / "reports"
     (data / "AAA.csv").write_text(
-        "date,open,high,low,close,volume\n"
-        "2026-01-01,100,102,99,101,1000\n"
-        "2026-01-02,101,103,100,102,1000\n"
+        "date,open,high,low,close,volume\n" "2026-01-01,100,102,99,101,1000\n"
     )
-    status = tmp_path / "status.csv"
-    status.write_text(
-        "symbol,effective_from,effective_to,eligible,revision\n"
-        "AAA,2026-01-01,,true,1\n"
+    code, report = _run_cli(data, out)
+    assert code == 2
+    assert report["data_contract"]["status"] == "BLOCKED"
+    assert "universe status not supplied" in (
+        report["data_contract"]["status_errors"]
     )
+
+    status, _calendar = _write_pit_fixtures(tmp_path, ["2026-01-01"])
     code, report = _run_cli(data, out, "--universe-status", str(status))
-    assert code == 0
-    assert report["data_contract"]["session_eligibility"] == "ENFORCED"
+    assert code == 2
+    assert "exchange calendar not supplied" in (
+        report["data_contract"]["status_errors"]
+    )
+
+    code, report = _run_cli(data, out, "--diagnostic-observed-only")
+    assert code == 3
+    assert report["data_contract"]["status"] == "OBSERVED_ONLY"
+    assert report["data_contract"]["session_eligibility"] != "ENFORCED"
+
+
+def test_malformed_pit_records_fail_closed(tmp_path):
+    data = tmp_path / "history"
+    data.mkdir()
+    out = tmp_path / "reports"
+    (data / "AAA.csv").write_text(
+        "date,open,high,low,close,volume\n" "2026-01-01,100,102,99,101,1000\n"
+    )
+    calendar = tmp_path / "sessions.txt"
+    calendar.write_text("2026-01-01\n")
+    status = tmp_path / "status.txt"
+    status.write_text(
+        "symbol,exchange,isin,effective_from,effective_to,eligible,"
+        "published_at,revision\n"
+        "AAA,NSE,INE001A01DD1,2026-01-01,,maybe,2026-01-01,1\n"
+    )
+    code, report = _run_cli(
+        data, out, "--universe-status", str(status), "--sessions", str(calendar)
+    )
+    assert code == 2
+    assert report["data_contract"]["status"] == "BLOCKED"
+    assert any(
+        "eligible" in item for item in report["data_contract"]["status_errors"]
+    )
+
+
+def test_duplicate_csv_headers_rejected(tmp_path):
+    (tmp_path / "AAA.csv").write_text(
+        "date,date,open,high,low,close,volume\n"
+        "2026-01-01,2026-01-01,100,102,99,101,1000\n"
+    )
+    history, _count, detail = research.load_history_with_errors(tmp_path)
+    assert history == {}
+    assert any("duplicate header" in item for item in detail)
+
+
+def test_late_published_status_cannot_alter_earlier_decision():
+    records = [
+        {
+            "symbol": "AAA",
+            "effective_from": "2020-01-01",
+            "eligible": False,
+            "published_at": "2023-01-01",
+            "revision": 2,
+        }
+    ]
+    assert research.point_in_time_universe(records, "2021-06-01") == []
+
+
+def test_shared_canonical_date_fixture():
+    fixture = ROOT / "tests" / "fixtures" / "canonical_dates.csv"
+    with fixture.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 14
+    for row in rows:
+        parsed = research.parse_iso_date(row["date"])
+        assert (parsed is not None) == (row["valid"] == "true"), row["date"]

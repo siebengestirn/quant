@@ -206,6 +206,8 @@ constexpr bool operator==(Money a, Money b) {
   return a.valid() && b.valid() && a.paise() == b.paise();
 }
 
+bool IsCanonicalExchangeDate(std::string_view text);
+
 // ---------------------------------------------------------------------------
 // Enumerations and configuration.
 // ---------------------------------------------------------------------------

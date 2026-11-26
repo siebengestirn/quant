@@ -1,0 +1,15 @@
+date,valid
+2026-01-01,true
+2024-02-29,true
+2000-02-29,true
+2026-02-28,true
+2026-12-31,true
+2023-02-29,false
+2026-02-31,false
+2026-04-31,false
+2026-13-01,false
+2026-00-10,false
+2026-01-00,false
+26-01-01,false
+2026/01/01,false
+not-a-date,false
