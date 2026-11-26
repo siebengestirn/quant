@@ -571,9 +571,14 @@ bool RecoverUniversePublication(const std::string& path,
   std::map<std::string, UniverseTransaction> transactions;
   if (!BuildUniverseTransactions(journal, &transactions, error))
     return false;
-  int dir_fd = OpenPublicationDirectory(path, error);
-  if (dir_fd < 0)
+  int dir_fd = OpenPublicationDirectory(path, nullptr);
+  if (dir_fd < 0) {
+    if (transactions.empty())
+      return true;
+    if (error)
+      *error = "publication directory unavailable for pending transactions";
     return false;
+  }
   const size_t separator = path.find_last_of('/');
   const std::string directory =
       separator == std::string::npos ? "." : path.substr(0, separator);
