@@ -1,10 +1,12 @@
 # QUANT release status — 26 November 2026 (final)
 
-Commit: `8a45da3886271235cf989111fbd27bda1065fe24` on `main`.
-Merged pull requests: **#1–#44 (44)**, verified with the authenticated GitHub
-API (`gh api 'repos/siebengestirn/quant/pulls?state=all&per_page=100'`).
+Final commit, hosted CI run and merged-PR count are generated from the exact
+final `main` head and the authenticated GitHub API in `MANIFEST.md` of the
+final evidence bundle; volatile identifiers are deliberately not copied here.
 The public web PR index showed "29 closed" because it was not fully paginated;
-it is not the authoritative inventory. Open PRs: 0. Branches: `main` only.
+it is not the authoritative inventory. PR #44 was the last technical
+remediation; PR #45 enforced branch protection; PR #46 is this final evidence
+reconciliation. Open PRs after PR #46: 0. Branches: `main` only.
 
 ## Status vocabulary
 
@@ -40,7 +42,7 @@ it is not the authoritative inventory. Open PRs: 0. Branches: `main` only.
 | #42 | run `45863382305`, all required jobs pass | — |
 | #43 | run `45867909983`, all required jobs pass | — |
 | #44 | run `45869637951`, all required jobs pass | — |
-| final `main` | run `45869954361`, success on `8a45da3` | post-merge verification on the exact final commit |
+| final `main` | see bundle `MANIFEST.md` | post-merge success on the exact final commit |
 
 It is therefore **not** true that every PR head was green: PR #34 was merged
 with a red style check and was repaired by PR #35. The final `main` is green.
@@ -59,12 +61,14 @@ Branch protection on `main` was updated to match `git-policy.json`:
 
 The exported setting is `docs/branch-protection-2026-11-26.json`.
 
-**Bootstrap exception (narrow, one-time, time-bounded).** PR #45 is the change
-that installs the approval requirement. There is only one maintainer account,
-so GitHub cannot supply an independent approving review for that PR itself.
+**Bootstrap exception (narrow, one-time, time-bounded).** PR #45 installs the
+approval requirement and PR #46 reconciles final evidence.
+Only one maintainer account exists,
+so GitHub cannot supply an independent approving review for those PRs.
 `git-policy.json` records a single-maintainer exception expiring
-2026-12-31 that authorizes an administrative merge of PR #45 only, after all
-three required checks passed on its exact head. It applies to no financial,
+2026-12-31 that authorizes administrative merges of PR #45 and #46 only,
+after all three required checks passed on each exact head. It applies to no
+financial,
 recovery, data-contract or execution code, and no other PR. After that date no
 exception exists.
 
