@@ -112,6 +112,27 @@ Config TestConfig() {
   return config;
 }
 
+void TestCanonicalDateFixture() {
+  std::ifstream input("tests/fixtures/canonical_dates.csv");
+  Check(input.is_open(), "canonical date fixture opens");
+  std::string line;
+  std::getline(input, line);  // Header.
+  int checked = 0;
+  while (std::getline(input, line)) {
+    if (line.empty())
+      continue;
+    const size_t comma = line.find(',');
+    if (comma == std::string::npos)
+      continue;
+    const std::string value = line.substr(0, comma);
+    const bool expected = line.substr(comma + 1) == "true";
+    Check(IsCanonicalExchangeDate(value) == expected,
+          "canonical date fixture: " + value);
+    ++checked;
+  }
+  Check(checked == 14, "all canonical date fixture rows checked");
+}
+
 void TestMoney() {
   Check(Money::FromRupees(500.0).paise() == 50000,
         "money 500 INR -> 50000 paise");
@@ -1910,6 +1931,7 @@ void TestTerminalAccounting() {
 int main() {
   using namespace quant;
   TestMoney();
+  TestCanonicalDateFixture();
   TestMoneyAdversarial();
   TestConfigParsing();
   TestCosts();

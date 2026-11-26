@@ -17,17 +17,19 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import itertools
 import json
 import math
 import random
+import re
 import statistics
 import subprocess
 import sys
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 # Research constants (ESTIMATED). They are not trading parameters.
@@ -51,83 +53,191 @@ TRIALS = 8
 SEED = 20261125
 
 
+HISTORY_HEADER = ("date", "open", "high", "low", "close", "volume")
+STATUS_HEADER = (
+    "symbol",
+    "exchange",
+    "isin",
+    "effective_from",
+    "effective_to",
+    "eligible",
+    "published_at",
+    "revision",
+)
+ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def parse_iso_date(value: str) -> date | None:
+    """Strict Gregorian date; rejects impossible dates such as 2026-02-31."""
+    if not isinstance(value, str) or ISO_DATE.fullmatch(value) is None:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def canonical_digest(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
 def load_history_with_errors(
     directory: Path,
 ) -> tuple[dict[str, list[dict[str, float]]], int, list[str]]:
-    """Load history without silently discarding malformed source rows."""
+    """Strict CSV loader. Rejects duplicate/unknown columns and wrong widths."""
     history: dict[str, list[dict[str, float]]] = {}
-    parse_errors: list[str] = []
+    errors: list[str] = []
     if not directory.is_dir():
-        return history, 0, parse_errors
+        return history, 1, [f"{directory}: history directory absent"]
     for path in sorted(directory.glob("*.csv")):
-        rows: list[dict[str, float]] = []
         with path.open(newline="", encoding="utf-8") as handle:
-            reader = csv.DictReader(handle)
-            expected = {"date", "open", "high", "low", "close", "volume"}
-            if reader.fieldnames is None or set(reader.fieldnames) != expected:
-                parse_errors.append(f"{path.name}: invalid header")
+            rows = list(csv.reader(handle))
+        if not rows:
+            errors.append(f"{path.name}: empty file")
+            continue
+        header = rows[0]
+        if len(header) != len(set(header)):
+            errors.append(f"{path.name}: duplicate header columns")
+            continue
+        if tuple(header) != HISTORY_HEADER:
+            errors.append(f"{path.name}: header mismatch")
+            continue
+        parsed: list[dict[str, float]] = []
+        for line, raw in enumerate(rows[1:], start=2):
+            if len(raw) != len(header):
+                errors.append(f"{path.name}:{line}: row width mismatch")
                 continue
-            for line, raw in enumerate(reader, start=2):
-                try:
-                    rows.append(
-                        {
-                            "date": str(raw["date"]),
-                            "open": float(raw["open"]),
-                            "high": float(raw["high"]),
-                            "low": float(raw["low"]),
-                            "close": float(raw["close"]),
-                            "volume": float(raw["volume"]),
-                        }
-                    )
-                except (KeyError, ValueError, TypeError):
-                    parse_errors.append(f"{path.name}:{line}")
-        rows.sort(key=lambda row: row["date"])
-        if rows:
-            history[path.stem] = rows
-    return history, len(parse_errors), parse_errors
-
-
-def load_universe_status(path: Path) -> list[dict]:
-    """Versioned, dated instrument eligibility records."""
-    records: list[dict] = []
-    if not path.is_file():
-        return records
-    with path.open(newline="", encoding="utf-8") as handle:
-        for row in csv.DictReader(handle):
+            if parse_iso_date(raw[0]) is None:
+                errors.append(f"{path.name}:{line}: invalid date")
+                continue
             try:
-                records.append(
-                    {
-                        "symbol": str(row["symbol"]),
-                        "effective_from": str(row["effective_from"]),
-                        "effective_to": str(row.get("effective_to", "")),
-                        "eligible": str(row["eligible"]).lower() == "true",
-                        "revision": int(row.get("revision", 0)),
-                    }
-                )
-            except (KeyError, ValueError, TypeError):
+                numbers = [float(value) for value in raw[1:]]
+            except ValueError:
+                errors.append(f"{path.name}:{line}: non-numeric field")
                 continue
-    return records
+            if not all(math.isfinite(value) for value in numbers):
+                errors.append(f"{path.name}:{line}: non-finite field")
+                continue
+            parsed.append(
+                {
+                    "date": raw[0],
+                    "open": numbers[0],
+                    "high": numbers[1],
+                    "low": numbers[2],
+                    "close": numbers[3],
+                    "volume": numbers[4],
+                }
+            )
+        if len({row["date"] for row in parsed}) != len(parsed):
+            errors.append(f"{path.name}: duplicate session dates")
+            continue
+        if parsed:
+            parsed.sort(key=lambda row: row["date"])
+            history[path.stem] = parsed
+    return history, len(errors), errors
 
 
-def load_session_calendar(path: Path) -> list[str]:
+def load_universe_status(path: Path) -> tuple[list[dict], list[str]]:
+    """Strict point-in-time universe records with availability vintages."""
+    records: list[dict] = []
+    errors: list[str] = []
     if not path.is_file():
-        return []
-    return [
+        return records, [f"{path.name}: universe status file absent"]
+    with path.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.reader(handle))
+    if not rows:
+        return records, [f"{path.name}: empty universe status file"]
+    header = rows[0]
+    if len(header) != len(set(header)):
+        return records, [f"{path.name}: duplicate status header"]
+    if tuple(header) != STATUS_HEADER:
+        return records, [f"{path.name}: status header mismatch"]
+    seen: dict[tuple[str, str, str], dict] = {}
+    for line, raw in enumerate(rows[1:], start=2):
+        if len(raw) != len(header):
+            errors.append(f"{path.name}:{line}: status row width mismatch")
+            continue
+        values = dict(zip(header, raw, strict=True))
+        if not all(values[key] for key in ("symbol", "exchange", "isin")):
+            errors.append(f"{path.name}:{line}: missing instrument identity")
+            continue
+        if parse_iso_date(values["effective_from"]) is None:
+            errors.append(f"{path.name}:{line}: invalid effective_from")
+            continue
+        if (
+            values["effective_to"]
+            and parse_iso_date(values["effective_to"]) is None
+        ):
+            errors.append(f"{path.name}:{line}: invalid effective_to")
+            continue
+        if (
+            values["effective_to"]
+            and values["effective_to"] < values["effective_from"]
+        ):
+            errors.append(f"{path.name}:{line}: effective_to precedes from")
+            continue
+        if parse_iso_date(values["published_at"]) is None:
+            errors.append(f"{path.name}:{line}: invalid published_at")
+            continue
+        if values["eligible"] not in ("true", "false"):
+            errors.append(f"{path.name}:{line}: invalid eligible token")
+            continue
+        try:
+            revision = int(values["revision"])
+        except ValueError:
+            errors.append(f"{path.name}:{line}: invalid revision")
+            continue
+        record = {
+            "symbol": values["symbol"],
+            "exchange": values["exchange"],
+            "isin": values["isin"],
+            "effective_from": values["effective_from"],
+            "effective_to": values["effective_to"],
+            "eligible": values["eligible"] == "true",
+            "published_at": values["published_at"],
+            "revision": revision,
+        }
+        key = (record["symbol"], record["effective_from"], str(revision))
+        if key in seen and canonical_digest(seen[key]) != canonical_digest(
+            record
+        ):
+            errors.append(f"{path.name}:{line}: conflicting duplicate status")
+            continue
+        seen[key] = record
+        records.append(record)
+    return records, errors
+
+
+def load_session_calendar(path: Path) -> tuple[list[str], list[str]]:
+    """Strict, unique exchange session dates."""
+    if not path.is_file():
+        return [], [f"{path.name}: session calendar absent"]
+    values = [
         line.strip()
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+    errors = [
+        f"{path.name}: invalid session date {value}"
+        for value in values
+        if parse_iso_date(value) is None
+    ]
+    if len(set(values)) != len(values):
+        errors.append(f"{path.name}: duplicate session dates")
+    return (sorted(set(values)) if not errors else []), errors
 
 
 def load_history(directory: Path) -> dict[str, list[dict[str, float]]]:
-    """Load cached daily candles written by data sync."""
+    """Load history using the strict contract."""
     history, _errors, _detail = load_history_with_errors(directory)
     return history
 
 
 @dataclass
 class ValidatedDataset:
-    """One authoritative research dataset contract."""
+    """One authoritative, fully described research dataset contract."""
 
     history: dict[str, list[dict[str, float]]]
     quality: dict[str, dict]
@@ -137,9 +247,21 @@ class ValidatedDataset:
     vintage: str
     invalid_rows: int
     corporate_actions: str = "NOT INCORPORATED"
-    pit_enforced: bool = False
+    pit_enforced: bool = True
     parse_errors: int = 0
-    calendar_basis: str = "OBSERVED_ONLY"
+    calendar_basis: str = "EXCHANGE_CALENDAR"
+    status_errors: list[str] = None
+    coverage_gaps: list[str] = None
+    dataset_digest: str = ""
+    universe_digest: str = ""
+    calendar_digest: str = ""
+    code_version: str = ""
+
+    def __post_init__(self) -> None:
+        if self.status_errors is None:
+            self.status_errors = []
+        if self.coverage_gaps is None:
+            self.coverage_gaps = []
 
 
 def load_history_validated(
@@ -147,16 +269,15 @@ def load_history_validated(
     instrument_status: list[dict] | None = None,
     vintage: str = "UNSPECIFIED",
     session_calendar: list[str] | None = None,
+    status_errors: list[str] | None = None,
+    calendar_errors: list[str] | None = None,
+    diagnostic: bool = False,
 ) -> ValidatedDataset:
-    """Load history with mandatory quality and point-in-time eligibility."""
+    """Fail-closed dataset contract with mandatory PIT and calendar gates."""
     raw_history, parse_errors, _detail = load_history_with_errors(directory)
-    expected = (
-        sorted(session_calendar)
-        if session_calendar
-        else sorted(
-            {row["date"] for rows in raw_history.values() for row in rows}
-        )
-    )
+    status_errors = list(status_errors or []) + list(calendar_errors or [])
+    calendar_errors = list(calendar_errors or [])
+    expected = sorted(session_calendar or [])
     calendar_basis = (
         "EXCHANGE_CALENDAR" if session_calendar else "OBSERVED_ONLY"
     )
@@ -164,16 +285,33 @@ def load_history_validated(
     for symbol, rows in raw_history.items():
         quality[symbol] = dataset_quality(rows, expected)
     eligible_dates: dict[str, list[str]] = {}
-    pit_enforced = bool(instrument_status)
-    if pit_enforced:
-        for date in expected:
-            eligible_dates[date] = point_in_time_universe(
-                instrument_status, date
-            )
+    coverage_gaps: list[str] = []
+    for session_date in expected:
+        eligible_dates[session_date] = point_in_time_universe(
+            instrument_status or [], session_date
+        )
+        for symbol in raw_history:
+            if symbol.startswith("NIFTY") or symbol == "INDIA VIX":
+                continue
+            if symbol not in eligible_dates[session_date]:
+                coverage_gaps.append(
+                    f"{symbol}@{session_date}: no applicable status"
+                )
     statuses = {item["status"] for item in quality.values()}
-    if not quality or parse_errors or "BLOCKED" in statuses:
+    fatal = not diagnostic and (
+        not instrument_status
+        or not session_calendar
+        or status_errors
+        or calendar_errors
+        or parse_errors
+        or not quality
+        or "BLOCKED" in statuses
+    )
+    if diagnostic:
+        status = "OBSERVED_ONLY"
+    elif fatal:
         status = "BLOCKED"
-    elif "PARTIAL" in statuses:
+    elif coverage_gaps or "PARTIAL" in statuses:
         status = "PARTIAL"
     else:
         status = "COMPLETE"
@@ -184,9 +322,18 @@ def load_history_validated(
     acceptable = {
         symbol: rows
         for symbol, rows in raw_history.items()
-        if quality[symbol]["status"] != "BLOCKED"
-        and symbol not in ("NIFTY 50", "INDIA VIX")
+        if symbol not in ("NIFTY 50", "INDIA VIX")
     }
+    try:
+        code_version = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parent.parent,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        code_version = "UNKNOWN"
     return ValidatedDataset(
         history=acceptable,
         quality=quality,
@@ -195,9 +342,15 @@ def load_history_validated(
         source=str(directory),
         vintage=vintage,
         invalid_rows=invalid_rows,
-        pit_enforced=pit_enforced,
+        pit_enforced=not diagnostic and bool(instrument_status),
         parse_errors=parse_errors,
         calendar_basis=calendar_basis,
+        status_errors=status_errors,
+        coverage_gaps=coverage_gaps,
+        dataset_digest=canonical_digest({s: r for s, r in acceptable.items()}),
+        universe_digest=canonical_digest(instrument_status or []),
+        calendar_digest=canonical_digest(expected),
+        code_version=code_version,
     )
 
 
@@ -392,14 +545,16 @@ def walk_forward_ic(
         test_dates = ordered[start + PURGE_SESSIONS : start + TEST_WINDOW]
         xs: list[float] = []
         ys: list[float] = []
-        for date in test_dates:
+        for session_date in test_dates:
             scores: list[float] = []
             returns: list[float] = []
             for symbol, rows in history.items():
                 if symbol == "NIFTY 50" or symbol == "INDIA VIX":
                     continue
                 positions = [
-                    i for i, row in enumerate(rows) if row["date"] == date
+                    i
+                    for i, row in enumerate(rows)
+                    if row["date"] == session_date
                 ]
                 if not positions:
                     continue
@@ -449,7 +604,7 @@ def dataset_quality(
     valid_dates: set[str] = set()
     for row in rows:
         date = str(row.get("date", ""))
-        if not date:
+        if parse_iso_date(date) is None:
             invalid += 1
             continue
         if date in seen:
@@ -509,6 +664,9 @@ def point_in_time_universe(
     for record in instrument_status:
         effective_from = str(record.get("effective_from", ""))
         effective_to = str(record.get("effective_to", ""))
+        published_at = str(record.get("published_at", effective_from))
+        if published_at > as_of:
+            continue  # A later publication cannot alter an earlier decision.
         if effective_from and effective_from > as_of:
             continue
         if effective_to and effective_to < as_of:
@@ -577,8 +735,8 @@ def cross_sectional_spread_returns(
             if math.isfinite(score):
                 by_date.setdefault(row["date"], []).append((score, label))
     spreads: list[float] = []
-    for date in sorted(by_date):
-        values = by_date[date]
+    for session_date in sorted(by_date):
+        values = by_date[session_date]
         if len(values) < 6:
             continue
         values.sort(key=lambda item: item[0])
@@ -619,10 +777,10 @@ def daily_cross_sectional_ic(
     daily: list[float] = []
     daily_dates: list[str] = []
     coverage: list[int] = []
-    for date in sorted(by_date):
+    for session_date in sorted(by_date):
         scores: list[float] = []
         labels: list[float] = []
-        for symbol, (index, _row) in by_date[date].items():
+        for symbol, (index, _row) in by_date[session_date].items():
             rows = history[symbol]
             label = forward_label(rows, index, horizon)
             if label is None:
@@ -638,7 +796,7 @@ def daily_cross_sectional_ic(
         if value is None:
             continue
         daily.append(value)
-        daily_dates.append(date)
+        daily_dates.append(session_date)
         coverage.append(len(scores))
     if not daily:
         return {
@@ -950,13 +1108,19 @@ def analyze(
     root: Path,
     dataset: ValidatedDataset | None = None,
 ) -> dict:
-    if dataset is not None and dataset.status in ("BLOCKED", "PARTIAL"):
+    if dataset is not None and dataset.status in (
+        "BLOCKED",
+        "PARTIAL",
+        "OBSERVED_ONLY",
+    ):
         return {
             "labels": {"statistics": dataset.status},
             "input_series": 0,
             "observations_per_series": 0,
             "multiple_testing": {},
             "best_strategy": "none",
+            "status_errors": list(dataset.status_errors),
+            "coverage_gaps": list(dataset.coverage_gaps),
             "conclusion": (
                 f"{dataset.status}: research input failed its data contract"
             ),
@@ -965,6 +1129,11 @@ def analyze(
                 "source": dataset.source,
                 "vintage": dataset.vintage,
                 "invalid_rows": dataset.invalid_rows,
+                "status_errors": list(dataset.status_errors),
+                "coverage_gaps": list(dataset.coverage_gaps),
+                "session_eligibility": (
+                    "ENFORCED" if dataset.pit_enforced else "NOT ENFORCED"
+                ),
             },
             "walk_forward": {},
             "baselines": {},
@@ -1007,6 +1176,17 @@ def analyze(
                 if dataset is None or not dataset.pit_enforced
                 else "ENFORCED"
             ),
+            "status_errors": [] if dataset is None else dataset.status_errors,
+            "coverage_gaps": [] if dataset is None else dataset.coverage_gaps,
+            "calendar_basis": (
+                "NONE" if dataset is None else dataset.calendar_basis
+            ),
+            "digests": {
+                "dataset": "" if dataset is None else dataset.dataset_digest,
+                "universe": "" if dataset is None else dataset.universe_digest,
+                "calendar": "" if dataset is None else dataset.calendar_digest,
+                "code": "" if dataset is None else dataset.code_version,
+            },
         },
         "observations_per_series": min(
             (len(rows) for rows in usable.values()), default=0
@@ -1194,6 +1374,11 @@ def main() -> int:
     parser.add_argument("--out", default=str(root / "data" / "reports"))
     parser.add_argument("--universe-status", default="")
     parser.add_argument("--sessions", default="")
+    parser.add_argument(
+        "--diagnostic-observed-only",
+        action="store_true",
+        help="explicitly labelled diagnostic; never a COMPLETE result",
+    )
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument(
         "--kdbx-check",
@@ -1208,16 +1393,24 @@ def main() -> int:
         print(json.dumps(summary, indent=2))
         values = [item.get("status") for item in summary.values()]
         return 0 if values.count("VERIFIED") == len(values) else 2
-    universe_status = (
+    status_records, status_errors = (
         load_universe_status(Path(args.universe_status))
         if args.universe_status
-        else None
+        else ([], ["universe status not supplied"])
     )
-    sessions = (
-        load_session_calendar(Path(args.sessions)) if args.sessions else None
+    sessions, calendar_errors = (
+        load_session_calendar(Path(args.sessions))
+        if args.sessions
+        else ([], ["exchange calendar not supplied"])
     )
     dataset = load_history_validated(
-        Path(args.data), universe_status, "CACHED", sessions
+        Path(args.data),
+        status_records,
+        "CACHED",
+        sessions,
+        status_errors,
+        calendar_errors,
+        args.diagnostic_observed_only,
     )
     report = analyze(dataset.history, root, dataset)
     out = Path(args.out)
@@ -1230,7 +1423,7 @@ def main() -> int:
     print(f"Saved: {out / 'research.json'}")
     if dataset.status == "BLOCKED":
         return 2
-    if dataset.status == "PARTIAL":
+    if dataset.status in ("PARTIAL", "OBSERVED_ONLY"):
         return 3
     return 0
 

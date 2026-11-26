@@ -1031,6 +1031,11 @@ bool ValidCanonicalBar(const Candle& candle, const std::string& symbol) {
 }
 
 }  // namespace
+
+bool IsCanonicalExchangeDate(std::string_view text) {
+  return ValidExchangeDate(text);
+}
+
 // ---------------------------------------------------------------------------
 const char* PipelineStatusName(PipelineStatus status) {
   switch (status) {
