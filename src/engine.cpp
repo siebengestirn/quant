@@ -2926,7 +2926,8 @@ bool EventRuntime::ProcessOne(std::string* error) {
     return false;
   }
   offsets_[event.partition_key] = std::max(
-      offset == offsets_.end() ? 0ULL : offset->second, event.replay_offset);
+      offset == offsets_.end() ? static_cast<uint64_t>(0) : offset->second,
+      event.replay_offset);
   result_.processed += 1;
   return true;
 }
