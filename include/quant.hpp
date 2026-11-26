@@ -326,6 +326,38 @@ Mode ParseMode(std::string_view text);
 // ---------------------------------------------------------------------------
 // Canonical domain models.
 // ---------------------------------------------------------------------------
+enum class AssetClass {
+  kCashEquity,
+  kEtf,
+  kDerivative,
+  kFx,
+  kRates,
+  kCommodity,
+};
+
+struct InstrumentSpec {
+  AssetClass asset_class = AssetClass::kCashEquity;
+  std::string exchange;
+  std::string calendar_id;
+  std::string fee_schedule_id;
+  double tick_size = 0.0;
+  int lot_size = 0;
+  bool venue_supported = false;
+};
+bool ValidateInstrumentSpec(const InstrumentSpec& spec, std::string* error);
+
+enum class ExecutionProfile { kDaily, kIntraday, kHft };
+bool ExecutionProfileSupported(ExecutionProfile profile);
+
+struct ComplianceGateState {
+  bool written_broker_approval = false;
+  bool compliance_signoff = false;
+  bool operational_risk_signoff = false;
+  bool sandbox_certified = false;
+  std::string approval_ref;
+};
+bool LiveRouteAuthorized(const ComplianceGateState& gate, std::string* error);
+
 enum class InstrumentClass {
   kUnknown,
   kEquity,

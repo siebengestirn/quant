@@ -179,6 +179,12 @@ OrderResult ZerodhaGateway::Submit(const OrderRequest& request) const {
       "and exchange compliance (broker-server hosting, static IP eligibility, "
       "algo tagging, rate limits).";
   (void)request;
+  ComplianceGateState gate;
+  std::string gate_error;
+  if (LiveRouteAuthorized(gate, &gate_error)) {
+    result.status = "LOCKED";
+    result.message = "LIVE EXECUTION LOCKED: " + gate_error;
+  }
   if (journal_ != nullptr) {
     Json::Object payload;
     payload["event"] = Json::String("LIVE_ORDER_BLOCKED");
