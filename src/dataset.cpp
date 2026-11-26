@@ -1,6 +1,7 @@
 #include "quant.hpp"
 
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -226,6 +227,79 @@ bool WriteFile(const std::string& path,
     return false;
   }
   return true;
+}
+int OpenDatasetObject(int root_fd, const char* name, std::string* error) {
+  int fd =
+      openat(root_fd, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+  if (fd < 0) {
+    if (error)
+      *error = std::string("snapshot object rejected: ") + name;
+    return -1;
+  }
+  struct stat metadata{};
+  if (fstat(fd, &metadata) != 0 || !S_ISREG(metadata.st_mode)) {
+    close(fd);
+    if (error)
+      *error = std::string("snapshot object is not a regular file: ") + name;
+    return -1;
+  }
+  return fd;
+}
+
+std::string ReadFdAll(int fd, std::string* error) {
+  std::string out;
+  char buffer[16384];
+  while (true) {
+    const ssize_t count = read(fd, buffer, sizeof(buffer));
+    if (count < 0 && errno == EINTR)
+      continue;
+    if (count < 0) {
+      if (error)
+        *error = "snapshot object read failed";
+      return "";
+    }
+    if (count == 0)
+      return out;
+    out.append(buffer, static_cast<size_t>(count));
+  }
+}
+
+bool WriteDatasetObject(int root_fd,
+                        const char* name,
+                        const std::string& content,
+                        std::string* error) {
+  int fd = openat(root_fd,
+                  name,
+                  O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC,
+                  0600);
+  if (fd < 0) {
+    if (error)
+      *error = std::string("cannot write snapshot object: ") + name;
+    return false;
+  }
+  size_t written = 0;
+  while (written < content.size()) {
+    const ssize_t count =
+        write(fd, content.data() + written, content.size() - written);
+    if (count < 0 && errno == EINTR)
+      continue;
+    if (count <= 0) {
+      close(fd);
+      if (error)
+        *error = "snapshot object write failed";
+      return false;
+    }
+    written += static_cast<size_t>(count);
+  }
+  const bool ok = fsync(fd) == 0;
+  close(fd);
+  if (!ok && error)
+    *error = "snapshot object fsync failed";
+  return ok;
+}
+
+bool ValidRawDigest(std::string_view value) {
+  return value.empty() || LowerHex(value);
 }
 
 Json::Object ExpectationsJson(const DatasetExpectations& expected) {
@@ -557,9 +631,19 @@ bool WriteDatasetContract(const std::string& history_dir,
       *error = "cannot create dataset directory";
     return false;
   }
-  return WriteFile(history_dir + "/" + kContractFile,
-                   Json::ObjectValue(ExpectationsJson(sorted)).Dump() + "\n",
-                   error);
+  int root_fd = open(history_dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (root_fd < 0) {
+    if (error)
+      *error = "cannot pin dataset directory";
+    return false;
+  }
+  const bool ok = WriteDatasetObject(
+      root_fd,
+      kContractFile,
+      Json::ObjectValue(ExpectationsJson(sorted)).Dump() + "\n",
+      error);
+  close(root_fd);
+  return ok;
 }
 
 bool WriteDatasetManifest(const std::string& history_dir,
@@ -604,10 +688,24 @@ bool WriteDatasetManifest(const std::string& history_dir,
   manifest["schema_version"] = Json::UInteger(kSchemaVersion);
   manifest["digest_algorithm"] = Json::String("sha256");
   manifest["contract_digest"] = Json::String(DatasetContractDigest(expected));
+  int root_fd = open(history_dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (root_fd < 0) {
+    if (error)
+      *error = "cannot pin dataset directory";
+    return false;
+  }
   std::string contract_error;
-  const std::string contract_bytes =
-      ReadFile(history_dir + "/" + kContractFile, &contract_error);
+  int contract_fd = OpenDatasetObject(root_fd, kContractFile, &contract_error);
+  if (contract_fd < 0) {
+    close(root_fd);
+    if (error)
+      *error = contract_error;
+    return false;
+  }
+  const std::string contract_bytes = ReadFdAll(contract_fd, &contract_error);
+  close(contract_fd);
   if (!contract_error.empty()) {
+    close(root_fd);
     if (error)
       *error = contract_error;
     return false;
@@ -615,9 +713,10 @@ bool WriteDatasetManifest(const std::string& history_dir,
   manifest["contract_sha256"] = Json::String(Sha256Hex(contract_bytes));
   manifest["expectations"] = Json::ObjectValue(ExpectationsJson(expected));
   manifest["files"] = Json::ObjectValue(files);
-  return WriteFile(history_dir + "/" + kManifestFile,
-                   Json::ObjectValue(manifest).Dump() + "\n",
-                   error);
+  const bool ok = WriteDatasetObject(
+      root_fd, kManifestFile, Json::ObjectValue(manifest).Dump() + "\n", error);
+  close(root_fd);
+  return ok;
 }
 
 DatasetVerification VerifyDataset(const std::string& history_dir,
@@ -644,10 +743,31 @@ DatasetVerification VerifyDataset(const std::string& history_dir,
       *error = reason;
     return result;
   };
-  DatasetExpectations contract;
+  int root_fd = open(history_dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (root_fd < 0)
+    return block("cannot pin snapshot directory");
   std::string parse_error;
-  if (!ReadDatasetExpectations(history_dir, &contract, &parse_error))
+  int contract_fd = OpenDatasetObject(root_fd, kContractFile, &parse_error);
+  if (contract_fd < 0) {
+    close(root_fd);
     return block("snapshot contract invalid: " + parse_error);
+  }
+  const std::string contract_bytes = ReadFdAll(contract_fd, &parse_error);
+  close(contract_fd);
+  if (!parse_error.empty()) {
+    close(root_fd);
+    return block("snapshot contract unreadable: " + parse_error);
+  }
+  Json contract_json;
+  if (!Json::Parse(contract_bytes, &contract_json, &parse_error)) {
+    close(root_fd);
+    return block("snapshot contract invalid: " + parse_error);
+  }
+  DatasetExpectations contract;
+  if (!ParseExpectations(contract_json, &contract, &parse_error)) {
+    close(root_fd);
+    return block("snapshot contract invalid: " + parse_error);
+  }
   if (contract.snapshot_id != expected->snapshot_id ||
       contract.calendar_id != expected->calendar_id ||
       contract.generated_at_ms != expected->generated_at_ms ||
@@ -657,18 +777,27 @@ DatasetVerification VerifyDataset(const std::string& history_dir,
       contract.first_date != expected->first_date ||
       contract.last_date != expected->last_date ||
       contract.min_rows != expected->min_rows ||
-      contract.instrument_ids != expected->instrument_ids)
+      contract.instrument_ids != expected->instrument_ids ||
+      contract.storage_keys != expected->storage_keys) {
+    close(root_fd);
     return block("snapshot contract differs from authoritative expectations");
-  const std::string manifest_path = history_dir + "/" + kManifestFile;
-  std::ifstream manifest_input(manifest_path);
-  if (!manifest_input.is_open())
-    return block("dataset manifest missing");
-  const std::string manifest_content(
-      (std::istreambuf_iterator<char>(manifest_input)),
-      std::istreambuf_iterator<char>());
+  }
+  int manifest_fd = OpenDatasetObject(root_fd, kManifestFile, &parse_error);
+  if (manifest_fd < 0) {
+    close(root_fd);
+    return block("dataset manifest rejected: " + parse_error);
+  }
+  const std::string manifest_content = ReadFdAll(manifest_fd, &parse_error);
+  close(manifest_fd);
+  if (!parse_error.empty()) {
+    close(root_fd);
+    return block("dataset manifest unreadable: " + parse_error);
+  }
   Json manifest;
-  if (!Json::Parse(manifest_content, &manifest, &parse_error))
+  if (!Json::Parse(manifest_content, &manifest, &parse_error)) {
+    close(root_fd);
     return block("dataset manifest invalid: " + parse_error);
+  }
   static const std::set<std::string> manifest_fields = {"schema_version",
                                                         "digest_algorithm",
                                                         "contract_digest",
@@ -677,26 +806,36 @@ DatasetVerification VerifyDataset(const std::string& history_dir,
                                                         "files"};
   for (const auto& [key, ignored] : manifest.object()) {
     (void)ignored;
-    if (manifest_fields.find(key) == manifest_fields.end())
+    if (manifest_fields.find(key) == manifest_fields.end()) {
+      close(root_fd);
       return block("unknown manifest field: " + key);
+    }
   }
   const Json* schema = manifest.Find("schema_version");
   const Json* algorithm = manifest.Find("digest_algorithm");
   if (schema == nullptr || !schema->is_exact_integer() ||
-      schema->as_int(0) != kSchemaVersion)
+      schema->as_int(0) != kSchemaVersion) {
+    close(root_fd);
     return block("unsupported dataset schema");
-  if (algorithm == nullptr || algorithm->as_string() != "sha256")
+  }
+  if (algorithm == nullptr || algorithm->as_string() != "sha256") {
+    close(root_fd);
     return block("unsupported dataset digest algorithm");
+  }
   const Json* digest = manifest.Find("contract_digest");
   const Json* contract_hash = manifest.Find("contract_sha256");
   if (digest == nullptr || contract_hash == nullptr ||
-      !LowerHex(digest->as_string()) || !LowerHex(contract_hash->as_string()))
+      !LowerHex(digest->as_string()) || !LowerHex(contract_hash->as_string())) {
+    close(root_fd);
     return block("malformed dataset digests");
+  }
   DatasetExpectations manifest_expectations;
   const Json* expectations = manifest.Find("expectations");
   if (expectations == nullptr ||
-      !ParseExpectations(*expectations, &manifest_expectations, &parse_error))
+      !ParseExpectations(*expectations, &manifest_expectations, &parse_error)) {
+    close(root_fd);
     return block("manifest expectations invalid: " + parse_error);
+  }
   const std::string canonical = CanonicalDatasetExpectations(contract);
   if (manifest_expectations.snapshot_id != contract.snapshot_id ||
       manifest_expectations.calendar_id != contract.calendar_id ||
@@ -708,20 +847,27 @@ DatasetVerification VerifyDataset(const std::string& history_dir,
       manifest_expectations.last_date != contract.last_date ||
       manifest_expectations.min_rows != contract.min_rows ||
       manifest_expectations.instrument_ids != contract.instrument_ids ||
-      manifest_expectations.storage_keys != contract.storage_keys)
+      manifest_expectations.storage_keys != contract.storage_keys) {
+    close(root_fd);
     return block("manifest expectations differ from snapshot contract");
-  if (digest->as_string() != Sha256Hex(canonical))
+  }
+  if (digest->as_string() != Sha256Hex(canonical)) {
+    close(root_fd);
     return block("contract digest mismatch");
-  const std::string contract_bytes =
-      ReadFile(history_dir + "/" + kContractFile, &parse_error);
-  if (!parse_error.empty() ||
-      contract_hash->as_string() != Sha256Hex(contract_bytes))
+  }
+  if (contract_hash->as_string() != Sha256Hex(contract_bytes)) {
+    close(root_fd);
     return block("contract byte digest mismatch");
+  }
   const Json* files = manifest.Find("files");
-  if (files == nullptr || files->type() != Json::Type::kObject)
+  if (files == nullptr || files->type() != Json::Type::kObject) {
+    close(root_fd);
     return block("manifest files must be an object");
-  if (files->object().size() != contract.symbols.size())
+  }
+  if (files->object().size() != contract.symbols.size()) {
+    close(root_fd);
     return block("manifest files differ from expected instruments");
+  }
   for (const std::string& symbol : contract.symbols) {
     const auto file = files->object().find(symbol);
     if (file == files->object().end()) {
@@ -757,36 +903,31 @@ DatasetVerification VerifyDataset(const std::string& history_dir,
         first == nullptr || last == nullptr || instrument == nullptr ||
         storage == nullptr || raw == nullptr ||
         !LowerHex(file_digest->as_string()) || !rows->is_exact_integer() ||
-        rows->as_int(0) <= 0 || raw->as_string().size() > 64) {
+        rows->as_int(0) <= 0 || !ValidRawDigest(raw->as_string())) {
       result.errors.push_back("malformed file identity: " + symbol);
       continue;
     }
-    for (char c : raw->as_string())
-      if (!std::isxdigit(static_cast<unsigned char>(c))) {
-        result.errors.push_back("malformed raw digest: " + symbol);
-        well_formed = false;
-        break;
-      }
-    if (!well_formed)
-      continue;
-    const std::string path =
-        history_dir + "/" + contract.storage_keys.at(symbol) + ".csv";
-    std::ifstream input(path, std::ios::binary);
-    if (!input.is_open()) {
-      result.errors.push_back("dataset file missing: " + symbol);
+    const std::string object_name = contract.storage_keys.at(symbol) + ".csv";
+    int csv_fd = OpenDatasetObject(root_fd, object_name.c_str(), &parse_error);
+    if (csv_fd < 0) {
+      result.errors.push_back("dataset file rejected: " + symbol + ": " +
+                              parse_error);
       continue;
     }
-    const std::string bytes((std::istreambuf_iterator<char>(input)),
-                            std::istreambuf_iterator<char>());
+    const std::string bytes = ReadFdAll(csv_fd, &parse_error);
+    close(csv_fd);
+    if (!parse_error.empty()) {
+      result.errors.push_back("dataset file unreadable: " + symbol);
+      continue;
+    }
     const std::string actual = Sha256Hex(bytes);
     if (actual != file_digest->as_string()) {
       result.errors.push_back("dataset digest mismatch: " + symbol);
       continue;
     }
     std::vector<Candle> candles;
-    std::string csv_error;
-    if (!ReadCsvCandles(path, &candles, &csv_error)) {
-      result.errors.push_back(csv_error);
+    if (!ReadCsvText(bytes, &candles, &parse_error)) {
+      result.errors.push_back(parse_error + ": " + symbol);
       continue;
     }
     std::vector<std::string> sessions;
@@ -809,7 +950,9 @@ DatasetVerification VerifyDataset(const std::string& history_dir,
       continue;
     }
     result.file_digests[symbol] = actual;
+    result.candles[symbol] = candles;
   }
+  close(root_fd);
   if (result.file_digests.empty())
     result.status = DatasetStatus::kFailed;
   else if (result.errors.empty())

@@ -198,3 +198,58 @@ def test_path_grammar_property(tmp_path: Path):
         key = module.storage_key("INSTRUMENT-" + symbol)
         assert re.fullmatch(r"s[0-9a-f]{31}", key)
         assert "/" not in key and ".." not in key and " " not in key
+
+
+def test_symlinked_snapshot_objects_are_rejected():
+    """No object outside the snapshot can contribute bytes to COMPLETE."""
+    directory, manifest = _fixture("symlink-objects", _module("symlink_mod"))
+    module = _module("symlink_verifier")
+    outside = FIXTURES / "symlink-external.csv"
+    outside.write_text(CSV)
+    key = module.storage_key("ID-AAA")
+    target = directory / f"{key}.csv"
+    target.unlink()
+    target.symlink_to(outside)
+    assert module.verify_dataset(directory).status != "COMPLETE"
+    cpp = subprocess.run(
+        [str(CONTRACT_TOOL), "verify", str(directory)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert json.loads(cpp.stdout)["status"] != "COMPLETE"
+    target.unlink()
+
+
+def test_symlinked_contract_and_manifest_are_rejected():
+    """Contract and manifest symlinks follow the same no-follow rule."""
+    directory, _ = _fixture("symlink-metadata", _module("symlink_meta"))
+    module = _module("symlink_meta_verify")
+    for name in ("contract.json", "manifest.json"):
+        original = directory / name
+        outside = FIXTURES / f"external-{name}"
+        outside.write_bytes(original.read_bytes())
+        original.unlink()
+        original.symlink_to(outside)
+        assert module.verify_dataset(directory).status == "BLOCKED"
+        original.unlink()
+        original.write_bytes(outside.read_bytes())
+
+
+def test_raw_digest_grammar_is_exact():
+    """raw_digest is empty or one full lowercase SHA-256 digest."""
+    import importlib.util
+    import sys
+
+    spec = importlib.util.spec_from_file_location(
+        "raw_grammar", ROOT / "python" / "dataset_contract.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["raw_grammar"] = module
+    spec.loader.exec_module(module)
+    assert module.valid_raw_digest("")
+    assert module.valid_raw_digest("a" * 64)
+    for bad in ("a", "a" * 63, "a" * 65, "A" * 64, "g" * 64, None, 1):
+        assert not module.valid_raw_digest(bad)

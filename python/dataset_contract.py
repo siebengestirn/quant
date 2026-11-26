@@ -17,7 +17,9 @@ import csv
 import hashlib
 import json
 import math
+import os
 import re
+import stat
 import sys
 from dataclasses import dataclass, field
 from datetime import date
@@ -154,6 +156,54 @@ def contract_digest(expectations: dict) -> str:
     return sha256_hex(canonical_expectations(expectations).encode("utf-8"))
 
 
+OBJECT_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+OBJECT_WRITE_FLAGS = (
+    os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC
+)
+
+
+def open_snapshot_root(directory: Path) -> int:
+    """Pin the dataset directory with a descriptor for relative access."""
+    return os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+
+
+def read_object(root_fd: int, name: str) -> bytes:
+    """Read one snapshot object without following links or reopening it."""
+    fd = os.open(name, OBJECT_READ_FLAGS, dir_fd=root_fd)
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"{name}: snapshot object is not a regular file")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, 16384)
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+
+
+def write_object(root_fd: int, name: str, content: bytes) -> None:
+    """Write one snapshot object without following links."""
+    fd = os.open(name, OBJECT_WRITE_FLAGS, 0o600, dir_fd=root_fd)
+    try:
+        view = memoryview(content)
+        while view:
+            written = os.write(fd, view)
+            view = view[written:]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def valid_raw_digest(value: object) -> bool:
+    """Accept only the empty marker or a full lowercase SHA-256 digest."""
+    return isinstance(value, str) and (
+        value == "" or re.fullmatch(r"[0-9a-f]{64}", value) is not None
+    )
+
+
 def _validate_identity(expectations: dict) -> list[str]:
     """Validate snapshot identity, provenance and ingestion metadata."""
     errors: list[str] = []
@@ -249,18 +299,25 @@ def validate_expectations(expectations: object) -> list[str]:
 
 def read_expectations(directory: Path) -> tuple[dict | None, list[str]]:
     """Read and validate the frozen contract from a dataset directory."""
-    path = directory / CONTRACT_FILE
-    if not path.is_file():
-        return None, ["contract.json: snapshot contract absent"]
     try:
-        expectations = strict_json_loads(path.read_text(encoding="utf-8"))
-    except (
-        OSError,
-        UnicodeDecodeError,
-        json.JSONDecodeError,
-        ValueError,
-    ) as exc:
-        return None, [f"contract.json: invalid JSON: {exc}"]
+        root_fd = open_snapshot_root(directory)
+    except OSError as exc:
+        return None, [f"snapshot directory unavailable: {exc}"]
+    try:
+        try:
+            raw = read_object(root_fd, CONTRACT_FILE)
+        except (OSError, ValueError) as exc:
+            return None, [f"contract.json: {exc}"]
+        try:
+            expectations = strict_json_loads(raw.decode("utf-8"))
+        except (
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            ValueError,
+        ) as exc:
+            return None, [f"contract.json: invalid JSON: {exc}"]
+    finally:
+        os.close(root_fd)
     errors = validate_expectations(expectations)
     first = (
         expectations.get("first_date")
@@ -292,39 +349,44 @@ def write_contract(directory: Path, expectations: dict) -> list[str]:
         return errors
     directory.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(expectations, indent=2, sort_keys=True) + "\n"
-    (directory / CONTRACT_FILE).write_text(payload, encoding="utf-8")
+    root_fd = open_snapshot_root(directory)
+    try:
+        write_object(root_fd, CONTRACT_FILE, payload.encode("utf-8"))
+    finally:
+        os.close(root_fd)
     return []
 
 
-def _read_csv(path: Path) -> tuple[list[dict], list[str]]:
-    """Parse one canonical OHLCV CSV with strict row and calendar checks."""
+def _read_csv_content(
+    content: bytes, name: str
+) -> tuple[list[dict], list[str]]:
+    """Parse exact CSV bytes already read from a pinned snapshot object."""
     try:
-        with path.open("r", encoding="utf-8", newline="") as handle:
-            rows = list(csv.reader(handle))
-    except (OSError, UnicodeDecodeError, csv.Error) as exc:
-        return [], [f"{path.name}: unreadable CSV: {exc}"]
+        rows = list(csv.reader(content.decode("utf-8").splitlines()))
+    except (UnicodeDecodeError, csv.Error) as exc:
+        return [], [f"{name}: unreadable CSV: {exc}"]
     if not rows or tuple(rows[0]) != HEADER:
-        return [], [f"{path.name}: invalid canonical header"]
+        return [], [f"{name}: invalid canonical header"]
     errors: list[str] = []
     candles: list[dict] = []
     seen: set[str] = set()
     for number, fields in enumerate(rows[1:], start=2):
         if len(fields) != len(HEADER):
-            errors.append(f"{path.name}:{number}: row width mismatch")
+            errors.append(f"{name}:{number}: row width mismatch")
             continue
         session = fields[0]
         if not is_canonical_date(session) or session in seen:
-            errors.append(f"{path.name}:{number}: invalid or duplicate date")
+            errors.append(f"{name}:{number}: invalid or duplicate date")
             continue
         seen.add(session)
         try:
             values = [float(value) for value in fields[1:]]
         except ValueError:
-            errors.append(f"{path.name}:{number}: non-numeric value")
+            errors.append(f"{name}:{number}: non-numeric value")
             continue
         opening, high, low, close, volume = values
         if not all(math.isfinite(value) for value in values):
-            errors.append(f"{path.name}:{number}: non-finite value")
+            errors.append(f"{name}:{number}: non-finite value")
         elif (
             low <= 0
             or close <= 0
@@ -332,7 +394,7 @@ def _read_csv(path: Path) -> tuple[list[dict], list[str]]:
             or max(opening, close) > high
             or volume < 0
         ):
-            errors.append(f"{path.name}:{number}: invalid OHLCV relationship")
+            errors.append(f"{name}:{number}: invalid OHLCV relationship")
         candles.append(
             {
                 "date": session,
@@ -347,6 +409,11 @@ def _read_csv(path: Path) -> tuple[list[dict], list[str]]:
     return candles, errors
 
 
+def _read_csv(path: Path) -> tuple[list[dict], list[str]]:
+    """Parse a CSV file outside the pinned snapshot boundary."""
+    return _read_csv_content(path.read_bytes(), path.name)
+
+
 def write_manifest(
     directory: Path,
     expectations: dict,
@@ -358,13 +425,15 @@ def write_manifest(
         return errors
     raw = raw_digests or {}
     files: dict[str, dict] = {}
+    root_fd = open_snapshot_root(directory)
     for symbol in expectations["symbols"]:
-        path = directory / f"{expectations['storage_keys'][symbol]}.csv"
-        if not path.is_file():
-            errors.append(f"{symbol}: missing series")
+        name = f"{expectations['storage_keys'][symbol]}.csv"
+        try:
+            content = read_object(root_fd, name)
+        except (OSError, ValueError) as exc:
+            errors.append(f"{symbol}: {exc}")
             continue
-        content = path.read_bytes()
-        candles, parse_errors = _read_csv(path)
+        candles, parse_errors = _read_csv_content(content, name)
         errors.extend(parse_errors)
         sessions = [row["date"] for row in candles]
         if sessions != expectations["sessions"]:
@@ -383,7 +452,10 @@ def write_manifest(
             errors.append(f"{symbol}: insufficient rows")
     if errors:
         return errors
-    contract_bytes = (directory / CONTRACT_FILE).read_bytes()
+    try:
+        contract_bytes = read_object(root_fd, CONTRACT_FILE)
+    finally:
+        os.close(root_fd)
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "digest_algorithm": DIGEST_ALGORITHM,
@@ -392,9 +464,17 @@ def write_manifest(
         "expectations": expectations,
         "files": files,
     }
-    (directory / MANIFEST_FILE).write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    root_fd = open_snapshot_root(directory)
+    try:
+        write_object(
+            root_fd,
+            MANIFEST_FILE,
+            (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode(
+                "utf-8"
+            ),
+        )
+    finally:
+        os.close(root_fd)
     return []
 
 
@@ -436,37 +516,40 @@ def verify_dataset(directory: Path) -> DatasetResult:
         result.status = "BLOCKED"
         result.errors.extend(errors)
         return result
-    manifest_path = directory / MANIFEST_FILE
-    if not manifest_path.is_file():
+    try:
+        root_fd = open_snapshot_root(directory)
+        raw_manifest_bytes = read_object(root_fd, MANIFEST_FILE)
+    except (OSError, ValueError) as exc:
         result.status = "BLOCKED"
-        result.errors.append("manifest.json: snapshot manifest absent")
+        result.errors.append(f"manifest.json: {exc}")
         return result
     try:
-        raw_manifest = strict_json_loads(
-            manifest_path.read_text(encoding="utf-8")
-        )
+        raw_manifest = strict_json_loads(raw_manifest_bytes.decode("utf-8"))
     except (
-        OSError,
         UnicodeDecodeError,
         json.JSONDecodeError,
         ValueError,
     ) as exc:
         result.status = "BLOCKED"
         result.errors.append(f"manifest.json: invalid JSON: {exc}")
+        os.close(root_fd)
         return result
     manifest, errors = _verify_structure(raw_manifest)
     if errors:
         result.status = "BLOCKED"
         result.errors.extend(errors)
+        os.close(root_fd)
         return result
     assert manifest is not None
     result.contract_digest = contract_digest(expectations)
-    errors = _verify_manifest_binding(directory, manifest, expectations)
+    errors = _verify_manifest_binding(root_fd, manifest, expectations)
     if errors:
         result.status = "BLOCKED"
         result.errors.extend(errors)
+        os.close(root_fd)
         return result
-    _verify_files(directory, manifest, expectations, result)
+    _verify_files(root_fd, manifest, expectations, result)
+    os.close(root_fd)
     if not result.errors:
         result.status = "COMPLETE"
     elif result.file_digests:
@@ -477,7 +560,7 @@ def verify_dataset(directory: Path) -> DatasetResult:
 
 
 def _verify_manifest_binding(
-    directory: Path, manifest: dict, expectations: dict
+    root_fd: int, manifest: dict, expectations: dict
 ) -> list[str]:
     """Bind the manifest to the exact frozen contract bytes."""
     errors: list[str] = []
@@ -485,7 +568,7 @@ def _verify_manifest_binding(
         errors.append("manifest expectations differ from snapshot contract")
     if manifest["contract_digest"] != contract_digest(expectations):
         errors.append("contract digest mismatch")
-    contract_bytes = (directory / CONTRACT_FILE).read_bytes()
+    contract_bytes = read_object(root_fd, CONTRACT_FILE)
     if manifest["contract_sha256"] != sha256_hex(contract_bytes):
         errors.append("contract byte digest mismatch")
     files = manifest["files"]
@@ -496,7 +579,7 @@ def _verify_manifest_binding(
 
 
 def _verify_files(
-    directory: Path, manifest: dict, expectations: dict, result: DatasetResult
+    root_fd: int, manifest: dict, expectations: dict, result: DatasetResult
 ) -> None:
     """Verify every declared series and record structured errors."""
     for symbol in expectations["symbols"]:
@@ -505,24 +588,23 @@ def _verify_files(
             result.errors.append(f"{symbol}: malformed file identity")
             continue
         raw_digest = entry["raw_digest"]
-        if not isinstance(raw_digest, str) or not re.fullmatch(
-            r"[0-9a-f]{0,64}", raw_digest
-        ):
+        if not valid_raw_digest(raw_digest):
             result.errors.append(f"{symbol}: malformed raw digest")
             continue
         if entry["storage_key"] != expectations["storage_keys"][symbol]:
             result.errors.append(f"{symbol}: storage key mismatch")
             continue
-        path = directory / f"{expectations['storage_keys'][symbol]}.csv"
-        if not path.is_file():
-            result.errors.append(f"{symbol}: series absent")
+        name = f"{expectations['storage_keys'][symbol]}.csv"
+        try:
+            content = read_object(root_fd, name)
+        except (OSError, ValueError) as exc:
+            result.errors.append(f"{symbol}: {exc}")
             continue
-        content = path.read_bytes()
         digest = sha256_hex(content)
         if digest != entry["digest"]:
             result.errors.append(f"{symbol}: dataset digest mismatch")
             continue
-        candles, parse_errors = _read_csv(path)
+        candles, parse_errors = _read_csv_content(content, name)
         if parse_errors:
             result.errors.extend(parse_errors)
             continue

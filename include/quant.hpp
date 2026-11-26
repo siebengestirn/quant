@@ -1594,6 +1594,7 @@ struct DatasetVerification {
   std::string contract_digest;
   std::vector<std::string> errors;
   std::map<std::string, std::string> file_digests;
+  std::map<std::string, std::vector<Candle>> candles;
 };
 
 // Frozen snapshot expectations. The C++ and Python implementations both
@@ -1639,6 +1640,9 @@ DatasetVerification VerifyDataset(const std::string& history_dir,
                                   const DatasetExpectations* expected,
                                   std::string* error);
 
+bool ReadCsvText(const std::string& text,
+                 std::vector<Candle>* candles,
+                 std::string* error);
 bool ReadCsvCandles(const std::string& path,
                     std::vector<Candle>* candles,
                     std::string* error);
