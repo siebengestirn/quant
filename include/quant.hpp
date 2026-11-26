@@ -6,6 +6,7 @@
 // a field is explicitly named *_date or ISO.
 
 #include <algorithm>
+#include <iterator>
 #include <array>
 #include <compare>
 #include <cstdint>

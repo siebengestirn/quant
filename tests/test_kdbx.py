@@ -92,6 +92,8 @@ def isolated_q():
             f"127.0.0.1:{port}",
             "-instanceId",
             instance_id,
+            "-quantBin",
+            str(QUANT),
         ],
         cwd=ROOT,
         stdin=subprocess.DEVNULL,
@@ -382,6 +384,8 @@ def start_private_q(
             f"127.0.0.1:{port}",
             "-instanceId",
             instance_id,
+            "-quantBin",
+            str(QUANT),
         ],
         cwd=ROOT,
         stdin=subprocess.DEVNULL,
@@ -729,17 +733,63 @@ def test_stale_writer_lock_recovery(isolated_q):
     hdb = isolated_q.directory / "hdb-stale-lock"
     lock = hdb / ".writer.lock"
     lock.mkdir(parents=True)
-    (lock / "pid").write_text("999999")
     script = """
 import json
 import pykx as kx
 
 with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
-    recovered = q('.quant.staleLockRecovery["' + str(HDB) + '"]').py()
+    q('.[set; (hsym `$"' + LOCK + '/owner"; `pid`host`token`createdMs!(999999;"dead-host";"";2026.01.01D00:00:00.000000000)); {::}]')
+    recovered = q('.quant.staleLockRecovery["' + HDB + '"]').py()
     print(json.dumps({"recovered": str(recovered).lower()}))
 """.replace("PORT", str(isolated_q.port))
     script = script.replace("HDB", json.dumps(str(hdb)))
+    script = script.replace("LOCK", json.dumps(str(lock)))
     code, out = run([str(PYKX_PYTHON), "-c", script])
     assert code == 0, out
     assert json.loads(out.strip().splitlines()[-1])["recovered"] == "true"
     assert not lock.exists()
+
+
+def test_sha256_digest_is_canonical(isolated_q):
+    fixture = isolated_q.directory / "abc.bin"
+    fixture.write_bytes(b"abc")
+    script = """
+import json
+import pykx as kx
+
+with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
+    digest = q('.quant.fileDigest["' + PATH + '"]').py()
+    print(json.dumps({"digest": digest.decode() if isinstance(digest, bytes) else digest}))
+""".replace("PORT", str(isolated_q.port))
+    script = script.replace("PATH", json.dumps(str(fixture)))
+    code, out = run([str(PYKX_PYTHON), "-c", script])
+    assert code == 0, out
+    result = json.loads(out.strip().splitlines()[-1])
+    assert result["digest"] == (
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    )
+
+
+def test_orphan_lock_is_explicit(isolated_q):
+    hdb = isolated_q.directory / "hdb-orphan"
+    lock = hdb / ".writer.lock"
+    lock.mkdir(parents=True)
+    script = """
+import json
+import pykx as kx
+
+with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
+    state = q('.quant.lockState["' + HDB + '"]').py()
+    acquired = q('.quant.writerAcquire["' + HDB + '"]').py()
+    print(json.dumps({
+        "state": state.decode() if isinstance(state, bytes) else state,
+        "acquired": str(bool(acquired)).lower(),
+    }))
+""".replace("PORT", str(isolated_q.port))
+    script = script.replace("HDB", json.dumps(str(hdb)))
+    code, out = run([str(PYKX_PYTHON), "-c", script])
+    assert code == 0, out
+    result = json.loads(out.strip().splitlines()[-1])
+    assert result["state"] == "orphan"
+    assert result["acquired"] == "false"
+    assert lock.exists()

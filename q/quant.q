@@ -231,9 +231,59 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
 .quant.pathString:{[v] $[10h=type v; v; string v]}
 .quant.filePath:{[dir;name] hsym `$((string dir),"/",string name)}
 
-/ 128-bit content digest for corruption detection. MD5 is well-specified and
-/ order-sensitive but NOT collision-resistant and NOT tamper authentication.
-.quant.digest:{[x] md5["c"$-8!x]}
+/ Canonical path grammar. Only absolute paths with a reviewed character set
+/ are accepted. Relative inputs are resolved against the process working
+/ directory and dot segments are removed lexically, never by a shell glob.
+.quant.pathAlphabet:"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+.quant.pathAlphabet,:"0123456789._:-"
+.quant.canonicalPath:{[p]
+  s:.quant.pathString p;
+  if[not count s; :""];
+  if[s like ":*"; s:1_s];
+  s:$[s like "/*"; s; (first system "pwd"),"/",s];
+  segments:"/" vs s;
+  valid:{[x]
+    if[0=count x; :0b];
+    :all ((.quant.pathAlphabet?x)<count .quant.pathAlphabet)};
+  kept:segments where 0<count each segments;
+  if[not all (valid each kept); :""];
+  if[any ({[x] x ~ ".."} each kept); :""];
+  :"/", "/" sv kept}
+.quant.safePath:{[p] 0<count .quant.canonicalPath[p]}
+.quant.checkedSystem:{[cmd]
+  r:@[system;cmd;{`q_system_error}];
+  ((type r)=0h) and (0=count r)}
+.quant.sync:{[] .quant.checkedSystem["sync"]}
+
+.quant.quotePath:{[p]
+  c:.quant.canonicalPath p;
+  if[not count c; '`unsafe_path];
+  :"'",c,"'"}
+
+/ Strong content identity. SHA-256 replaces the former MD5 digest; the
+/ computation is delegated to the checked quant CLI so both languages use
+/ the same algorithm. Digests detect corruption but are not authentication.
+.quant.quantBin:{[] .quant.cliArg["-quantBin"]}
+.quant.fileDigest:{[path]
+  tool:.quant.quantBin[];
+  if[not count tool; tool:"build/quant"];
+  out:@[system;(tool," digest ",.quant.quotePath path);{`q_digest_error}];
+  if[not (type out) in (0h;10h); '`digest_failed];
+  if[0=count out; '`digest_failed];
+  :$[10h=type out; out; first out]}
+.quant.digest:{[x]
+  tool:.quant.quantBin[];
+  if[not count tool; tool:"build/quant"];
+  tmp:"/tmp/quant-digest-", string `long$.z.p;
+  hsym[`$tmp] set x;
+  out:.quant.fileDigest[tmp];
+  .quant.checkedSystem[("rm -f ",.quant.quotePath tmp)];
+  :out}
+.quant.syncFile:{[path]
+  tool:.quant.quantBin[];
+  if[not count tool; tool:"build/quant"];
+  r:@[system;(tool," fsync ",.quant.quotePath path);{`q_fsync_error}];
+  :((type r)=0h) and (1=count r) and ((first r) ~ "ok")}
 .quant.generationDir:{[p;g] `$((.quant.pathString p),"/gen-",string g)}
 .quant.currentGeneration:{[p]
   pointer:.quant.filePath[hsym `$(.quant.pathString p);`current];
@@ -268,97 +318,134 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
   if[(count componentNames)<>expectedCount; :0b];
   :.quant.verifyComponent[p;g]/[1b;.quant.componentNames]}
 
-/ Canonical path grammar: absolute, no traversal, no shell metacharacters.
-.quant.safePath:{[p]
-  s:.quant.pathString p;
-  if[not count s; :0b];
-  bad:" ;$&|`\"'";
-  if[any bad in s; :0b];
-  :not any (".." in s)}
-.quant.checkedSystem:{[cmd]
-  r:@[system;cmd;{`q_system_error}];
-  ((type r)=0h) and (0=count r)}
-.quant.sync:{[] .quant.checkedSystem["sync"]}
 
-/ Cooperative cross-process writer lock using an exclusive directory.
+/ Cross-process writer lock with a numeric identity record. The owner file is
+/ written with q file APIs (never shell interpolation) and contains a bounded
+/ positive PID plus a fencing token. A lock without an owner file is an
+/ explicit orphan and is never guessed or silently removed by acquire.
+.quant.ownerPath:{[p] .quant.canonicalPath[p],"/.writer.lock/owner"}
+.quant.validPid:{[text]
+  if[not (count text)>0; :0b];
+  if[0=count text; :0b];
+  if[not all ((("0123456789")?text)<10); :0b];
+  pid:"J"$text;
+  :(pid>0) and (pid<999999999)}
+
+.quant.lockState:{[p]
+  lock:.quant.canonicalPath[p],"/.writer.lock";
+  if[not .quant.checkedSystem[("test -d ",(.quant.quotePath lock))]; :`absent];
+  owner:.quant.ownerPath p;
+  if[not .quant.checkedSystem[("test -f ",
+      (.quant.quotePath owner))]; :`orphan];
+  record:@[get;hsym `$owner;{::}];
+  if[record~(::); :`orphan];
+  if[not .quant.validPid[string record`pid]; :`orphan];
+  :`owned}
+
+.quant.checkedRemoveLock:{[p]
+  lock:.quant.canonicalPath[p],"/.writer.lock";
+  if[0=count key hsym `$lock; :1b];
+  ok:.quant.checkedSystem[("rm -rf ",.quant.quotePath lock)];
+  :ok and (0=count key hsym `$lock)}
+
 .quant.staleLockRecovery:{[p]
-  lockPath:p,"/.writer.lock";
-  pidPath:lockPath,"/pid";
-  if[not count key hsym `$lockPath; :0b];
-  if[not count key hsym `$pidPath; :0b];
-  pidText:string first read1 hsym `$pidPath;
-  pid:`$pidText;
-  alive:.quant.checkedSystem[("kill -0 ",pidText," 2>/dev/null")];
-  if[alive; :0b];
-  .quant.checkedSystem[("rm -rf ",lockPath)];
-  remaining:count key hsym `$lockPath;
-  :0=remaining}
+  state:.quant.lockState p;
+  if[state=`absent; :1b];
+  if[state=`orphan; :0b];
+  record:get hsym `$(.quant.ownerPath p);
+  pid:string record`pid;
+  if[not .quant.validPid pid; :0b];
+  alive:@[system;("kill -0 ",pid," 2>/dev/null");{::}];
+  if[(type alive)=0h; if[0<count alive; :0b]];
+  :.quant.checkedRemoveLock p}
+
 .quant.writerAcquire:{[p]
-  if[not .quant.safePath p; :0b];
-  .quant.staleLockRecovery[p];
-  r:@[system;("mkdir ",p,"/.writer.lock");{`q_system_error}];
-  if[not ((type r)=0h) and 0=count r; :0b];
-  (.quant.filePath[hsym `$(p,"/.writer.lock");`pid]) set first system "echo $$";
+  c:.quant.canonicalPath p;
+  if[0=count c; :0b];
+  if[not .quant.staleLockRecovery[c]; :0b];
+  lock:c,"/.writer.lock";
+  created:@[system;("mkdir ",.quant.quotePath lock);{`q_system_error}];
+  if[not ((type created)=0h) and (0=count created); :0b];
+  owner:.quant.ownerPath c;
+  pid:"J"$first system "echo $$";
+  ok:.quant.validPid string pid;
+  if[not ok; .quant.checkedRemoveLock[c]; :0b];
+  record:`pid`host`token`createdMs!(
+    pid; first system "hostname"; .quant.instanceId; .z.p);
+  .[set; (hsym `$owner; record); {::}];
+  readback:@[get;hsym `$owner;{::}];
+  ok:(readback~(::)) or (not .quant.validPid[string readback`pid]);
+  if[ok; .quant.checkedRemoveLock[c]; :0b];
   1b}
 .quant.writerRelease:{[p]
-  .quant.checkedSystem[("rm -rf ",p,"/.writer.lock")];
+  ok:.quant.checkedRemoveLock[p];
+  if[not ok; '`writer_release_failed];
   ::}
+
+.quant.recoverOrphanLock:{[p]
+  if[.quant.lockState[p]<>`orphan; :0b];
+  :.quant.checkedRemoveLock p}
 
 / Immutable generation: components are written to a staging directory, synced,
 / then atomically renamed before the current pointer is published.
 .quant.persist:{[path]
   p:.quant.pathString path;
   if[not .quant.safePath p; :`unsafe_path];
-  if[not .quant.checkedSystem[("mkdir -p ",p)]; :`mkdir_failed];
-  if[not .quant.writerAcquire[p]; :`writer_busy];
-  gen:.quant.currentGeneration[p]+1;
-  genText:string `long$gen;
-  stagedPath:p,"/gen-",genText,".staging";
-  finalPath:p,"/gen-",genText;
-  stagingDir:`$stagedPath;
-  finalDir:`$finalPath;
-  existingGenerations:key hsym `$p;
-  finalName:`$("gen-",genText);
-  if[finalName in existingGenerations;
-      .quant.writerRelease[p];
-      :`generation_conflict];
-  if[not .quant.checkedSystem[("mkdir ",stagedPath)];
-      .quant.writerRelease[p];
-      :`staging_failed];
-  root:hsym stagingDir;
-  .quant.generation::gen;
-  savedQuotes:quotes; savedBars:bars;
-  savedFeatures:.quant.featureHistory[]; savedSeen:.quant.seen;
-  savedState:.quant.state[];
-  savedMeta:(savedState;.quant.counts[]);
-  (.quant.filePath[root;`quotes]) set savedQuotes;
-  (.quant.filePath[root;`bars]) set savedBars;
-  (.quant.filePath[root;`features]) set savedFeatures;
-  (.quant.filePath[root;`seen]) set savedSeen;
-  (.quant.filePath[root;`state]) set savedState;
-  (.quant.filePath[root;`meta]) set savedMeta;
-  components:.quant.componentNames!(
-    (count savedQuotes;.quant.digest savedQuotes);
-    (count savedBars;.quant.digest savedBars);
-    (count savedFeatures;.quant.digest savedFeatures);
-    (count savedSeen;.quant.digest savedSeen);
-    (count savedState;.quant.digest savedState);
-    (count savedMeta;.quant.digest savedMeta));
-  manifest:`schemaVersion`generation`components!(
-    .quant.schemaVersion;gen;components);
-  (.quant.filePath[root;`manifest]) set manifest;
-  if[not .quant.sync[]; .quant.writerRelease[p]; :`sync_failed];
-  if[not .quant.checkedSystem[("mv -f ",stagedPath," ",finalPath)];
-      .quant.writerRelease[p];
-      :`generation_publish_failed];
-  if[not .quant.sync[]; .quant.writerRelease[p]; :`sync_failed];
-  (.quant.filePath[hsym `$p;`currentTmp]) set gen;
-  if[not .quant.checkedSystem[("mv -f ",p,"/currentTmp ",p,"/current")];
-      .quant.writerRelease[p];
-      :`pointer_publish_failed];
-  if[not .quant.sync[]; .quant.writerRelease[p]; :`sync_failed];
-  .quant.writerRelease[p];
-  `persisted}
+  c:.quant.canonicalPath p;
+  if[not .quant.checkedSystem[("mkdir -p ",.quant.quotePath c)];
+      :`mkdir_failed];
+  if[not .quant.writerAcquire[c]; :`writer_busy];
+  .quant.activePath::c;
+  writeAll:{[c]
+    gen:.quant.currentGeneration[c]+1;
+    genText:string `long$gen;
+    stagedPath:c,"/gen-",genText,".staging";
+    finalPath:c,"/gen-",genText;
+    if[.quant.checkedSystem[("test -d ",(.quant.quotePath finalPath))];
+        :`generation_conflict];
+    if[not .quant.checkedSystem[("mkdir ",.quant.quotePath stagedPath)];
+        :`staging_failed];
+    root:hsym `$stagedPath;
+    .quant.generation::gen;
+    savedQuotes:quotes; savedBars:bars;
+    savedFeatures:.quant.featureHistory[]; savedSeen:.quant.seen;
+    savedState:.quant.state[];
+    savedMeta:(savedState;.quant.counts[]);
+    savedValues:(savedQuotes;savedBars;savedFeatures;savedSeen;
+      savedState;savedMeta);
+    digests:();
+    i:0;
+    do[6;
+      name:.quant.componentNames[i];
+      path:.quant.filePath[root;name];
+      path set savedValues[i];
+      if[not .quant.syncFile[string path]; :`component_sync_failed];
+      digests,:enlist (count savedValues[i];.quant.digest savedValues[i]);
+      i:i+1];
+    components:.quant.componentNames!digests;
+    manifest:`schemaVersion`generation`components!(
+      .quant.schemaVersion;gen;components);
+    (.quant.filePath[root;`manifest]) set manifest;
+    if[not .quant.syncFile[string .quant.filePath[root;`manifest]];
+        :`manifest_sync_failed];
+    if[not .quant.checkedSystem[
+        ("mv -f ",(.quant.quotePath stagedPath)," ",
+          (.quant.quotePath finalPath))];
+        :`generation_publish_failed];
+    if[not .quant.syncFile[finalPath]; :`generation_sync_failed];
+    (.quant.filePath[hsym `$c;`currentTmp]) set gen;
+    pointer:.quant.canonicalPath[c,"/currentTmp"];
+    if[not .quant.syncFile[pointer]; :`pointer_sync_failed];
+    if[not .quant.checkedSystem[
+        ("mv -f ",(.quant.quotePath pointer)," ",
+          (.quant.quotePath[c,"/current"]))];
+        :`pointer_publish_failed];
+    if[not .quant.syncFile[.quant.canonicalPath[c,"/current"]];
+        :`parent_sync_failed];
+    :`persisted};
+  result:@[writeAll;c;{[err] .quant.writerRelease[.quant.activePath]; 'err}];
+  .quant.writerRelease[.quant.activePath];
+  :result}
 
 / Uncommitted staging generations are never promoted; remove them explicitly.
 .quant.recoverOrphans:{[p]
