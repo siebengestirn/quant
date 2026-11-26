@@ -1,6 +1,7 @@
 # Generated operational state: never commit.
 build/
 build-san/
+build-kdbx/
 data/
 *.o
 *.a

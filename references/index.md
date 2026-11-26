@@ -23,5 +23,5 @@ repository rules remain in `STYLES.md` and the workspace lint configs.
   quality; no rule is adopted without a reviewed change.
 - Published guides do not add a gate. The binding rules are the workspace
   checkers and lint configuration.
-- https://google.github.io/styleguide/ 
+- https://google.github.io/styleguide/
 - whttps://github.com/qbists/style

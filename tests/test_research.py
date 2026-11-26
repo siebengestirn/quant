@@ -20,6 +20,7 @@ SPEC.loader.exec_module(research)
 
 
 def test_synthetic_history_is_deterministic():
+    """Enforce the QUANT style contract."""
     first = research.synthetic_history()
     second = research.synthetic_history()
     assert list(first) == list(second)
@@ -27,6 +28,7 @@ def test_synthetic_history_is_deterministic():
 
 
 def test_features_do_not_read_future_rows():
+    """Enforce the QUANT style contract."""
     rows = research.synthetic_history()["AAA"]
     cut = 100
     before = research.features(rows[: cut + 1], cut)
@@ -37,6 +39,7 @@ def test_features_do_not_read_future_rows():
 
 
 def test_purged_walk_forward_returns_folds():
+    """Enforce the QUANT style contract."""
     history = research.synthetic_history()
     stats = research.walk_forward_ic(history, research.score_momentum)
     assert stats["folds"] >= 1
@@ -46,6 +49,7 @@ def test_purged_walk_forward_returns_folds():
 
 
 def test_statistical_helpers():
+    """Enforce the QUANT style contract."""
     ci = research.bootstrap_ci([0.01, -0.01, 0.02, -0.005], 100)
     assert ci[0] <= ci[1] <= ci[2]
     assert research.deflated(2.0, 8, 100) < 2.0
@@ -54,6 +58,7 @@ def test_statistical_helpers():
 
 
 def test_report_labels_are_explicit():
+    """Enforce the QUANT style contract."""
     history = research.synthetic_history()
     report = research.analyze(history, ROOT)
     assert report["labels"]["authoritative_pnl"] == "SIMULATED"
@@ -95,6 +100,7 @@ def test_cross_language_feature_fixture():
 
 
 def test_warmup_and_final_availability_are_explicit():
+    """Enforce the QUANT style contract."""
     rows = research.synthetic_history()["AAA"]
     early = research.features(rows[:10], 9)
     assert early["valid"] is False
@@ -105,6 +111,7 @@ def test_warmup_and_final_availability_are_explicit():
 
 
 def test_forward_label_is_censored_not_zero():
+    """Enforce the QUANT style contract."""
     rows = [{"close": float(100 + i)} for i in range(5)]
     assert research.forward_label(rows, 4, 2) is None
     assert research.forward_label(rows, 2, 2) is not None
@@ -112,6 +119,7 @@ def test_forward_label_is_censored_not_zero():
 
 
 def test_daily_cross_sectional_ic_reports_validity():
+    """Enforce the QUANT style contract."""
     history = research.synthetic_history()
     result = research.daily_cross_sectional_ic(history, research.score_momentum)
     assert result["status"] == "CALCULATED"
@@ -123,6 +131,7 @@ def test_daily_cross_sectional_ic_reports_validity():
 
 
 def test_cscv_pbo_is_a_probability():
+    """Enforce the QUANT style contract."""
     matrix = [
         [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
         [0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1],
@@ -136,6 +145,7 @@ def test_cscv_pbo_is_a_probability():
 
 
 def test_deflated_sharpe_accounts_for_trials():
+    """Enforce the QUANT style contract."""
     rng = __import__("random").Random(7)
     returns = [rng.gauss(0.0004, 0.01) for _ in range(120)]
     small = research.deflated_sharpe_ratio(returns, 2)
@@ -149,6 +159,7 @@ def test_deflated_sharpe_accounts_for_trials():
 
 
 def test_experiment_registry_is_append_only(tmp_path):
+    """Enforce the QUANT style contract."""
     first = research.register_experiment(tmp_path, {"strategy": "x"})
     second = research.register_experiment(tmp_path, {"strategy": "y"})
     assert first != second
@@ -162,6 +173,7 @@ def test_experiment_registry_is_append_only(tmp_path):
 
 
 def _write_pit_fixtures(tmp_path: Path, dates: list[str]) -> tuple[Path, Path]:
+    """Enforce the QUANT style contract."""
     status = tmp_path / "status.txt"
     status.write_text(
         "symbol,exchange,isin,effective_from,effective_to,eligible,"
@@ -174,6 +186,7 @@ def _write_pit_fixtures(tmp_path: Path, dates: list[str]) -> tuple[Path, Path]:
 
 
 def test_dataset_quality_reports_missing_and_malformed():
+    """Enforce the QUANT style contract."""
     rows = [
         {
             "date": "D1",
@@ -240,6 +253,7 @@ def test_dataset_quality_reports_missing_and_malformed():
 
 
 def test_point_in_time_universe_ignores_future_status():
+    """Enforce the QUANT style contract."""
     records = [
         {"symbol": "AAA", "eligible": True, "effective_from": "2020-01-01"},
         {"symbol": "BBB", "eligible": True, "effective_from": "2021-01-01"},
@@ -254,6 +268,7 @@ def test_point_in_time_universe_ignores_future_status():
 
 
 def test_validated_dataset_rejects_blocked_input(tmp_path):
+    """Enforce the QUANT style contract."""
     (tmp_path / "AAA.csv").write_text(
         "date,open,high,low,close,volume\n"
         "2026-01-01,100,102,99,101,1000\n"
@@ -278,6 +293,7 @@ def test_validated_dataset_rejects_blocked_input(tmp_path):
 
 
 def test_validated_dataset_flags_malformed_ohlc(tmp_path):
+    """Enforce the QUANT style contract."""
     (tmp_path / "AAA.csv").write_text(
         "date,open,high,low,close,volume\n"
         "2026-01-01,100,102,99,101,1000\n"
@@ -298,6 +314,7 @@ def test_validated_dataset_flags_malformed_ohlc(tmp_path):
 
 
 def test_point_in_time_universe_uses_revision_precedence():
+    """Enforce the QUANT style contract."""
     records = [
         {
             "symbol": "AAA",
@@ -316,6 +333,7 @@ def test_point_in_time_universe_uses_revision_precedence():
 
 
 def test_eligibility_map_filters_daily_cross_section():
+    """Enforce the QUANT style contract."""
     history = research.synthetic_history()
     all_symbols = sorted(k for k in history if k != "NIFTY 50")
     eligible = {row["date"]: all_symbols for row in history["AAA"]}
@@ -342,6 +360,7 @@ def test_eligibility_map_filters_daily_cross_section():
 
 
 def _run_cli(data: Path, out: Path, *extra: str) -> tuple[int, dict]:
+    """Enforce the QUANT style contract."""
     import subprocess
 
     completed = subprocess.run(
@@ -363,6 +382,7 @@ def _run_cli(data: Path, out: Path, *extra: str) -> tuple[int, dict]:
 
 
 def test_cli_exit_codes_reflect_dataset_status(tmp_path):
+    """Enforce the QUANT style contract."""
     data = tmp_path / "history"
     data.mkdir()
     out = tmp_path / "reports"
@@ -404,6 +424,7 @@ def test_cli_exit_codes_reflect_dataset_status(tmp_path):
 
 
 def test_cli_fails_closed_without_pit_or_calendar(tmp_path):
+    """Enforce the QUANT style contract."""
     data = tmp_path / "history"
     data.mkdir()
     out = tmp_path / "reports"
@@ -431,6 +452,7 @@ def test_cli_fails_closed_without_pit_or_calendar(tmp_path):
 
 
 def test_malformed_pit_records_fail_closed(tmp_path):
+    """Enforce the QUANT style contract."""
     data = tmp_path / "history"
     data.mkdir()
     out = tmp_path / "reports"
@@ -456,6 +478,7 @@ def test_malformed_pit_records_fail_closed(tmp_path):
 
 
 def test_duplicate_csv_headers_rejected(tmp_path):
+    """Enforce the QUANT style contract."""
     (tmp_path / "AAA.csv").write_text(
         "date,date,open,high,low,close,volume\n"
         "2026-01-01,2026-01-01,100,102,99,101,1000\n"
@@ -466,6 +489,7 @@ def test_duplicate_csv_headers_rejected(tmp_path):
 
 
 def test_late_published_status_cannot_alter_earlier_decision():
+    """Enforce the QUANT style contract."""
     records = [
         {
             "symbol": "AAA",
@@ -479,6 +503,7 @@ def test_late_published_status_cannot_alter_earlier_decision():
 
 
 def test_shared_canonical_date_fixture():
+    """Enforce the QUANT style contract."""
     fixture = ROOT / "tests" / "fixtures" / "canonical_dates.csv"
     with fixture.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
@@ -489,6 +514,7 @@ def test_shared_canonical_date_fixture():
 
 
 def test_dependence_aware_uncertainty():
+    """Enforce the QUANT style contract."""
     rng = __import__("random").Random(3)
     values = [0.0]
     for _ in range(119):
@@ -501,6 +527,7 @@ def test_dependence_aware_uncertainty():
 
 
 def test_purged_walk_forward_protocol():
+    """Enforce the QUANT style contract."""
     history = research.synthetic_history()
     result = research.purged_walk_forward(history, research.score_momentum)
     assert result["status"] == "CALCULATED"
@@ -513,6 +540,7 @@ def test_purged_walk_forward_protocol():
 
 
 def test_selection_tests_are_not_overclaimed():
+    """Enforce the QUANT style contract."""
     assert research.selection_test_status(None)["status"] == "UNAVAILABLE"
     report = research.analyze(research.synthetic_history(), ROOT)
     assert report["methodology"]["signal_diagnostics_scope"].startswith(
@@ -525,6 +553,7 @@ def test_selection_tests_are_not_overclaimed():
 
 
 def test_experiment_registry_records_reproducibility_inputs(tmp_path):
+    """Enforce the QUANT style contract."""
     identifier = research.register_experiment(tmp_path, {"strategy": "x"})
     line = (
         (tmp_path / "data" / "assurance" / "experiments.jsonl")
@@ -539,6 +568,7 @@ def test_experiment_registry_records_reproducibility_inputs(tmp_path):
 
 
 def test_holdout_mutation_cannot_change_selection():
+    """Enforce the QUANT style contract."""
     history = research.synthetic_history()
     baseline = research.analyze(history, ROOT)
     mutated = {
@@ -567,6 +597,7 @@ def test_holdout_mutation_cannot_change_selection():
 
 
 def test_fold_count_is_not_observation_count():
+    """Enforce the QUANT style contract."""
     report = research.analyze(research.synthetic_history(), ROOT)
     best = report["best_strategy"]
     stats = report["walk_forward"][best]

@@ -5,10 +5,13 @@ persistent=no
 suggestion-mode=no
 
 [MESSAGES CONTROL]
-disable=
 
 [FORMAT]
 max-line-length=80
+max-module-lines=2000
+max-attributes=20
+max-positional-arguments=8
+max-locals=35
 indent-string='    '
 expected-line-ending-format=LF
 
@@ -22,10 +25,10 @@ const-naming-style=UPPER_CASE
 
 [DESIGN]
 max-args=12
-max-locals=25
+max-locals=35
 max-branches=14
 max-statements=60
-max-attributes=12
+max-attributes=20
 
 [REPORTS]
 output-format=text

@@ -4,3 +4,5 @@ pykx==4.2.0
 pylint==3.3.9
 pytest==9.2.0
 ruff==0.17.6
+clang-format==23.1.5
+shellcheck-py==0.11.0.1

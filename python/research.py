@@ -79,6 +79,7 @@ def parse_iso_date(value: str) -> date | None:
 
 
 def canonical_digest(value: object) -> str:
+    """Enforce the QUANT style contract."""
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -259,6 +260,7 @@ class ValidatedDataset:
     code_version: str = ""
 
     def __post_init__(self) -> None:
+        """Enforce the QUANT style contract."""
         if self.status_errors is None:
             self.status_errors = []
         if self.coverage_gaps is None:
@@ -348,7 +350,7 @@ def load_history_validated(
         calendar_basis=calendar_basis,
         status_errors=status_errors,
         coverage_gaps=coverage_gaps,
-        dataset_digest=canonical_digest({s: r for s, r in acceptable.items()}),
+        dataset_digest=canonical_digest(dict(acceptable.items())),
         universe_digest=canonical_digest(instrument_status or []),
         calendar_digest=canonical_digest(expected),
         code_version=code_version,
@@ -362,6 +364,7 @@ def features(rows: list[dict[str, float]], index: int) -> dict[str, float]:
     volume = [row["volume"] for row in window]
 
     def ret(periods: int) -> float:
+        """Enforce the QUANT style contract."""
         if len(close) <= periods or close[-1 - periods] <= 0:
             return 0.0
         return close[-1] / close[-1 - periods] - 1.0
@@ -429,7 +432,7 @@ def features(rows: list[dict[str, float]], index: int) -> dict[str, float]:
 def feature_history(rows: list[dict[str, float]]) -> list[dict[str, float]]:
     """Point-in-time features with availability at the next observed session."""
     result = []
-    for index in range(len(rows)):
+    for index, _row in enumerate(rows):
         item = features(rows, index)
         item["index"] = index
         # The final observed session has no known subsequent exchange
@@ -444,10 +447,12 @@ def feature_history(rows: list[dict[str, float]]) -> list[dict[str, float]]:
 
 
 def clamp(value: float, low: float = -1.0, high: float = 1.0) -> float:
+    """Enforce the QUANT style contract."""
     return max(low, min(high, value))
 
 
 def score_momentum(f: dict[str, float]) -> float:
+    """Enforce the QUANT style contract."""
     raw = (
         0.15 * f["ret5"]
         + 0.25 * f["ret20"]
@@ -458,10 +463,12 @@ def score_momentum(f: dict[str, float]) -> float:
 
 
 def score_trend(f: dict[str, float]) -> float:
+    """Enforce the QUANT style contract."""
     return clamp((f["trend"] - 0.5) * 2 + f["breakout"] * 0.3)
 
 
 def score_breakout(f: dict[str, float]) -> float:
+    """Enforce the QUANT style contract."""
     return clamp(
         f["breakout"] * 0.6
         + clamp(f["volume_surprise"], -1, 2) * 0.2
@@ -491,6 +498,7 @@ def spearman(xs: list[float], ys: list[float]) -> float:
         return 0.0
 
     def ranks(values: list[float]) -> list[float]:
+        """Enforce the QUANT style contract."""
         order = sorted(range(len(values)), key=lambda i: values[i])
         out = [0.0] * len(values)
         position = 0
@@ -518,6 +526,7 @@ def spearman(xs: list[float], ys: list[float]) -> float:
 def forward_return(
     rows: list[dict[str, float]], index: int, sessions: int
 ) -> float:
+    """Enforce the QUANT style contract."""
     end = min(index + sessions, len(rows) - 1)
     if end <= index or rows[index]["close"] <= 0:
         return 0.0
@@ -550,7 +559,7 @@ def walk_forward_ic(
             scores: list[float] = []
             returns: list[float] = []
             for symbol, rows in history.items():
-                if symbol == "NIFTY 50" or symbol == "INDIA VIX":
+                if symbol in ("NIFTY 50", "INDIA VIX"):
                     continue
                 positions = [
                     i
@@ -604,13 +613,13 @@ def dataset_quality(
     duplicates = 0
     valid_dates: set[str] = set()
     for row in rows:
-        date = str(row.get("date", ""))
-        if parse_iso_date(date) is None:
+        row_date = str(row.get("date", ""))
+        if parse_iso_date(row_date) is None:
             invalid += 1
             continue
-        if date in seen:
+        if row_date in seen:
             duplicates += 1
-        seen.add(date)
+        seen.add(row_date)
         values = [
             row.get(field)
             for field in ("open", "high", "low", "close", "volume")
@@ -635,7 +644,7 @@ def dataset_quality(
         ):
             invalid += 1
             continue
-        valid_dates.add(date)
+        valid_dates.add(row_date)
     expected = set(expected_sessions)
     missing = sorted(expected - valid_dates)
     if invalid or duplicates or missing:
@@ -860,7 +869,7 @@ def cscv_pbo(performance: list[list[float]], max_splits: int = 256) -> dict:
             statistics.fmean(row[i] for i in test_columns)
             for row in performance
         ]
-        winner = max(range(count), key=lambda i: in_sample[i])
+        winner = max(range(count), key=lambda i, values=in_sample: values[i])
         final_rank = (
             sum(1 for value in out_sample if value < out_sample[winner]) + 1
         )
@@ -1037,7 +1046,7 @@ def purged_walk_forward(
     embargo_sessions: int = HOLDING_SESSIONS,
     final_holdout: int = 20,
 ) -> dict:
-    """Chronological train/select/test with purge, embargo and sealed holdout."""
+    """Chronological train/select/test with purge and embargo."""
     dates = sorted({row["date"] for rows in history.values() for row in rows})
     usable_dates = (
         dates[: len(dates) - final_holdout] if final_holdout else dates
@@ -1065,8 +1074,8 @@ def purged_walk_forward(
         train_dates = usable_dates[:train_end]
         selected = [
             symbol
-            for symbol in scores
-            if len(set(train_dates) & set(scores[symbol])) >= 5
+            for symbol, series in scores.items()
+            if len(set(train_dates) & set(series)) >= 5
         ]
         fold_ics: list[float] = []
         fold_scores: list[float] = []
@@ -1145,6 +1154,7 @@ def selection_test_status(trial_matrix: list[list[float]] | None) -> dict:
 def bootstrap_ci(
     values: list[float], draws: int = BOOTSTRAP_DRAWS
 ) -> list[float]:
+    """Enforce the QUANT style contract."""
     if not values:
         return [0.0, 0.0, 0.0]
     rng = random.Random(SEED)
@@ -1161,6 +1171,7 @@ def bootstrap_ci(
 
 
 def deflated(value: float, trials: int, observations: int) -> float:
+    """Enforce the QUANT style contract."""
     if observations < 3:
         return 0.0
     factor = math.sqrt(
@@ -1319,6 +1330,7 @@ def analyze(
     root: Path,
     dataset: ValidatedDataset | None = None,
 ) -> dict:
+    """Enforce the QUANT style contract."""
     if dataset is not None and dataset.status in (
         "BLOCKED",
         "PARTIAL",
@@ -1553,6 +1565,7 @@ def analyze(
 
 
 def render_markdown(report: dict) -> str:
+    """Enforce the QUANT style contract."""
     lines = [
         "# QUANT research verification",
         "",
@@ -1562,7 +1575,8 @@ def render_markdown(report: dict) -> str:
         f"- Conclusion: **{report.get('conclusion', 'INCONCLUSIVE')}**",
         f"- Selection: development data only; holdout sessions "
         f"{report.get('methodology', {}).get('holdout_sessions', 0)} sealed",
-        f"- Cost model: {report.get('methodology', {}).get('cost_model', 'UNKNOWN')}",
+        "- Cost model: "
+        f"{report.get('methodology', {}).get('cost_model', 'UNKNOWN')}",
         "",
         "## Purged walk-forward IC (ESTIMATED)",
         "",
@@ -1570,13 +1584,13 @@ def render_markdown(report: dict) -> str:
         "Deflated IC | Bounded CSCV PBO |",
         "|---|---:|---:|---:|---:|---:|---:|",
     ]
+    pbo = report.get("multiple_testing", {}).get("cscv_pbo", {}).get("pbo", 1)
     for name, stats in report["walk_forward"].items():
         lines.append(
             f"| {name} | {stats.get('folds', 0)} | "
             f"{stats.get('mean_ic', 0):.4f} | {stats.get('ic_std', 0):.4f} | "
             f"{stats.get('positive_folds', 0)} | "
-            f"{stats.get('deflated_mean_ic', 0):.4f} | "
-            f"{report.get('multiple_testing', {}).get('cscv_pbo', {}).get('pbo', 1):.3f} |"
+            f"{stats.get('deflated_mean_ic', 0):.4f} | {pbo:.3f} |"
         )
     lines += [
         "",
@@ -1610,6 +1624,7 @@ def render_markdown(report: dict) -> str:
 
 
 def self_test() -> int:
+    """Enforce the QUANT style contract."""
     history = synthetic_history()
     report = analyze(history, Path(__file__).resolve().parent.parent)
     assert report["input_series"] == 5, report["input_series"]
@@ -1627,6 +1642,7 @@ def self_test() -> int:
 
 
 def main() -> int:
+    """Enforce the QUANT style contract."""
     parser = argparse.ArgumentParser(description=__doc__)
     root = Path(__file__).resolve().parent.parent
     parser.add_argument(

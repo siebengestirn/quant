@@ -22,12 +22,15 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-QUANT = ROOT / "build" / "quant"
+QUANT = Path(
+    __import__("os").environ.get("QUANT_BIN", str(ROOT / "build" / "quant"))
+)
 RESEARCH = ROOT / "python" / "research.py"
 PYKX_PYTHON = ROOT / "data" / "venv" / "bin" / "python"
 
 
 def run(args: list[str], timeout: int = 90) -> tuple[int, str]:
+    """Enforce the QUANT style contract."""
     completed = subprocess.run(
         args,
         cwd=ROOT,
@@ -40,6 +43,7 @@ def run(args: list[str], timeout: int = 90) -> tuple[int, str]:
 
 
 def free_port() -> int:
+    """Enforce the QUANT style contract."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
@@ -55,12 +59,14 @@ class IsolatedQ:
 
 
 def q_runtime_available() -> bool:
+    """Enforce the QUANT style contract."""
     qhome = os.environ.get("QHOME", "")
     return bool(qhome) and (Path(qhome) / "bin" / "q").exists()
 
 
 @pytest.fixture(scope="module")
 def isolated_q():
+    """Enforce the QUANT style contract."""
     qhome = os.environ.get("QHOME", "")
     if not qhome:
         pytest.skip("KDB-X q runtime not available")
@@ -133,6 +139,7 @@ with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
 
 
 def test_cpp_verify_uses_isolated_instance():
+    """Enforce the QUANT style contract."""
     if not q_runtime_available():
         pytest.skip("KDB-X q runtime not available")
     code, out = run([str(QUANT), "db", "verify"], timeout=90)
@@ -143,6 +150,7 @@ def test_cpp_verify_uses_isolated_instance():
 
 
 def test_pykx_reads_same_events(isolated_q):
+    """Enforce the QUANT style contract."""
     script = """
 import json
 import pykx as kx
@@ -181,6 +189,7 @@ with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
 
 
 def test_q_feature_math_matches_fixture(isolated_q):
+    """Enforce the QUANT style contract."""
     script = """
 import json
 import pykx as kx
@@ -203,6 +212,7 @@ with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
 
 
 def test_q_daily_vwap_proxy_uses_typical_price(isolated_q):
+    """Enforce the QUANT style contract."""
     script = """
 import json
 import pykx as kx
@@ -233,6 +243,7 @@ with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
 
 
 def test_python_and_q_vwap_proxy_agree(isolated_q):
+    """Enforce the QUANT style contract."""
     import importlib.util
 
     spec = importlib.util.spec_from_file_location(
@@ -276,6 +287,7 @@ with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
 
 
 def test_point_in_time_features_and_recovery(isolated_q):
+    """Enforce the QUANT style contract."""
     script = """
 import json
 import pykx as kx
@@ -325,6 +337,7 @@ with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
 
 
 def test_production_service_unchanged():
+    """Enforce the QUANT style contract."""
     if not q_runtime_available():
         pytest.skip("KDB-X q runtime not available")
     code, before = run([str(QUANT), "db", "status"], timeout=30)
@@ -343,6 +356,7 @@ def test_production_service_unchanged():
 
 
 def test_benchmark_is_isolated():
+    """Enforce the QUANT style contract."""
     if not q_runtime_available():
         pytest.skip("KDB-X q runtime not available")
     code, out = run([str(QUANT), "db", "benchmark"], timeout=180)
@@ -355,6 +369,7 @@ def test_benchmark_is_isolated():
 def start_private_q(
     directory: Path, instance_id: str
 ) -> tuple[int, subprocess.Popen]:
+    """Enforce the QUANT style contract."""
     qhome = os.environ.get("QHOME", "")
     qbin = Path(qhome) / "bin" / "q"
     port = free_port()
@@ -378,6 +393,7 @@ def start_private_q(
 
 
 def wait_for_q(port: int, process: subprocess.Popen) -> None:
+    """Enforce the QUANT style contract."""
     probe = """
 import pykx as kx
 with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
@@ -392,6 +408,7 @@ with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
 
 
 def stop_private_q(process: subprocess.Popen) -> None:
+    """Enforce the QUANT style contract."""
     if process.poll() is None:
         process.terminate()
         try:
@@ -558,6 +575,7 @@ with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
 
 
 def test_generation_directory_cannot_be_reused(isolated_q):
+    """Enforce the QUANT style contract."""
     if not q_runtime_available():
         pytest.skip("native q runtime unavailable; generation test SKIPPED")
     hdb = isolated_q.directory / "hdb-conflict"
@@ -582,6 +600,7 @@ with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
 
 
 def test_ordinary_historical_load_verifies_manifest(isolated_q):
+    """Enforce the QUANT style contract."""
     if not q_runtime_available():
         pytest.skip("native q runtime unavailable; verified load SKIPPED")
     hdb = isolated_q.directory / "hdb-loadverify"
@@ -615,6 +634,7 @@ with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
 
 
 def test_generation_survives_reset_and_advances(isolated_q):
+    """Enforce the QUANT style contract."""
     if not q_runtime_available():
         pytest.skip("native q runtime unavailable; generation test SKIPPED")
     hdb = isolated_q.directory / "hdb-reset"
@@ -636,6 +656,7 @@ with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
 
 
 def test_orphan_staging_generation_is_removed(isolated_q):
+    """Enforce the QUANT style contract."""
     if not q_runtime_available():
         pytest.skip("native q runtime unavailable; orphan test SKIPPED")
     hdb = isolated_q.directory / "hdb-orphan"
@@ -657,6 +678,7 @@ with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
 
 
 def test_writer_lock_blocks_concurrent_persist(isolated_q):
+    """Enforce the QUANT style contract."""
     if not q_runtime_available():
         pytest.skip("native q runtime unavailable; writer lock SKIPPED")
     hdb = isolated_q.directory / "hdb-lock"

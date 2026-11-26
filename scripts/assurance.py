@@ -49,12 +49,17 @@ PATTERNS = (
         "tautology",
         "error",
         re.compile(
-            r"\b(?:exact same|same exact|end result|final outcome|each and every|"
-            r"basic fundamentals|added bonus|free gift|pre[- ]plan(?:ned|ning)?|"
-            r"reason why|consensus of opinion|refer back|repeat again|revert back|"
+            r"\b(?:exact same|same exact|end result|final outcome|"
+            r"each and every|"
+            r"basic fundamentals|added bonus|free gift|"
+            r"pre[- ]plan(?:ned|ning)?|"
+            r"reason why|consensus of opinion|refer back|repeat again|"
+            r"revert back|"
             r"merge together|combine together|currently existing|"
-            r"unexpected surprise|true fact|necessary prerequisite|past history|"
-            r"future plans|close proximity|mutual cooperation|first introduced)\b",
+            r"unexpected surprise|true fact|necessary prerequisite|"
+            r"past history|"
+            r"future plans|close proximity|mutual cooperation|"
+            r"first introduced)\b",
             re.IGNORECASE,
         ),
     ),
@@ -62,9 +67,12 @@ PATTERNS = (
         "banned_term",
         "review",
         re.compile(
-            r"\b(?:bulletproof|world[- ]class|best[- ]in[- ]class|revolutionary|"
-            r"game[- ]changing|cutting[- ]edge|enterprise[- ]grade|nasa[- ]level|"
-            r"state[- ]of[- ]the[- ]art|perfect(?:ly)?|forever|unparalleled|"
+            r"\b(?:bulletproof|world[- ]class|best[- ]in[- ]class|"
+            r"revolutionary|"
+            r"game[- ]changing|cutting[- ]edge|enterprise[- ]grade|"
+            r"nasa[- ]level|"
+            r"state[- ]of[- ]the[- ]art|perfect(?:ly)?|forever|"
+            r"unparalleled|"
             r"magic|black[ -]box(?:es)?|seamless)\b",
             re.IGNORECASE,
         ),
@@ -73,7 +81,8 @@ PATTERNS = (
         "first_person",
         "review",
         re.compile(
-            r"(?<![A-Za-z0-9_/])(?:I|We|Us|Our|Ours|My|Mine|Me|Myself|Ourselves|"
+            r"(?<![A-Za-z0-9_/])(?:I|We|Us|Our|Ours|My|Mine|Me|"
+            r"Myself|Ourselves|"
             r"we|us|our|ours|my|mine|me|myself|ourselves)"
             r"(?:['\u2019](?:m|re|ve|ll|d))?(?![A-Za-z0-9_/])"
         ),
@@ -83,9 +92,12 @@ PATTERNS = (
         "review",
         re.compile(
             r"\b(?:intentionally|deliberately|purposely|purposefully|knowingly|"
-            r"unintentionally|accidentally|inadvertently|willfully|voluntarily|"
-            r"obviously|clearly|simply|just|really|very|extremely|basically|"
-            r"actually|undoubtedly|certainly|of course|truly|merely|essentially|"
+            r"unintentionally|accidentally|inadvertently|willfully|"
+            r"voluntarily|"
+            r"obviously|clearly|simply|just|really|very|extremely|"
+            r"basically|"
+            r"actually|undoubtedly|certainly|of course|truly|merely|"
+            r"essentially|"
             r"trivially)\b",
             re.IGNORECASE,
         ),
@@ -139,6 +151,7 @@ class Finding:
 def command(
     args: list[str], cwd: Path = ROOT, timeout: int | None = None
 ) -> subprocess.CompletedProcess:
+    """Enforce the QUANT style contract."""
     return subprocess.run(
         args,
         cwd=cwd,
@@ -150,15 +163,18 @@ def command(
 
 
 def git(*args: str) -> str:
+    """Enforce the QUANT style contract."""
     result = command(["git", *args])
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
 def tracked() -> list[str]:
+    """Enforce the QUANT style contract."""
     return [p for p in git("ls-files", "-z", "--cached").split("\0") if p]
 
 
 def tree_fingerprint() -> str:
+    """Enforce the QUANT style contract."""
     parts = [
         git("status", "--porcelain=v1", "-z"),
         git("diff", "--binary", "HEAD"),
@@ -168,6 +184,7 @@ def tree_fingerprint() -> str:
 
 
 def exclude_path(path: str) -> bool:
+    """Enforce the QUANT style contract."""
     excluded = set(POLICY["generated_paths"]["forbidden_components"])
     excluded.update(POLICY["generated_paths"]["forbidden_component_prefixes"])
     if path.startswith(("references/", "data/", ".git/")):
@@ -257,6 +274,7 @@ def audit(json_out: Path | None = None) -> tuple[list[Finding], Path | None]:
 
 
 def check_style_references() -> bool:
+    """Enforce the QUANT style contract."""
     index = (ROOT / "references" / "index.md").read_text(encoding="utf-8")
     rows = re.findall(r"\| `([^`]+)` \| <[^>]+> \| `([0-9a-f]{64})` \|", index)
     if not rows:
@@ -274,6 +292,7 @@ def check_style_references() -> bool:
 
 
 def is_generated(path: str) -> bool:
+    """Enforce the QUANT style contract."""
     excluded = set(POLICY["generated_paths"]["forbidden_components"])
     excluded.update(POLICY["generated_paths"]["forbidden_component_prefixes"])
     return any(part in excluded for part in path.split("/")) or path.endswith(
@@ -282,6 +301,7 @@ def is_generated(path: str) -> bool:
 
 
 def check_generated_paths() -> bool:
+    """Enforce the QUANT style contract."""
     bad = [path for path in tracked() if is_generated(path)]
     for path in bad[:10]:
         print(f"generated file tracked: {path}")
@@ -289,6 +309,7 @@ def check_generated_paths() -> bool:
 
 
 def check_reference_integrity() -> bool:
+    """Enforce the QUANT style contract."""
     directory = ROOT / "references"
     index = directory / "index.md"
     if not index.is_file():
@@ -300,7 +321,11 @@ def check_reference_integrity() -> bool:
         print("references/index.md has no verified entries")
         return False
     expected = {name for name, _source, _digest in rows}
-    actual = {path.name for path in directory.iterdir() if path.is_file()}
+    actual = {
+        path.name
+        for path in directory.iterdir()
+        if path.is_file() and not path.name.startswith(".")
+    }
     actual.discard("index.md")
     ok = True
     if actual != expected:
@@ -319,6 +344,7 @@ def check_reference_integrity() -> bool:
 
 
 def check_q_style() -> bool:
+    """Enforce the QUANT style contract."""
     rules = tomllib.loads((ROOT / "q" / "qstyle.toml").read_text())
     text = (ROOT / "q" / "quant.q").read_text(encoding="utf-8")
     lines = text.splitlines()
@@ -353,6 +379,7 @@ def check_q_style() -> bool:
 
 
 def check_secrets() -> bool:
+    """Enforce the QUANT style contract."""
     services = [
         "NIRNAY_FYERS_APP_ID",
         "NIRNAY_FYERS_APP_SECRET",
@@ -380,6 +407,7 @@ def check_secrets() -> bool:
 
 
 def check_git_policy(allow_dirty: bool) -> bool:
+    """Enforce the QUANT style contract."""
     ok = True
     branch = git("rev-parse", "--abbrev-ref", "HEAD")
     if branch == "HEAD":
@@ -424,12 +452,19 @@ def check_git_policy(allow_dirty: bool) -> bool:
 
 
 def step(label: str, fn) -> tuple[str, bool, float]:
+    """Enforce the QUANT style contract."""
     started = time.monotonic()
     print(f"\n== {label}")
     try:
         outcome = fn() if callable(fn) else command(fn).returncode == 0
         status = "PASS" if outcome else "FAIL"
-    except Exception as error:  # noqa: BLE001 - gate must continue after errors
+    except (
+        OSError,
+        RuntimeError,
+        ValueError,
+        TypeError,
+        AssertionError,
+    ) as error:
         print(f"error: {error}")
         status = "FAIL"
     elapsed = time.monotonic() - started
@@ -441,20 +476,24 @@ class Gate:
     """Fail-closed runner with a summary."""
 
     def __init__(self) -> None:
+        """Enforce the QUANT style contract."""
         self.rows: list[tuple[str, str, float]] = []
         self.failed = False
 
     def run(self, label: str, fn) -> None:
+        """Enforce the QUANT style contract."""
         status, ok, elapsed = step(label, fn)
         self.rows.append((label, status, elapsed))
         if not ok:
             self.failed = True
 
     def skip(self, label: str, reason: str) -> None:
+        """Enforce the QUANT style contract."""
         print(f"== {label}: skipped ({reason})")
         self.rows.append((label, "SKIP", 0.0))
 
     def summary(self) -> int:
+        """Enforce the QUANT style contract."""
         print("\n======== gate summary ========")
         for label, status, elapsed in self.rows:
             print(f"{label:<54} {status:<5} {elapsed:.1f}s")
@@ -463,6 +502,7 @@ class Gate:
 
 
 def apply_format() -> bool:
+    """Enforce the QUANT style contract."""
     ok = True
     if shutil.which("clang-format"):
         result = command(
@@ -490,9 +530,22 @@ def apply_format() -> bool:
 
 
 def run_checks(gate: Gate, allow_dirty: bool) -> None:
+    """Enforce the QUANT style contract."""
     gate.run("style reference integrity", check_style_references)
     gate.run("generated-path policy", check_generated_paths)
     gate.run("reference integrity", check_reference_integrity)
+    gate.run(
+        "style contract (guides)",
+        lambda: command(
+            [
+                "python3",
+                "scripts/style_contract.py",
+                "--json-out",
+                "data/assurance/style-contract.json",
+            ]
+        ).returncode
+        == 0,
+    )
     gate.run("q style contract", check_q_style)
     gate.run("git policy", lambda: check_git_policy(allow_dirty))
     if shutil.which("clang-format"):
@@ -625,6 +678,7 @@ def run_checks(gate: Gate, allow_dirty: bool) -> None:
 
 
 def main() -> int:
+    """Enforce the QUANT style contract."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "command", choices=["check", "polish", "audit", "status"]
