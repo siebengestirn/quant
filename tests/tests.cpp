@@ -209,7 +209,7 @@ void TestUniversePublishRecovery() {
   const std::string path = TempPath("universe_publish.csv");
   const std::string journal_path = TempPath("universe_publish.jnl");
   std::remove(path.c_str());
-  std::remove((path + ".staging").c_str());
+  std::remove((path + ".staging.TX-1").c_str());
   std::remove(journal_path.c_str());
   std::string error;
   Journal journal;
@@ -230,7 +230,7 @@ void TestUniversePublishRecovery() {
                         std::istreambuf_iterator<char>());
   after_failure.close();
   Check(published == "old\n", "failed publication leaves prior file intact");
-  Check(std::filesystem::exists(path + ".staging"),
+  Check(std::filesystem::exists(path + ".staging.TX-1"),
         "audited staging artifact retained for recovery");
 
   Check(RecoverUniversePublication(path, &journal, nullptr, &error),
@@ -240,7 +240,7 @@ void TestUniversePublishRecovery() {
                    std::istreambuf_iterator<char>());
   recovered.close();
   Check(published == "new\n", "recovered publication has audited content");
-  Check(!std::filesystem::exists(path + ".staging"),
+  Check(!std::filesystem::exists(path + ".staging.TX-1"),
         "staging artifact consumed by recovery");
   Check(RecoverUniversePublication(path, &journal, nullptr, &error),
         "second reconciliation is idempotent");
@@ -293,7 +293,7 @@ void TestUniversePublishRecovery() {
                          &error),
         "publication without transaction id rejected");
 
-  std::ofstream tampered(path + ".staging");
+  std::ofstream tampered(path + ".staging.TX-4");
   tampered << "tampered\n";
   tampered.close();
   Check(!PublishUniverse(path,
@@ -303,7 +303,7 @@ void TestUniversePublishRecovery() {
                          PublicationFailurePoint::kAfterAuditBeforeRename,
                          &error),
         "mismatch fixture audited but not published");
-  std::ofstream wrong(path + ".staging");
+  std::ofstream wrong(path + ".staging.TX-4");
   wrong << "tampered\n";
   wrong.close();
   UniverseRecoveryReport mismatch_report;
@@ -760,6 +760,51 @@ void TestEventRuntimeOrdering() {
         "abort releases sequence reservation");
   Check(runtime.Submit(MakeEnvelope("S5", "AAA", 11, 103), &error),
         "sequence reusable after abort");
+}
+
+void TestUniverseTransactionConsistency() {
+  const std::string path = TempPath("universe_tx.csv");
+  const std::string journal_path = TempPath("universe_tx.jnl");
+  std::remove(path.c_str());
+  std::remove(journal_path.c_str());
+  std::string error;
+  Journal journal;
+  Check(journal.Open(journal_path, &error), "transaction journal opens");
+  auto audit = [&](const char* action,
+                   const std::string& id,
+                   const std::string& digest,
+                   size_t size) {
+    Json::Object payload;
+    payload["action"] = quant::Json::String(action);
+    payload["transaction_id"] = quant::Json::String(id);
+    payload["content_digest"] = quant::Json::String(digest);
+    payload["schema_version"] = quant::Json::UInteger(1);
+    payload["records"] = quant::Json::UInteger(static_cast<uint64_t>(size));
+    Event event;
+    event.type = EventType::kHeartbeat;
+    event.payload = quant::Json::ObjectValue(payload).Dump();
+    return journal.Append(&event, &error);
+  };
+  const std::string digest = ChecksumHex("content\n");
+  Check(audit("UNIVERSE_PUBLISH", "TX-DUP", digest, 8), "publish recorded");
+  Check(audit("UNIVERSE_PUBLISH", "TX-DUP", digest, 8),
+        "identical retry recorded");
+  std::ofstream(path) << "content\n";
+  UniverseRecoveryReport report;
+  Check(RecoverUniversePublication(path, &journal, &report, &error),
+        "duplicate retry recovers to one commit");
+  Check(report.recovered == 1, "only one commit appended");
+
+  Check(audit("UNIVERSE_PUBLISH", "TX-BAD", digest, 8),
+        "mismatch fixture publish");
+  Check(audit("UNIVERSE_PUBLISH_COMMIT", "TX-BAD", "wrong", 8),
+        "mismatched commit recorded");
+  Check(!RecoverUniversePublication(path, &journal, nullptr, &error),
+        "mismatched commit digest fails recovery");
+  Check(std::string(error).find("commit") != std::string::npos ||
+            std::string(error).find("mismatch") != std::string::npos,
+        "mismatch failure is explicit");
+  journal.Close();
 }
 
 void TestMoney() {
@@ -2560,6 +2605,7 @@ void TestTerminalAccounting() {
 int main() {
   using namespace quant;
   TestMoney();
+  TestUniverseTransactionConsistency();
   TestEventRuntimeOrdering();
   TestDatasetManifestContract();
   TestInstrumentReferenceModel();
