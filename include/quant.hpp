@@ -1029,11 +1029,16 @@ struct PaperOrder {
   Money average_fill;
   PaperOrderState state = PaperOrderState::kIntent;
   struct Fill {
+    std::string id;
     int quantity = 0;
     int64_t price_paise = 0;
     int64_t notional_paise = 0;
-    std::string id;
   };
+  std::string client_order_id;
+  std::string risk_policy_id;
+  std::string causation_id;
+  std::string correlation_id;
+  int64_t cumulative_notional_paise = 0;
   std::vector<Fill> fills;
   size_t posted_fill_count = 0;
   std::string reason;
@@ -1064,6 +1069,7 @@ class PaperBroker {
   bool Expire(const std::string& id, std::string* error);
   bool MarkAmbiguous(const std::string& id, std::string* error);
   bool Reconcile(const std::string& id, std::string* error);
+  bool RehydrateFromJournal(std::string* error);
   const PaperOrder* Find(const std::string& id) const;
   size_t order_count() const {
     return orders_.size();

@@ -37,6 +37,7 @@ struct App {
   Journal journal;
   std::shared_ptr<DailyRiskState> risk_state =
       std::make_shared<DailyRiskState>();
+  std::shared_ptr<PaperBroker> paper_broker;
   bool ready = false;
 };
 
@@ -73,6 +74,16 @@ App Initialize(std::string* error) {
           app.config.universe_path, &app.journal, &universe_recovery_error)) {
     app.journal.Close();
     *error = "universe publication recovery failed: " + universe_recovery_error;
+    return app;
+  }
+  app.paper_broker = std::make_shared<PaperBroker>(
+      app.config,
+      &app.journal,
+      std::make_shared<Portfolio>(app.config.initial_capital));
+  std::string paper_error;
+  if (!app.paper_broker->RehydrateFromJournal(&paper_error)) {
+    app.journal.Close();
+    *error = "paper order rehydration failed: " + paper_error;
     return app;
   }
   app.ready = true;
