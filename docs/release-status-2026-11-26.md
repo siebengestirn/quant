@@ -62,11 +62,12 @@ Branch protection on `main` was updated to match `git-policy.json`:
 The exported setting is `docs/branch-protection-2026-11-26.json`.
 
 **Bootstrap exception (narrow, one-time, time-bounded).** PR #45 installs the
-approval requirement and PR #46 reconciles final evidence. There is only one maintainer account,
+approval requirement and PR #46 reconciles final evidence. Only one maintainer account exists,
 so GitHub cannot supply an independent approving review for those PRs.
 `git-policy.json` records a single-maintainer exception expiring
 2026-12-31 that authorizes administrative merges of PR #45 and #46 only,
-after all three required checks passed on each exact head. It applies to no financial,
+after all three required checks passed on each exact head. It applies to no
+financial,
 recovery, data-contract or execution code, and no other PR. After that date no
 exception exists.
 
