@@ -739,6 +739,29 @@ void TestDatasetManifestContract() {
         "provider value serialized round-trip safe");
 }
 
+void TestEventRuntimeOrdering() {
+  EventRuntime runtime(8, QueuePolicy::kReject);
+  std::string error;
+  Check(runtime.Submit(MakeEnvelope("S1", "AAA", 10, 100), &error),
+        "higher queued sequence accepted");
+  Check(!runtime.Submit(MakeEnvelope("S2", "AAA", 9, 101), &error),
+        "lower queued sequence rejected before enqueue");
+  Check(runtime.accepted_sequences().at("AAA") == 10,
+        "accepted watermark reserved at enqueue");
+  Check(runtime.ProcessOne(&error), "queued event commits");
+  Check(runtime.sequences().at("AAA") == 10,
+        "committed watermark never regresses");
+  Check(runtime.Submit(MakeEnvelope("S3", "BBB", 10, 200), &error),
+        "same source sequence on another partition accepted");
+  Check(runtime.Submit(MakeEnvelope("S4", "AAA", 12, 102), &error),
+        "gap accepted into queue");
+  Check(runtime.Abort("S4"), "queued event aborted");
+  Check(runtime.accepted_sequences().at("AAA") == 10,
+        "abort releases sequence reservation");
+  Check(runtime.Submit(MakeEnvelope("S5", "AAA", 11, 103), &error),
+        "sequence reusable after abort");
+}
+
 void TestMoney() {
   Check(Money::FromRupees(500.0).paise() == 50000,
         "money 500 INR -> 50000 paise");
@@ -2537,6 +2560,7 @@ void TestTerminalAccounting() {
 int main() {
   using namespace quant;
   TestMoney();
+  TestEventRuntimeOrdering();
   TestDatasetManifestContract();
   TestInstrumentReferenceModel();
   TestProviderHistoryValidation();

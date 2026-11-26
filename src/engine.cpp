@@ -3214,13 +3214,19 @@ bool EventRuntime::Submit(const EventEnvelope& event, std::string* error) {
       *error = "event id reused with a different payload";
     return false;
   }
-  const auto sequence = sequences_.find(event.partition_key);
-  if (sequence != sequences_.end() &&
-      event.source_sequence <= sequence->second) {
+  const auto committed = sequences_.find(event.partition_key);
+  const auto reserved = accepted_.find(event.partition_key);
+  const uint64_t committed_high = committed == sequences_.end()
+                                      ? static_cast<uint64_t>(0)
+                                      : committed->second;
+  const uint64_t reserved_high =
+      reserved == accepted_.end() ? static_cast<uint64_t>(0) : reserved->second;
+  const uint64_t high = std::max(committed_high, reserved_high);
+  if (event.source_sequence <= high) {
     result_.out_of_order += 1;
     result_.rejected += 1;
     if (error)
-      *error = "source sequence is not ahead of committed watermark";
+      *error = "source sequence is not ahead of accepted watermark";
     return false;
   }
   if (queue_.size() >= capacity_) {
@@ -3232,8 +3238,28 @@ bool EventRuntime::Submit(const EventEnvelope& event, std::string* error) {
     return false;
   }
   queue_.push_back(event);
+  accepted_[event.partition_key] = event.source_sequence;
   result_.received += 1;
   return true;
+}
+
+bool EventRuntime::Abort(const std::string& event_id) {
+  for (auto it = queue_.begin(); it != queue_.end(); ++it) {
+    if (it->event_id != event_id)
+      continue;
+    const std::string partition = it->partition_key;
+    queue_.erase(it);
+    uint64_t highest = 0;
+    const auto committed = sequences_.find(partition);
+    if (committed != sequences_.end())
+      highest = committed->second;
+    for (const EventEnvelope& pending : queue_)
+      if (pending.partition_key == partition)
+        highest = std::max(highest, pending.source_sequence);
+    accepted_[partition] = highest;
+    return true;
+  }
+  return false;
 }
 
 bool EventRuntime::ProcessOne(std::string* error) {
@@ -3252,6 +3278,13 @@ bool EventRuntime::ProcessOne(std::string* error) {
     result_.quarantined = true;
     if (error)
       *error = "replay offset moved backwards; event retained in queue";
+    return false;
+  }
+  const auto current = sequences_.find(event.partition_key);
+  if (current != sequences_.end() && event.source_sequence <= current->second) {
+    result_.offset_failures += 1;
+    if (error)
+      *error = "committed sequence watermark would regress";
     return false;
   }
   ++applied_;  // Reducer step succeeded for this deterministic prototype.

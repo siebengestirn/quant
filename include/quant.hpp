@@ -710,6 +710,10 @@ class EventRuntime {
   const std::map<std::string, uint64_t>& sequences() const {
     return sequences_;
   }
+  const std::map<std::string, uint64_t>& accepted_sequences() const {
+    return accepted_;
+  }
+  bool Abort(const std::string& event_id);
   const std::map<std::string, std::string>& digests() const {
     return digests_;
   }
@@ -724,6 +728,7 @@ class EventRuntime {
   std::deque<EventEnvelope> queue_;
   std::map<std::string, uint64_t> offsets_;
   std::map<std::string, uint64_t> sequences_;
+  std::map<std::string, uint64_t> accepted_;
   std::map<std::string, std::string> digests_;
   RuntimeResult result_;
   size_t applied_ = 0;
