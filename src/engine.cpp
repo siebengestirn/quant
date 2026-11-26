@@ -3045,10 +3045,17 @@ namespace {
 
 std::string EnvelopeDigest(const EventEnvelope& event) {
   std::ostringstream canonical;
-  canonical << event.event_id << '|' << event.partition_key << '|'
-            << event.source_sequence << '|' << event.replay_offset << '|'
-            << event.event_time_ms << '|' << event.receive_time_ms << '|'
-            << static_cast<int>(event.type) << '|' << event.payload;
+  auto field = [&canonical](const std::string& value) {
+    canonical << value.size() << ':' << value << '|';
+  };
+  field(event.event_id);
+  field(event.partition_key);
+  field(std::to_string(event.source_sequence));
+  field(std::to_string(event.replay_offset));
+  field(std::to_string(event.event_time_ms));
+  field(std::to_string(event.receive_time_ms));
+  field(std::to_string(static_cast<int>(event.type)));
+  field(event.payload);
   return ChecksumHex(canonical.str());
 }
 
@@ -3067,11 +3074,24 @@ bool EventRuntime::Submit(const EventEnvelope& event, std::string* error) {
     return false;
   }
   const std::string digest = EnvelopeDigest(event);
+  for (const EventEnvelope& queued : queue_) {
+    if (queued.event_id != event.event_id)
+      continue;
+    if (EnvelopeDigest(queued) == digest) {
+      result_.duplicates += 1;
+      return true;
+    }
+    result_.conflicts += 1;
+    result_.quarantined = true;
+    if (error)
+      *error = "queued event id reused with a different payload";
+    return false;
+  }
   const auto prior = digests_.find(event.event_id);
   if (prior != digests_.end()) {
     if (prior->second == digest) {
       result_.duplicates += 1;
-      return true;  // Idempotent retry: no second state transition.
+      return true;  // Committed idempotent retry: no second transition.
     }
     result_.conflicts += 1;
     result_.quarantined = true;
@@ -3085,21 +3105,19 @@ bool EventRuntime::Submit(const EventEnvelope& event, std::string* error) {
     result_.out_of_order += 1;
     result_.rejected += 1;
     if (error)
-      *error = "source sequence is not monotonic for partition";
+      *error = "source sequence is not ahead of committed watermark";
     return false;
   }
   if (queue_.size() >= capacity_) {
     result_.rejected += 1;
     if (error)
-      *error = policy_ == QueuePolicy::kBlock
+      *error = policy_ == QueuePolicy::kRetry
                    ? "bounded queue full: caller must retry"
                    : "bounded queue full: event rejected";
     return false;
   }
-  digests_[event.event_id] = digest;
-  sequences_[event.partition_key] = event.source_sequence;
   queue_.push_back(event);
-  result_.accepted += 1;
+  result_.received += 1;
   return true;
 }
 
@@ -3109,20 +3127,26 @@ bool EventRuntime::ProcessOne(std::string* error) {
       *error = "event queue empty";
     return false;
   }
+  // Peek: an event is not dequeued until its commit succeeds.
   const EventEnvelope event = queue_.front();
-  queue_.pop_front();
   const auto offset = offsets_.find(event.partition_key);
-  if (offset != offsets_.end() && event.replay_offset < offset->second) {
+  const uint64_t committed_offset =
+      offset == offsets_.end() ? static_cast<uint64_t>(0) : offset->second;
+  if (event.replay_offset < committed_offset) {
+    result_.offset_failures += 1;
     result_.quarantined = true;
-    result_.rejected += 1;
     if (error)
-      *error = "replay offset moved backwards";
+      *error = "replay offset moved backwards; event retained in queue";
     return false;
   }
-  offsets_[event.partition_key] = std::max(
-      offset == offsets_.end() ? static_cast<uint64_t>(0) : offset->second,
-      event.replay_offset);
-  result_.processed += 1;
+  ++applied_;  // Reducer step succeeded for this deterministic prototype.
+  const std::string digest = EnvelopeDigest(event);
+  digests_[event.event_id] = digest;
+  sequences_[event.partition_key] = event.source_sequence;
+  offsets_[event.partition_key] =
+      std::max(committed_offset, event.replay_offset);
+  result_.committed += 1;
+  queue_.pop_front();
   return true;
 }
 

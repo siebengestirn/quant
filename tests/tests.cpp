@@ -345,9 +345,16 @@ void TestDeterministicEventRuntime() {
         "bounded queue rejects overflow");
   Check(runtime.queue_depth() == 2, "queue depth bounded at capacity");
   Check(runtime.Submit(MakeEnvelope("E1", "AAA", 1, 10), &error),
-        "identical retry accepted without enqueue");
-  Check(runtime.result().duplicates == 1, "duplicate counted once");
-  Check(runtime.queue_depth() == 2, "duplicate did not enqueue");
+        "uncommitted duplicate is idempotent by queued identity");
+  Check(runtime.result().committed == 0,
+        "submit alone does not commit an event");
+  Check(runtime.ProcessOne(&error) && runtime.ProcessOne(&error),
+        "queued events committed");
+  Check(runtime.Submit(MakeEnvelope("E1", "AAA", 1, 10), &error),
+        "identical retry accepted after commit");
+  Check(runtime.result().duplicates == 2,
+        "duplicate counted for queued and committed retries");
+  Check(runtime.queue_depth() == 0, "duplicate did not enqueue");
   EventEnvelope conflicting = MakeEnvelope("E1", "AAA", 1, 10);
   conflicting.payload = "different";
   Check(!runtime.Submit(conflicting, &error), "conflicting id rejected");
@@ -357,7 +364,7 @@ void TestDeterministicEventRuntime() {
         "non-monotonic source sequence rejected");
 
   RuntimeResult drained = runtime.Drain(&error);
-  Check(drained.processed == 2, "all queued events processed once");
+  Check(drained.committed == 2, "all queued events committed once");
   Check(runtime.queue_depth() == 0, "queue drained");
   Check(runtime.offsets().at("AAA") == 11,
         "partition replay offset is monotonic");
@@ -365,7 +372,22 @@ void TestDeterministicEventRuntime() {
         "partition source sequence watermark advanced");
   Check(runtime.ProcessOne(&error) == false, "empty queue has no event");
 
-  EventRuntime replay(8, QueuePolicy::kBlock);
+  EventRuntime ordered(4, QueuePolicy::kReject);
+  Check(ordered.Submit(MakeEnvelope("O1", "CCC", 1, 50), &error),
+        "ordered fixture accepted");
+  Check(ordered.ProcessOne(&error), "ordered fixture committed");
+  Check(ordered.Submit(MakeEnvelope("O2", "CCC", 2, 40), &error),
+        "backward-offset event accepted into queue");
+  const size_t depth_before = ordered.queue_depth();
+  Check(!ordered.ProcessOne(&error), "backward offset rejected at commit");
+  Check(ordered.queue_depth() == depth_before,
+        "backward-offset event retained, not silently lost");
+  Check(ordered.Submit(MakeEnvelope("O2", "CCC", 2, 40), &error),
+        "retry of queued event is idempotent, not a second enqueue");
+  Check(ordered.queue_depth() == depth_before,
+        "retry does not add a second queued event");
+
+  EventRuntime replay(8, QueuePolicy::kRetry);
   for (uint64_t i = 1; i <= 5; ++i) {
     Check(replay.Submit(
               MakeEnvelope("R" + std::to_string(i), "BBB", i, i + 100), &error),
@@ -374,7 +396,8 @@ void TestDeterministicEventRuntime() {
   replay.Drain(&error);
   Check(replay.offsets().at("BBB") == 105,
         "replay reconstructs exact partition offset");
-  Check(replay.result().processed == 5, "no replayed event applied twice");
+  Check(replay.result().committed == 5 && replay.applied() == 5,
+        "no replayed event applied twice");
 }
 
 void TestPaperRehydration() {
