@@ -10,6 +10,7 @@
 #include <compare>
 #include <cstdint>
 #include <cstdlib>
+#include <deque>
 #include <functional>
 #include <map>
 #include <limits>
@@ -602,6 +603,64 @@ class Portfolio {
   Ledger ledger_;
   std::map<std::string, Position> positions_;
   std::vector<std::string> audit_;
+};
+
+// Deterministic, single-writer event runtime. State changes are applied by a
+// pure ordered reducer; queues are bounded and overload policy is explicit.
+enum class QueuePolicy { kReject, kBlock };
+
+struct EventEnvelope {
+  std::string event_id;
+  std::string partition_key;
+  uint64_t source_sequence = 0;
+  uint64_t replay_offset = 0;
+  int64_t event_time_ms = 0;
+  int64_t receive_time_ms = 0;
+  EventType type = EventType::kHeartbeat;
+  std::string payload;
+};
+
+struct RuntimeResult {
+  size_t accepted = 0;
+  size_t rejected = 0;
+  size_t duplicates = 0;
+  size_t conflicts = 0;
+  size_t out_of_order = 0;
+  size_t processed = 0;
+  bool quarantined = false;
+  std::string detail;
+};
+
+class EventRuntime {
+ public:
+  EventRuntime(size_t capacity, QueuePolicy policy);
+  bool Submit(const EventEnvelope& event, std::string* error);
+  bool ProcessOne(std::string* error);
+  RuntimeResult Drain(std::string* error);
+  size_t queue_depth() const {
+    return queue_.size();
+  }
+  const std::map<std::string, uint64_t>& offsets() const {
+    return offsets_;
+  }
+  const std::map<std::string, uint64_t>& sequences() const {
+    return sequences_;
+  }
+  const std::map<std::string, std::string>& digests() const {
+    return digests_;
+  }
+  const RuntimeResult& result() const {
+    return result_;
+  }
+
+ private:
+  std::deque<EventEnvelope> queue_;
+  std::map<std::string, uint64_t> offsets_;
+  std::map<std::string, uint64_t> sequences_;
+  std::map<std::string, std::string> digests_;
+  RuntimeResult result_;
+  size_t capacity_;
+  QueuePolicy policy_;
 };
 
 // ---------------------------------------------------------------------------

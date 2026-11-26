@@ -298,6 +298,64 @@ void TestUniversePublishRecovery() {
   journal.Close();
 }
 
+EventEnvelope MakeEnvelope(const std::string& id,
+                           const std::string& partition,
+                           uint64_t sequence,
+                           uint64_t offset) {
+  EventEnvelope event;
+  event.event_id = id;
+  event.partition_key = partition;
+  event.source_sequence = sequence;
+  event.replay_offset = offset;
+  event.event_time_ms = 1000 + static_cast<int64_t>(sequence);
+  event.receive_time_ms = 2000 + static_cast<int64_t>(sequence);
+  event.payload = "quote|" + id;
+  return event;
+}
+
+void TestDeterministicEventRuntime() {
+  EventRuntime runtime(2, QueuePolicy::kReject);
+  std::string error;
+  Check(runtime.Submit(MakeEnvelope("E1", "AAA", 1, 10), &error),
+        "first event accepted");
+  Check(runtime.Submit(MakeEnvelope("E2", "AAA", 2, 11), &error),
+        "second event accepted");
+  Check(!runtime.Submit(MakeEnvelope("E3", "AAA", 3, 12), &error),
+        "bounded queue rejects overflow");
+  Check(runtime.queue_depth() == 2, "queue depth bounded at capacity");
+  Check(runtime.Submit(MakeEnvelope("E1", "AAA", 1, 10), &error),
+        "identical retry accepted without enqueue");
+  Check(runtime.result().duplicates == 1, "duplicate counted once");
+  Check(runtime.queue_depth() == 2, "duplicate did not enqueue");
+  EventEnvelope conflicting = MakeEnvelope("E1", "AAA", 1, 10);
+  conflicting.payload = "different";
+  Check(!runtime.Submit(conflicting, &error), "conflicting id rejected");
+  Check(runtime.result().conflicts == 1 && runtime.result().quarantined,
+        "conflict quarantines runtime");
+  Check(!runtime.Submit(MakeEnvelope("E4", "AAA", 1, 13), &error),
+        "non-monotonic source sequence rejected");
+
+  RuntimeResult drained = runtime.Drain(&error);
+  Check(drained.processed == 2, "all queued events processed once");
+  Check(runtime.queue_depth() == 0, "queue drained");
+  Check(runtime.offsets().at("AAA") == 11,
+        "partition replay offset is monotonic");
+  Check(runtime.sequences().at("AAA") == 2,
+        "partition source sequence watermark advanced");
+  Check(runtime.ProcessOne(&error) == false, "empty queue has no event");
+
+  EventRuntime replay(8, QueuePolicy::kBlock);
+  for (uint64_t i = 1; i <= 5; ++i) {
+    Check(replay.Submit(
+              MakeEnvelope("R" + std::to_string(i), "BBB", i, i + 100), &error),
+          "replay fixture accepted");
+  }
+  replay.Drain(&error);
+  Check(replay.offsets().at("BBB") == 105,
+        "replay reconstructs exact partition offset");
+  Check(replay.result().processed == 5, "no replayed event applied twice");
+}
+
 void TestMoney() {
   Check(Money::FromRupees(500.0).paise() == 50000,
         "money 500 INR -> 50000 paise");
@@ -2096,6 +2154,7 @@ void TestTerminalAccounting() {
 int main() {
   using namespace quant;
   TestMoney();
+  TestDeterministicEventRuntime();
   TestUniversePublishRecovery();
   TestAccountingReplayIntegrity();
   TestCanonicalDateFixture();

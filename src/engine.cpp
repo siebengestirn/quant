@@ -2845,6 +2845,101 @@ SizingResult SizePosition(const Config& config,
 }
 
 // ---------------------------------------------------------------------------
+// Deterministic event runtime.
+// ---------------------------------------------------------------------------
+namespace {
+
+std::string EnvelopeDigest(const EventEnvelope& event) {
+  std::ostringstream canonical;
+  canonical << event.event_id << '|' << event.partition_key << '|'
+            << event.source_sequence << '|' << event.replay_offset << '|'
+            << event.event_time_ms << '|' << event.receive_time_ms << '|'
+            << static_cast<int>(event.type) << '|' << event.payload;
+  return ChecksumHex(canonical.str());
+}
+
+}  // namespace
+
+EventRuntime::EventRuntime(size_t capacity, QueuePolicy policy)
+    : capacity_(capacity), policy_(policy) {
+}
+
+bool EventRuntime::Submit(const EventEnvelope& event, std::string* error) {
+  if (event.event_id.empty() || event.partition_key.empty() ||
+      event.payload.empty()) {
+    result_.rejected += 1;
+    if (error)
+      *error = "event identity, partition and payload are required";
+    return false;
+  }
+  const std::string digest = EnvelopeDigest(event);
+  const auto prior = digests_.find(event.event_id);
+  if (prior != digests_.end()) {
+    if (prior->second == digest) {
+      result_.duplicates += 1;
+      return true;  // Idempotent retry: no second state transition.
+    }
+    result_.conflicts += 1;
+    result_.quarantined = true;
+    if (error)
+      *error = "event id reused with a different payload";
+    return false;
+  }
+  const auto sequence = sequences_.find(event.partition_key);
+  if (sequence != sequences_.end() &&
+      event.source_sequence <= sequence->second) {
+    result_.out_of_order += 1;
+    result_.rejected += 1;
+    if (error)
+      *error = "source sequence is not monotonic for partition";
+    return false;
+  }
+  if (queue_.size() >= capacity_) {
+    result_.rejected += 1;
+    if (error)
+      *error = policy_ == QueuePolicy::kBlock
+                   ? "bounded queue full: caller must retry"
+                   : "bounded queue full: event rejected";
+    return false;
+  }
+  digests_[event.event_id] = digest;
+  sequences_[event.partition_key] = event.source_sequence;
+  queue_.push_back(event);
+  result_.accepted += 1;
+  return true;
+}
+
+bool EventRuntime::ProcessOne(std::string* error) {
+  if (queue_.empty()) {
+    if (error)
+      *error = "event queue empty";
+    return false;
+  }
+  const EventEnvelope event = queue_.front();
+  queue_.pop_front();
+  const auto offset = offsets_.find(event.partition_key);
+  if (offset != offsets_.end() && event.replay_offset < offset->second) {
+    result_.quarantined = true;
+    result_.rejected += 1;
+    if (error)
+      *error = "replay offset moved backwards";
+    return false;
+  }
+  offsets_[event.partition_key] = std::max(
+      offset == offsets_.end() ? 0ULL : offset->second, event.replay_offset);
+  result_.processed += 1;
+  return true;
+}
+
+RuntimeResult EventRuntime::Drain(std::string* error) {
+  while (!queue_.empty()) {
+    if (!ProcessOne(error))
+      break;
+  }
+  return result_;
+}
+
+// ---------------------------------------------------------------------------
 // Central risk engine.
 // ---------------------------------------------------------------------------
 RiskEngine::RiskEngine(Config config)
