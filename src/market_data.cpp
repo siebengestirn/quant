@@ -1,6 +1,10 @@
 #include "quant.hpp"
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <chrono>
+#include <cstdio>
 #include <cctype>
 #include <ctime>
 #include <fstream>
@@ -390,6 +394,33 @@ std::vector<FeedStatus> MarketDataService::CheckFeeds() const {
   return statuses;
 }
 
+bool PublishStagedUniverse(const std::string& path, std::string* error) {
+  const std::string staged = path + ".staging";
+  if (rename(staged.c_str(), path.c_str()) != 0) {
+    if (error)
+      *error = "universe publication failed";
+    return false;
+  }
+  const size_t slash = path.find_last_of('/');
+  const std::string directory =
+      slash == std::string::npos ? "." : path.substr(0, slash);
+  const int fd = open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (fd < 0) {
+    if (error)
+      *error = "universe directory unavailable";
+    return false;
+  }
+  const bool ok = fsync(fd) == 0;
+  close(fd);
+  if (!ok && error)
+    *error = "universe directory synchronization failed";
+  return ok;
+}
+
+void RemoveStagedUniverse(const std::string& path) {
+  std::remove((path + ".staging").c_str());
+}
+
 UniverseResult MarketDataService::SyncUniverse() const {
   UniverseResult result;
   const HttpClient http(config_.http_timeout_seconds);
@@ -421,8 +452,10 @@ UniverseResult MarketDataService::SyncUniverse() const {
                                         status_data_available,
                                         config_);
   result.source = "Upstox BOD NSE.json.gz (public, refreshed daily ~06:00 IST)";
-  if (!WriteUniverseCsv(
-          config_.universe_path, result.instruments, &result.error)) {
+  RemoveStagedUniverse(config_.universe_path);
+  if (!WriteUniverseCsv(config_.universe_path + ".staging",
+                        result.instruments,
+                        &result.error)) {
     return result;
   }
 
@@ -444,10 +477,13 @@ UniverseResult MarketDataService::SyncUniverse() const {
     event.payload = Json::ObjectValue(payload).Dump();
     std::string journal_error;
     if (!journal_->Append(&event, &journal_error)) {
+      RemoveStagedUniverse(config_.universe_path);
       result.error = "universe audit event not committed: " + journal_error;
       return result;
     }
   }
+  if (!PublishStagedUniverse(config_.universe_path, &result.error))
+    result.error = "universe staged but not published: " + result.error;
   return result;
 }
 

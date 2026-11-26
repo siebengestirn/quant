@@ -72,3 +72,13 @@ for eligible female first holders). DP is therefore reported as
 | Static IP / API mapping | NOT CONFIGURED |
 | Contract-note cost reconciliation | NOT IMPLEMENTED |
 | Trading decision | NO TRADE |
+
+## Integrity checksum qualification
+
+The journal and checkpoint digests in QUANT are unkeyed 64-bit FNV-style
+hashes. They detect accidental corruption and inconsistent checkpoint state.
+They are **not** cryptographic MACs or signatures: an actor able to rewrite
+the files can recompute a consistent-looking digest. Do not describe the
+audit trail as tamper-proof or adversarially authenticated. If malicious
+local modification enters the threat model, a keyed MAC with documented key
+custody or a signed append-only audit chain is required.

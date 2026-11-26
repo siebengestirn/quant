@@ -1001,9 +1001,17 @@ bool ValidExchangeDate(std::string_view text) {
     if (text[i] < '0' || text[i] > '9')
       return false;
   }
+  const int year = (text[0] - '0') * 1000 + (text[1] - '0') * 100 +
+                   (text[2] - '0') * 10 + (text[3] - '0');
   const int month = (text[5] - '0') * 10 + (text[6] - '0');
   const int day = (text[8] - '0') * 10 + (text[9] - '0');
-  return month >= 1 && month <= 12 && day >= 1 && day <= 31;
+  if (year < 1900 || year > 2200 || month < 1 || month > 12 || day < 1)
+    return false;
+  static constexpr int days_in_month[] = {
+      31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  const bool leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+  const int limit = days_in_month[month - 1] + (month == 2 && leap ? 1 : 0);
+  return day <= limit;
 }
 
 // 0 < L <= min(O, C) and max(O, C) <= H, volume finite and non-negative.
@@ -1441,6 +1449,12 @@ bool PaperBroker::ApplyQuote(const std::string& id,
       *error = "fill notional overflow";
     return false;
   }
+  PaperOrder::Fill lot;
+  lot.quantity = fill;
+  lot.price_paise = price.paise();
+  lot.notional_paise = added_notional;
+  lot.id = order.id + ":fill-" + std::to_string(order.fills.size() + 1);
+  order.fills.push_back(lot);
   order.filled_quantity += fill;
   order.average_fill = Money::FromPaise(
       total_notional / static_cast<int64_t>(order.filled_quantity));
@@ -1522,89 +1536,213 @@ bool PaperBroker::Reconcile(const std::string& id, std::string* error) {
     return false;
   }
   if (order.state != PaperOrderState::kFilled &&
-      order.state != PaperOrderState::kPartiallyFilled) {
+      order.state != PaperOrderState::kPartiallyFilled)
     return true;
-  }
-  const int remaining = order.filled_quantity - order.reconciled_quantity;
-  if (remaining <= 0)
-    return true;
-  if (order.reconciliation_tag.empty()) {
-    order.reconciliation_batches += 1;
-    order.reconciliation_tag =
-        order.id + ":batch-" + std::to_string(order.reconciliation_batches);
-  }
-  const std::string marker = "EXEC_TAG " + order.reconciliation_tag;
-  if (portfolio_->HasAudit(marker)) {
-    // A posting was already committed; a retry must not post it again.
-    order.reconciled_quantity = order.filled_quantity;
-    if (order.filled_quantity >= order.quantity &&
-        order.state != PaperOrderState::kFilled) {
-      return Transition(
-          &order,
-          PaperOrderState::kFilled,
-          "posting already reconciled: " + order.reconciliation_tag,
-          error);
+  for (size_t index = order.posted_fill_count; index < order.fills.size();
+       ++index) {
+    const PaperOrder::Fill& lot = order.fills[index];
+    const std::string posting_id = lot.id;
+    const std::string marker = "EXEC_TAG " + posting_id;
+    if (posted_ids_.find(posting_id) != posted_ids_.end() ||
+        portfolio_->HasAudit(marker)) {
+      posted_ids_.insert(posting_id);
+      order.posted_fill_count = index + 1;
+      continue;
     }
-    return true;
+    AccountingPosting posting;
+    posting.posting_id = posting_id;
+    posting.order_id = order.id;
+    posting.action = order.side == OrderSide::kBuy ? "BUY" : "SELL";
+    posting.symbol = order.symbol;
+    posting.quantity = lot.quantity;
+    posting.price_paise = lot.price_paise;
+    posting.notional_paise = lot.notional_paise;
+    posting.costs = EstimateCosts(Money::FromPaise(lot.notional_paise),
+                                  config_.execution_delivery,
+                                  order.side == OrderSide::kBuy,
+                                  config_.slippage_bps);
+    if (!posting.costs.usable()) {
+      if (error)
+        *error = "reconciliation cost calculation invalid";
+      return false;
+    }
+    if (!AppendAccountingPosting(journal_, posting, error))
+      return false;
+    posted_ids_.insert(posting_id);
+    if (!ApplyAccountingPosting(posting, portfolio_.get(), error)) {
+      posted_ids_.erase(posting_id);
+      return false;
+    }
+    order.posted_fill_count = index + 1;
   }
-  int64_t notional_paise = 0;
-  if (!money_detail::CheckedMultiply(order.average_fill.paise(),
-                                     static_cast<int64_t>(remaining),
-                                     &notional_paise)) {
-    if (error)
-      *error = "reconciliation notional overflow";
-    return false;
+  if (order.filled_quantity >= order.quantity &&
+      order.state != PaperOrderState::kFilled) {
+    return Transition(
+        &order, PaperOrderState::kFilled, "all fill lots reconciled", error);
   }
-  const Money notional = Money::FromPaise(notional_paise);
-  const CostBreakdown costs = EstimateCosts(notional,
-                                            config_.execution_delivery,
-                                            order.side == OrderSide::kBuy,
-                                            config_.slippage_bps);
-  if (!costs.usable()) {
-    if (error)
-      *error = "reconciliation cost calculation invalid";
-    return false;
-  }
-  // Record the exact intended posting before mutating the portfolio. A crash
-  // after posting is detected through the portfolio audit marker above.
-  Json::Object payload;
-  payload["order_id"] = Json::String(order.id);
-  payload["execution_tag"] = Json::String(order.reconciliation_tag);
-  payload["symbol"] = Json::String(order.symbol);
-  payload["quantity"] = Json::Integer(remaining);
-  payload["price_paise"] = Json::Integer(order.average_fill.paise());
-  Event event;
-  event.type = EventType::kAccounting;
-  event.payload = Json::ObjectValue(payload).Dump();
-  if (journal_ == nullptr || !journal_->Append(&event, error))
-    return false;
-  const bool ok = order.side == OrderSide::kBuy
-                      ? portfolio_->Buy(order.symbol,
-                                        remaining,
-                                        order.average_fill,
-                                        costs,
-                                        error,
-                                        order.reconciliation_tag)
-                      : portfolio_->Sell(order.symbol,
-                                         remaining,
-                                         order.average_fill,
-                                         costs,
-                                         error,
-                                         order.reconciliation_tag);
-  if (!ok)
-    return false;
-  order.reconciled_quantity = order.filled_quantity;
-  if (order.filled_quantity >= order.quantity)
-    return Transition(&order,
-                      PaperOrderState::kFilled,
-                      "accounting reconciled to simulated fills",
-                      error);
   return true;
 }
 
 const PaperOrder* PaperBroker::Find(const std::string& id) const {
   const auto it = orders_.find(id);
   return it == orders_.end() ? nullptr : &it->second;
+}
+
+// ---------------------------------------------------------------------------
+// Canonical accounting postings.
+// ---------------------------------------------------------------------------
+namespace {
+Json::Object CostObject(const CostBreakdown& costs) {
+  auto integer = [](int64_t value) { return Json::Integer(value); };
+  return Json::Object({{"brokerage", integer(costs.brokerage.paise())},
+                       {"stt", integer(costs.stt.paise())},
+                       {"exchange_fee", integer(costs.exchange_fee.paise())},
+                       {"gst", integer(costs.gst.paise())},
+                       {"sebi", integer(costs.sebi.paise())},
+                       {"stamp", integer(costs.stamp.paise())},
+                       {"dp", integer(costs.dp.paise())},
+                       {"slippage", integer(costs.slippage.paise())},
+                       {"total", integer(costs.total.paise())}});
+}
+
+bool ReadCostObject(const Json& object, CostBreakdown* costs) {
+  const Json* source = object.Find("recorded_costs_paise");
+  if (source == nullptr || source->type() != Json::Type::kObject)
+    return false;
+  auto read = [source](const char* field, Money* out) {
+    const Json* value = source->Find(field);
+    if (value == nullptr)
+      return false;
+    int64_t paise = 0;
+    if (!value->as_integer(&paise))
+      return false;
+    *out = Money::FromPaise(paise);
+    return out->valid();
+  };
+  if (!read("brokerage", &costs->brokerage) || !read("stt", &costs->stt) ||
+      !read("exchange_fee", &costs->exchange_fee) ||
+      !read("gst", &costs->gst) || !read("sebi", &costs->sebi) ||
+      !read("stamp", &costs->stamp) || !read("dp", &costs->dp) ||
+      !read("slippage", &costs->slippage) || !read("total", &costs->total))
+    return false;
+  costs->status = CalculationStatus::kCalculated;
+  return costs->usable();
+}
+}  // namespace
+
+bool AppendAccountingPosting(Journal* journal,
+                             const AccountingPosting& posting,
+                             std::string* error) {
+  if (journal == nullptr || posting.posting_id.empty() ||
+      posting.action.empty() || posting.schema_version != 1) {
+    if (error)
+      *error = "invalid accounting posting identity";
+    return false;
+  }
+  Json::Object payload;
+  payload["schema_version"] = Json::UInteger(posting.schema_version);
+  payload["posting_id"] = Json::String(posting.posting_id);
+  payload["order_id"] = Json::String(posting.order_id);
+  payload["action"] = Json::String(posting.action);
+  payload["symbol"] = Json::String(posting.symbol);
+  payload["qty"] = Json::Integer(posting.quantity);
+  payload["price_paise"] = Json::Integer(posting.price_paise);
+  payload["notional_paise"] = Json::Integer(posting.notional_paise);
+  payload["amount_paise"] = Json::Integer(posting.amount_paise);
+  payload["recorded_costs_paise"] =
+      Json::ObjectValue(CostObject(posting.costs));
+  Event event;
+  event.type = EventType::kAccounting;
+  event.payload = Json::ObjectValue(payload).Dump();
+  return journal->Append(&event, error);
+}
+
+bool ParseAccountingPosting(const Event& event,
+                            AccountingPosting* posting,
+                            std::string* error) {
+  if (posting == nullptr) {
+    if (error)
+      *error = "posting output is null";
+    return false;
+  }
+  Json payload;
+  if (!Json::Parse(event.payload, &payload, error))
+    return false;
+  auto integer = [&payload](const char* key, int64_t* out) {
+    const Json* value = payload.Find(key);
+    return value != nullptr && value->as_integer(out);
+  };
+  auto text = [&payload](const char* key, std::string* out) {
+    const Json* value = payload.Find(key);
+    if (value == nullptr || value->type() != Json::Type::kString)
+      return false;
+    *out = value->as_string();
+    return true;
+  };
+  AccountingPosting parsed;
+  int64_t schema = 0;
+  int64_t quantity = 0;
+  if (!integer("schema_version", &schema) || schema != 1 ||
+      !text("posting_id", &parsed.posting_id) ||
+      !text("order_id", &parsed.order_id) || !text("action", &parsed.action) ||
+      !text("symbol", &parsed.symbol) || !integer("qty", &quantity) ||
+      quantity <= 0 || quantity > std::numeric_limits<int>::max() ||
+      !integer("price_paise", &parsed.price_paise) ||
+      !integer("notional_paise", &parsed.notional_paise) ||
+      !integer("amount_paise", &parsed.amount_paise) ||
+      !ReadCostObject(payload, &parsed.costs)) {
+    if (error)
+      *error = "accounting posting schema invalid";
+    return false;
+  }
+  if (parsed.posting_id.empty() || parsed.symbol.empty() ||
+      (parsed.action != "BUY" && parsed.action != "SELL" &&
+       parsed.action != "EXPENSE" && parsed.action != "FLOW")) {
+    if (error)
+      *error = "accounting posting fields invalid";
+    return false;
+  }
+  parsed.quantity = static_cast<int>(quantity);
+  if ((parsed.action == "BUY" || parsed.action == "SELL") &&
+      (parsed.price_paise <= 0 || parsed.notional_paise <= 0)) {
+    if (error)
+      *error = "accounting posting has invalid trade amounts";
+    return false;
+  }
+  *posting = parsed;
+  return true;
+}
+
+bool ApplyAccountingPosting(const AccountingPosting& posting,
+                            Portfolio* portfolio,
+                            std::string* error) {
+  if (portfolio == nullptr || posting.schema_version != 1) {
+    if (error)
+      *error = "accounting reducer requires a portfolio and schema 1";
+    return false;
+  }
+  if (posting.action == "BUY") {
+    return portfolio->Buy(posting.symbol,
+                          posting.quantity,
+                          Money::FromPaise(posting.price_paise),
+                          posting.costs,
+                          error,
+                          posting.posting_id);
+  }
+  if (posting.action == "SELL") {
+    return portfolio->Sell(posting.symbol,
+                           posting.quantity,
+                           Money::FromPaise(posting.price_paise),
+                           posting.costs,
+                           error,
+                           posting.posting_id);
+  }
+  if (posting.action == "EXPENSE") {
+    return portfolio->RecordOperatingExpense(
+        Money::FromPaise(posting.amount_paise), error);
+  }
+  return portfolio->RecordExternalFlow(
+      Money::FromPaise(posting.amount_paise), posting.posting_id, error);
 }
 
 // ---------------------------------------------------------------------------
@@ -3429,34 +3567,45 @@ bool Journal::Open(const std::string& path, std::string* error) {
   // Create the journal file explicitly. A file created later by Append would
   // only be file-synced, leaving its directory entry undurable on first
   // creation. Establish the entry before the journal is declared healthy.
-  if (!std::filesystem::exists(path_)) {
-    const int file_fd =
-        open(path_.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-    if (file_fd < 0) {
-      release();
-      if (error)
-        *error = "cannot create journal file";
-      return false;
-    }
-    if (fchmod(file_fd, 0600) != 0 || fsync(file_fd) != 0 ||
-        close(file_fd) != 0) {
-      release();
-      if (error)
-        *error = "journal file initialization failed";
-      return false;
-    }
-  }
-  const int dir_fd =
-      open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-  if (dir_fd < 0 || fsync(dir_fd) != 0) {
-    if (dir_fd >= 0)
-      close(dir_fd);
+  const bool existed = std::filesystem::exists(path_);
+  const int file_fd = open(path_.c_str(),
+                           (existed ? O_WRONLY : O_WRONLY | O_CREAT | O_EXCL) |
+                               O_CLOEXEC | O_NOFOLLOW,
+                           0600);
+  if (file_fd < 0) {
     release();
     if (error)
-      *error = "journal directory synchronization failed";
+      *error = "cannot open journal file";
     return false;
   }
-  close(dir_fd);
+  int file_error = 0;
+  struct stat status{};
+  if (fstat(file_fd, &status) != 0 ||
+      (((status.st_mode & 0777) != 0600) && fchmod(file_fd, 0600) != 0))
+    file_error = errno;
+  if (file_error == 0 && fsync(file_fd) != 0)
+    file_error = errno;
+  if (close(file_fd) != 0 && file_error == 0)
+    file_error = errno;
+  if (file_error != 0) {
+    release();
+    if (error)
+      *error = "journal file initialization failed";
+    return false;
+  }
+  if (!existed) {
+    const int dir_fd =
+        open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dir_fd < 0 || fsync(dir_fd) != 0) {
+      if (dir_fd >= 0)
+        close(dir_fd);
+      release();
+      if (error)
+        *error = "journal directory synchronization failed";
+      return false;
+    }
+    close(dir_fd);
+  }
   if (std::filesystem::exists(path_)) {
     std::string replay_error;
     const std::vector<Event> existing = Replay(&replay_error);
@@ -3544,15 +3693,14 @@ bool Journal::Append(Event* event, std::string* error) {
             << static_cast<int>(candidate.type) << '|' << candidate.timestamp_ms
             << '|' << candidate.schema_version << '|' << candidate.payload;
   candidate.checksum = ChecksumHex(canonical.str());
-  *event = candidate;
 
-  // Durability boundary: the record is acknowledged only after fsync succeeds.
+  // Durability boundary: the caller's Event is updated only after fsync.
   const std::string record =
-      std::to_string(event->sequence) + '|' + event->id + '|' +
-      std::to_string(static_cast<int>(event->type)) + '|' +
-      std::to_string(event->timestamp_ms) + '|' +
-      std::to_string(event->schema_version) + '|' + HexEncode(event->payload) +
-      '|' + event->checksum + '\n';
+      std::to_string(candidate.sequence) + '|' + candidate.id + '|' +
+      std::to_string(static_cast<int>(candidate.type)) + '|' +
+      std::to_string(candidate.timestamp_ms) + '|' +
+      std::to_string(candidate.schema_version) + '|' +
+      HexEncode(candidate.payload) + '|' + candidate.checksum + '\n';
   const int fd =
       open(path_.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
   if (fd < 0) {
@@ -3583,6 +3731,7 @@ bool Journal::Append(Event* event, std::string* error) {
     return false;
   }
   close(fd);
+  *event = candidate;
   next_sequence_ = candidate.sequence + 1;
   ++size_;
   if (error)

@@ -810,6 +810,30 @@ struct Event {
   std::string checksum;
 };
 
+// ONE canonical accounting posting contract. Every producer and the replay
+// reducer use these functions; no producer writes an ad-hoc accounting event.
+struct AccountingPosting {
+  uint64_t schema_version = 1;
+  std::string posting_id;
+  std::string order_id;
+  std::string action;  // BUY | SELL | EXPENSE | FLOW
+  std::string symbol;
+  int quantity = 0;
+  int64_t price_paise = 0;
+  int64_t notional_paise = 0;
+  int64_t amount_paise = 0;
+  CostBreakdown costs;
+};
+bool AppendAccountingPosting(Journal* journal,
+                             const AccountingPosting& posting,
+                             std::string* error);
+bool ParseAccountingPosting(const Event& event,
+                            AccountingPosting* posting,
+                            std::string* error);
+bool ApplyAccountingPosting(const AccountingPosting& posting,
+                            Portfolio* portfolio,
+                            std::string* error);
+
 uint64_t Checksum(std::string_view text);
 std::string EventId(uint64_t sequence, std::string_view payload);
 
@@ -935,9 +959,14 @@ struct PaperOrder {
   Money limit_price;
   Money average_fill;
   PaperOrderState state = PaperOrderState::kIntent;
-  int reconciled_quantity = 0;
-  int reconciliation_batches = 0;
-  std::string reconciliation_tag;
+  struct Fill {
+    int quantity = 0;
+    int64_t price_paise = 0;
+    int64_t notional_paise = 0;
+    std::string id;
+  };
+  std::vector<Fill> fills;
+  size_t posted_fill_count = 0;
   std::string reason;
   std::vector<std::string> audit;
 };
@@ -980,6 +1009,7 @@ class PaperBroker {
   Journal* journal_;
   std::shared_ptr<Portfolio> portfolio_;
   std::map<std::string, PaperOrder> orders_;
+  std::set<std::string> posted_ids_;
   uint64_t next_id_ = 1;
 };
 

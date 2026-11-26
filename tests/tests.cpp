@@ -512,6 +512,9 @@ void TestJournal() {
   const uint64_t before = schema_journal.next_sequence();
   Check(!schema_journal.Append(&bad_schema, &error),
         "unsupported schema is rejected at append");
+  Check(bad_schema.sequence == 0 && bad_schema.id.empty() &&
+            bad_schema.checksum.empty(),
+        "rejected append does not mutate the caller event");
   Check(std::string(error).find("schema") != std::string::npos,
         "schema rejection is explicit");
   Check(schema_journal.healthy(), "rejection leaves journal healthy");
@@ -1176,8 +1179,15 @@ void TestMarketDataPipeline() {
   bad_date.date = "26/11/2026";
   Check(!pipeline.IngestBar(bad_date, "AAA", &error),
         "non-exchange date rejected");
+  Candle impossible_date = candle;
+  impossible_date.date = "2026-02-31";
+  Check(!pipeline.IngestBar(impossible_date, "AAA", &error),
+        "impossible calendar date rejected");
+  Candle leap_date = candle;
+  leap_date.date = "2024-02-29";
+  Check(pipeline.IngestBar(leap_date, "AAA", &error), "leap day accepted");
 
-  Check(journal.Replay(&error).size() == 2,
+  Check(journal.Replay(&error).size() == 3,
         "journal holds exactly the committed market events");
 
   KdbxCheckpoint checkpoint;
@@ -1186,12 +1196,12 @@ void TestMarketDataPipeline() {
   const PipelineResult first = pipeline.Publish(checkpoint, &publisher, &error);
   Check(first.status == PipelineStatus::kComplete,
         "pipeline publishes committed events");
-  Check(publisher.quotes == 1 && publisher.bars == 1,
-        "one quote and one bar projected");
+  Check(publisher.quotes == 1 && publisher.bars == 2,
+        "one quote and two bars projected");
   Check(publisher.last_sequence == 1 && !publisher.last_event_id.empty(),
         "event identity and sequence survive projection");
 
-  checkpoint.journal_watermark = 2;
+  checkpoint.journal_watermark = 3;
   RecordingPublisher second_publisher;
   const PipelineResult second =
       pipeline.Publish(checkpoint, &second_publisher, &error);
@@ -1206,6 +1216,92 @@ void TestMarketDataPipeline() {
         "publisher failure propagates as FAILED");
   Check(std::string(PipelineStatusName(PipelineStatus::kFailed)) == "FAILED",
         "pipeline status names are stable");
+  journal.Close();
+}
+
+void TestPaperPartialAndReplay() {
+  const std::string path = TempPath("paper_partial.jnl");
+  std::remove(path.c_str());
+  std::string error;
+  Journal journal;
+  Check(journal.Open(path, &error), "partial paper journal opens");
+  auto portfolio = std::make_shared<Portfolio>(Money::FromRupees(100000.0));
+  Config config = TestConfig();
+  config.max_participation_fraction = 0.5;
+  PaperBroker broker(config, &journal, portfolio);
+
+  PaperOrder* order = broker.CreateIntent(
+      "AAA", OrderSide::kBuy, 4, Money::FromRupees(200.0), &error);
+  Check(order != nullptr, "partial-fill order created");
+  Check(broker.RiskApprove(order->id, &error) &&
+            broker.Submit(order->id, &error) &&
+            broker.Acknowledge(order->id, &error),
+        "partial-fill order working");
+  Quote first = GoodQuote(100.0);
+  first.symbol = "AAA";
+  first.ask = 100.0;
+  first.ask_qty = 4;
+  Check(broker.ApplyQuote(order->id, first, 1000, &error),
+        "first partial fill processed");
+  Check(order->filled_quantity == 2 && order->fills.size() == 1,
+        "first fill lot is two shares");
+  Check(broker.Reconcile(order->id, &error), "first partial fill reconciled");
+  Check(portfolio->positions().at("AAA").quantity == 2,
+        "two shares posted after first reconcile");
+
+  Quote second = first;
+  second.last = 110.0;
+  second.ask = 110.0;
+  second.ask_qty = 4;
+  Check(broker.ApplyQuote(order->id, second, 1001, &error),
+        "second partial fill processed");
+  Check(order->filled_quantity == 4 && order->fills.size() == 2,
+        "second fill lot recorded separately");
+  Check(order->fills[1].notional_paise == 22000,
+        "second fill notional is exact, not average-derived");
+  Check(broker.Reconcile(order->id, &error), "second partial fill reconciled");
+  const auto position = portfolio->positions().at("AAA");
+  Check(position.quantity == 4, "all four shares posted");
+  Check(position.avg_price == Money::FromPaise(10500),
+        "combined average price is 105 rupees");
+  int64_t invested = 0;
+  Check(portfolio->ledger().invested.TryPaise(&invested) && invested == 42000,
+        "combined notional is exactly 420 rupees");
+  const Ledger before_retry = portfolio->ledger();
+  Check(broker.Reconcile(order->id, &error), "repeated reconcile succeeds");
+  Check(portfolio->ledger().cash == before_retry.cash &&
+            portfolio->ledger().invested == before_retry.invested,
+        "repeated reconcile does not mutate the portfolio");
+
+  // The accounting events produced above must be consumable by the canonical
+  // reducer after a restart.
+  const auto events = journal.Replay(&error);
+  Check(error.empty(), "paper journal replays cleanly");
+  Portfolio rebuilt(Money::FromRupees(100000.0));
+  std::set<std::string> applied;
+  int postings = 0;
+  for (const Event& event : events) {
+    if (event.type != EventType::kAccounting)
+      continue;
+    AccountingPosting posting;
+    Check(ParseAccountingPosting(event, &posting, &error),
+          "paper accounting event matches canonical schema");
+    if (!applied.insert(posting.posting_id).second)
+      continue;
+    Check(ApplyAccountingPosting(posting, &rebuilt, &error),
+          "canonical reducer applies paper posting");
+    ++postings;
+  }
+  Check(postings == 2, "two fill postings replayed");
+  Check(rebuilt.ledger().cash == portfolio->ledger().cash &&
+            rebuilt.ledger().invested == portfolio->ledger().invested &&
+            rebuilt.ledger().realized_pnl == portfolio->ledger().realized_pnl &&
+            rebuilt.positions().size() == portfolio->positions().size() &&
+            rebuilt.positions().at("AAA").quantity ==
+                portfolio->positions().at("AAA").quantity &&
+            rebuilt.positions().at("AAA").avg_price ==
+                portfolio->positions().at("AAA").avg_price,
+        "rebuilt portfolio matches pre-restart state exactly");
   journal.Close();
 }
 
@@ -1842,6 +1938,7 @@ int main() {
   TestKdbxCheckpointContract();
   TestExactIntegerPersistence();
   TestPaperExecution();
+  TestPaperPartialAndReplay();
   TestMarketDataPipeline();
   std::cout << "checks=" << g_checks << " failures=" << g_failures << "\n";
   return g_failures == 0 ? 0 : 1;

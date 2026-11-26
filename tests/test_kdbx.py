@@ -495,7 +495,9 @@ with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
 """.replace("PORT", str(isolated_q.port)).replace("HDB", json.dumps(str(hdb)))
     code, out = run([str(PYKX_PYTHON), "-c", script])
     assert code == 0, out
-    (hdb / "manifest").unlink()
+    generations = sorted(hdb.glob("gen-*"))
+    assert len(generations) == 1
+    (generations[0] / "manifest").unlink()
 
     probe = """
 import json
@@ -507,6 +509,47 @@ with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
         status = status.decode()
     print(json.dumps({"status": status}))
 """.replace("PORT", str(isolated_q.port)).replace("HDB", json.dumps(str(hdb)))
+    code, out = run([str(PYKX_PYTHON), "-c", probe])
+    assert code == 0, out
+    assert json.loads(out.strip().splitlines()[-1])["status"] == (
+        "invalid_checkpoint"
+    )
+
+
+def test_same_row_count_corruption_is_rejected(isolated_q):
+    """A changed component with unchanged row count must fail digest checks."""
+    if not q_runtime_available():
+        pytest.skip("native q runtime unavailable; generation test SKIPPED")
+    hdb = isolated_q.directory / "hdb-corrupt"
+    script = """
+import pykx as kx
+
+with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
+    q(".quant.reset[]")
+    q(".quant.ingestBar", [9845, kx.SymbolAtom("COR"),
+                           100.0, 103.0, 99.0, 102.0, 1000.0])
+    q(".quant.persist", str(HDB))
+""".replace("PORT", str(isolated_q.port))
+    script = script.replace("HDB", json.dumps(str(hdb)))
+    code, out = run([str(PYKX_PYTHON), "-c", script])
+    assert code == 0, out
+    generation = sorted(hdb.glob("gen-*"))[0]
+    original = (generation / "bars").read_bytes()
+    tampered = original.replace(b"d", b"e")
+    (generation / "bars").write_bytes(tampered)
+    assert (generation / "bars").stat().st_size == len(original)
+
+    probe = """
+import json
+import pykx as kx
+
+with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
+    status = q(".quant.recover", str(HDB)).py()
+    if isinstance(status, bytes):
+        status = status.decode()
+    print(json.dumps({"status": status}))
+""".replace("PORT", str(isolated_q.port))
+    probe = probe.replace("HDB", json.dumps(str(hdb)))
     code, out = run([str(PYKX_PYTHON), "-c", probe])
     assert code == 0, out
     assert json.loads(out.strip().splitlines()[-1])["status"] == (

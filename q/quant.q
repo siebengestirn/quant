@@ -231,29 +231,50 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
 .quant.pathString:{[v] $[10h=type v; v; string v]}
 .quant.filePath:{[dir;name] hsym `$((string dir),"/",string name)}
 
-/ A checkpoint is committed only when its manifest is published after all
-/ component files. Recovery rejects a directory without a matching manifest.
+/ Content digest over q's canonical binary encoding. This is a non-
+/ cryptographic corruption detector, not tamper authentication.
+.quant.digest:{[x] {[h;c] h+((`long$c)*2654435761)}/[0; -8!x]}
+.quant.generationDir:{[p;g] `$((.quant.pathString p),"/gen-",string g)}
+.quant.currentGeneration:{[p]
+  pointer:.quant.filePath[hsym `$(.quant.pathString p);`current];
+  if[0=count key pointer; :0];
+  :get pointer}
+
+/ Each generation is immutable. The small current pointer is written last,
+/ so an interrupted write leaves the previous committed generation intact.
 .quant.persist:{[path]
   p:.quant.pathString path;
   system "mkdir -p ",p;
-  root:hsym `$p;
   .quant.generation::.quant.generation+1;
-  (.quant.filePath[root;`quotes]) set quotes;
-  (.quant.filePath[root;`bars]) set bars;
-  (.quant.filePath[root;`features]) set .quant.featureHistory[];
-  (.quant.filePath[root;`seen]) set .quant.seen;
-  (.quant.filePath[root;`state]) set .quant.state[];
-  (.quant.filePath[root;`meta]) set (.quant.state[]; .quant.counts[]);
-  counts:.quant.counts[];
-  savedFeatures:.quant.featureHistory[];
-  manifest:`schemaVersion`generation`quotes`bars`features`committed!(
-    .quant.schemaVersion;.quant.generation;counts`quotes;counts`bars;
-    count savedFeatures;1b);
+  gen:.quant.generation;
+  gdir:.quant.generationDir[p;gen];
+  system "mkdir -p ",string gdir;
+  root:hsym gdir;
+  savedQuotes:quotes; savedBars:bars;
+  savedFeatures:.quant.featureHistory[]; savedSeen:.quant.seen;
+  savedState:.quant.state[];
+  (.quant.filePath[root;`quotes]) set savedQuotes;
+  (.quant.filePath[root;`bars]) set savedBars;
+  (.quant.filePath[root;`features]) set savedFeatures;
+  (.quant.filePath[root;`seen]) set savedSeen;
+  (.quant.filePath[root;`state]) set savedState;
+  (.quant.filePath[root;`meta]) set (savedState;.quant.counts[]);
+  components:`quotes`bars`features`seen`state!(
+    (count savedQuotes;.quant.digest savedQuotes);
+    (count savedBars;.quant.digest savedBars);
+    (count savedFeatures;.quant.digest savedFeatures);
+    (count savedSeen;.quant.digest savedSeen);
+    (count savedState;.quant.digest savedState));
+  manifest:`schemaVersion`generation`components!(
+    .quant.schemaVersion;gen;components);
   (.quant.filePath[root;`manifest]) set manifest;
+  (.quant.filePath[hsym `$p;`current]) set gen;
   `persisted}
 
 .quant.loadHistorical:{[path]
-  root:hsym `$(.quant.pathString path);
+  gen:.quant.currentGeneration[path];
+  if[gen<=0; :`invalid_checkpoint];
+  root:hsym .quant.generationDir[path;gen];
   hQuotes:get .quant.filePath[root;`quotes];
   hBars:get .quant.filePath[root;`bars];
   hFeatures:get .quant.filePath[root;`features];
@@ -264,27 +285,36 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
     (hQuotes;hBars;hFeatures;hSeen;hState;hMeta)}
 
 .quant.recover:{[path]
-  root:hsym `$(.quant.pathString path);
+  p:.quant.pathString path;
+  gen:.quant.currentGeneration[p];
+  if[gen<=0; :`invalid_checkpoint];
+  root:hsym .quant.generationDir[p;gen];
   manifestPath:.quant.filePath[root;`manifest];
   if[0=count key manifestPath; :`invalid_checkpoint];
   hManifest:get manifestPath;
-  committed:hManifest`committed;
   manifestSchema:hManifest`schemaVersion;
   manifestGeneration:hManifest`generation;
-  if[not committed; :`invalid_checkpoint];
   if[manifestSchema<>.quant.schemaVersion; :`invalid_checkpoint];
-  hState:get .quant.filePath[root;`state];
-  if[(hState`generation)<>manifestGeneration; :`invalid_checkpoint];
+  if[manifestGeneration<>gen; :`invalid_checkpoint];
+  components:hManifest`components;
+  expectedQuotes:components`quotes; expectedBars:components`bars;
+  expectedFeatures:components`features; expectedSeen:components`seen;
+  expectedState:components`state;
   hQuotes:get .quant.filePath[root;`quotes];
   hBars:get .quant.filePath[root;`bars];
   hFeatures:get .quant.filePath[root;`features];
   hSeen:get .quant.filePath[root;`seen];
-  manifestQuotes:hManifest`quotes;
-  manifestBars:hManifest`bars;
-  manifestFeatures:hManifest`features;
-  if[(count hQuotes)<>manifestQuotes; :`invalid_checkpoint];
-  if[(count hBars)<>manifestBars; :`invalid_checkpoint];
-  if[(count hFeatures)<>manifestFeatures; :`invalid_checkpoint];
+  hState:get .quant.filePath[root;`state];
+  if[not (count hQuotes;.quant.digest hQuotes)~expectedQuotes;
+     :`invalid_checkpoint];
+  if[not (count hBars;.quant.digest hBars)~expectedBars;
+     :`invalid_checkpoint];
+  if[not (count hFeatures;.quant.digest hFeatures)~expectedFeatures;
+     :`invalid_checkpoint];
+  if[not (count hSeen;.quant.digest hSeen)~expectedSeen;
+     :`invalid_checkpoint];
+  if[not (count hState;.quant.digest hState)~expectedState;
+     :`invalid_checkpoint];
   quotes::hQuotes; bars::hBars; features::hFeatures; .quant.seen::hSeen;
   .quant.maxSeq::hState`maxSeq;
   .quant.duplicates::hState`duplicates;
