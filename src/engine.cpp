@@ -989,6 +989,54 @@ bool KdbxRecoveryPlan(const KdbxCheckpoint& checkpoint,
 }
 
 // ---------------------------------------------------------------------------
+// Instrument reference model. Permanent identity is distinct from ticker.
+// ---------------------------------------------------------------------------
+bool ValidateReferenceInstrument(const ReferenceInstrument& instrument,
+                                 std::string* error) {
+  auto reject = [error](const char* message) {
+    if (error)
+      *error = message;
+    return false;
+  };
+  if (instrument.schema_version != 1 || instrument.permanent_id.empty() ||
+      instrument.venue.empty() || instrument.isin.empty())
+    return reject("permanent identity requires id, venue and ISIN");
+  if (!ValidateInstrumentSpec(
+          InstrumentSpec{instrument.asset_class,
+                         instrument.venue,
+                         instrument.calendar_id,
+                         instrument.fee_schedule_id,
+                         static_cast<double>(instrument.tick_size_minor),
+                         static_cast<int>(instrument.lot_size),
+                         true},
+          error))
+    return false;
+  if (instrument.currency.size() != 3)
+    return reject("currency must be a three-letter code");
+  if (instrument.price_scale < 0 || instrument.price_scale > 9 ||
+      instrument.quantity_scale < 0 || instrument.quantity_scale > 9)
+    return reject("price and quantity scales must be in [0, 9]");
+  if (instrument.tick_size_minor <= 0 || instrument.lot_size <= 0 ||
+      instrument.contract_multiplier <= 0)
+    return reject("tick, lot and multiplier must be positive integers");
+  if (instrument.session_model.empty() || instrument.settlement_model.empty() ||
+      instrument.margin_model.empty())
+    return reject("session, settlement and margin models are required");
+  if (instrument.effective_from_ms <= 0 ||
+      (instrument.effective_to_ms != 0 &&
+       instrument.effective_to_ms < instrument.effective_from_ms))
+    return reject("invalid effective interval");
+  return true;
+}
+
+bool VenueConformanceSupported(const std::string& venue,
+                               AssetClass asset_class,
+                               const std::string& calendar_id) {
+  return venue == "NSE" && asset_class == AssetClass::kCashEquity &&
+         calendar_id == "NSE-CALENDAR-v1";
+}
+
+// ---------------------------------------------------------------------------
 // Asset and compliance contracts. These describe capability boundaries; they
 // do not authorise any live route.
 // ---------------------------------------------------------------------------
