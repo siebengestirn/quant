@@ -793,3 +793,61 @@ with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
     assert result["state"] == "orphan"
     assert result["acquired"] == "false"
     assert lock.exists()
+
+
+def test_orphan_cleanup_rejects_unsafe_names(isolated_q):
+    script = """
+import json
+import pykx as kx
+
+with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
+    values = {
+        "valid": bool(q('.quant.stagingNameValid["gen-1.staging"]').py()),
+        "meta": bool(q('.quant.stagingNameValid["bad;rm -rf /"]').py()),
+        "traversal": bool(q('.quant.stagingNameValid["gen-../staging"]').py()),
+    }
+    print(json.dumps(values))
+""".replace("PORT", str(isolated_q.port))
+    code, out = run([str(PYKX_PYTHON), "-c", script])
+    assert code == 0, out
+    assert json.loads(out.strip().splitlines()[-1]) == {
+        "valid": True,
+        "meta": False,
+        "traversal": False,
+    }
+
+
+def test_sequence_conflict_detection(isolated_q):
+    script = """
+import json
+import pykx as kx
+
+
+def sym(value):
+    return kx.q("`" + value)
+
+
+with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
+    base = [0, sym("e1"), sym("AAA"), sym("SRC"), 1, 1, 1, 1,
+            100.0, 99.9, 100.1, 1000.0, sym("ok")]
+    q(".quant.reset[]")
+    first = q(".quant.ingest", base).py()
+    retry = q(".quant.ingest", base).py()
+    changed = list(base)
+    changed[1] = sym("e2")
+    changed[8] = 200.0
+    conflict = q(".quant.ingest", changed).py()
+    values = {
+        "first": first.decode() if isinstance(first, bytes) else first,
+        "retry": retry.decode() if isinstance(retry, bytes) else retry,
+        "conflict": (conflict.decode() if isinstance(conflict, bytes)
+                     else conflict),
+    }
+    print(json.dumps(values))
+""".replace("PORT", str(isolated_q.port))
+    code, out = run([str(PYKX_PYTHON), "-c", script])
+    assert code == 0, out
+    result = json.loads(out.strip().splitlines()[-1])
+    assert result["first"] == "ok"
+    assert result["retry"] == "duplicate_identical"
+    assert result["conflict"] == "sequence_conflict"
