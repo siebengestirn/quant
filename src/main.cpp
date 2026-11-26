@@ -1046,28 +1046,8 @@ int CommandReplay(App& app) {
 }
 
 bool RebuildPortfolio(App& app, Portfolio* out, std::string* error) {
-  Portfolio portfolio(app.config.initial_capital);
-  const std::vector<Event> events = app.journal.Replay(error);
-  if (!error->empty())
-    return false;
-  std::set<std::string> applied_postings;
-  for (const Event& event : events) {
-    if (event.type != EventType::kAccounting)
-      continue;
-    AccountingPosting posting;
-    if (!ParseAccountingPosting(event, &posting, error))
-      return false;
-    if (!applied_postings.insert(posting.posting_id).second)
-      continue;  // Idempotent replay: apply each posting once.
-    if (!ApplyAccountingPosting(posting, &portfolio, error)) {
-      *error = "accounting replay failed at sequence " +
-               std::to_string(event.sequence) + ": " + *error;
-      return false;
-    }
-  }
-  *out = portfolio;
-  error->clear();
-  return true;
+  return RebuildPortfolioFromJournal(
+      &app.journal, app.config.initial_capital, out, error);
 }
 
 int CommandPaper(App& app) {

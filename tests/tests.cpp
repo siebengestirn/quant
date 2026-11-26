@@ -133,6 +133,78 @@ void TestCanonicalDateFixture() {
   Check(checked == 14, "all canonical date fixture rows checked");
 }
 
+void TestAccountingReplayIntegrity() {
+  const std::string path = TempPath("accounting_replay.jnl");
+  std::remove(path.c_str());
+  std::string error;
+  Journal journal;
+  Check(journal.Open(path, &error), "replay journal opens");
+  CostBreakdown costs;
+  costs.status = CalculationStatus::kCalculated;
+  costs.brokerage = Money::FromPaise(0);
+  costs.stt = Money::FromPaise(100);
+  costs.exchange_fee = Money::FromPaise(31);
+  costs.gst = Money::FromPaise(24);
+  costs.sebi = Money::FromPaise(1);
+  costs.stamp = Money::FromPaise(0);
+  costs.dp = Money::FromPaise(0);
+  costs.slippage = Money::FromPaise(0);
+  costs.total = Money::FromPaise(156);
+  AccountingPosting posting;
+  posting.posting_id = "P-1";
+  posting.order_id = "O-1";
+  posting.action = "BUY";
+  posting.symbol = "AAA";
+  posting.quantity = 2;
+  posting.price_paise = 10000;
+  posting.notional_paise = 20000;
+  posting.costs = costs;
+  Check(ValidateAccountingPosting(posting, &error), "valid posting accepted");
+  Check(AppendAccountingPosting(&journal, posting, &error), "posting appended");
+  Check(AppendAccountingPosting(&journal, posting, &error),
+        "identical retry appended");
+  Portfolio rebuilt(Money::FromRupees(100000.0));
+  Check(RebuildPortfolioFromJournal(
+            &journal, Money::FromRupees(100000.0), &rebuilt, &error),
+        "identical duplicate replays idempotently");
+  Check(rebuilt.open_position_count() == 1,
+        "idempotent replay posts exactly one position");
+  Check(rebuilt.ledger().trade_count == 1, "trade counted once");
+
+  AccountingPosting conflicting = posting;
+  conflicting.quantity = 3;
+  conflicting.notional_paise = 30000;
+  Check(ValidateAccountingPosting(conflicting, &error),
+        "conflict fixture valid");
+  Check(AppendAccountingPosting(&journal, conflicting, &error),
+        "conflicting event appended to journal");
+  Portfolio failed(Money::FromRupees(100000.0));
+  Check(!RebuildPortfolioFromJournal(
+            &journal, Money::FromRupees(100000.0), &failed, &error),
+        "conflicting posting ID halts replay");
+  Check(std::string(error).find("conflicting") != std::string::npos,
+        "conflict failure is explicit");
+
+  const std::string mismatch_path = TempPath("accounting_mismatch.jnl");
+  std::remove(mismatch_path.c_str());
+  Journal mismatch_journal;
+  Check(mismatch_journal.Open(mismatch_path, &error), "mismatch journal opens");
+  AccountingPosting mismatched = posting;
+  mismatched.posting_id = "P-2";
+  mismatched.notional_paise = 99999;
+  Check(!ValidateAccountingPosting(mismatched, &error),
+        "notional mismatch rejected by shared validator");
+  mismatched = posting;
+  mismatched.posting_id = "P-3";
+  mismatched.costs.total = Money::FromPaise(999);
+  Check(!ValidateAccountingPosting(mismatched, &error),
+        "cost total mismatch rejected by shared validator");
+  Check(mismatch_journal.Replay(&error).empty(),
+        "no invalid posting was journalled");
+  mismatch_journal.Close();
+  journal.Close();
+}
+
 void TestMoney() {
   Check(Money::FromRupees(500.0).paise() == 50000,
         "money 500 INR -> 50000 paise");
@@ -1931,6 +2003,7 @@ void TestTerminalAccounting() {
 int main() {
   using namespace quant;
   TestMoney();
+  TestAccountingReplayIntegrity();
   TestCanonicalDateFixture();
   TestMoneyAdversarial();
   TestConfigParsing();
