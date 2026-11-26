@@ -232,11 +232,17 @@ void TestAccountingReplayIntegrity() {
   journal.Close();
 }
 
+std::string StagingPath(const std::string& target, const std::string& id) {
+  return (std::filesystem::path(target).parent_path() / (".staging." + id))
+      .string();
+}
+
 void TestUniversePublishRecovery() {
   const std::string path = TempPath("universe_publish.csv");
   const std::string journal_path = TempPath("universe_publish.jnl");
   std::remove(path.c_str());
-  std::remove((path + ".staging.TX-1").c_str());
+  for (const char* id : {"TX-1", "TX-2", "TX-3", "TX-4"})
+    std::remove(StagingPath(path, id).c_str());
   std::remove(journal_path.c_str());
   std::string error;
   Journal journal;
@@ -257,7 +263,7 @@ void TestUniversePublishRecovery() {
                         std::istreambuf_iterator<char>());
   after_failure.close();
   Check(published == "old\n", "failed publication leaves prior file intact");
-  Check(std::filesystem::exists(path + ".staging.TX-1"),
+  Check(std::filesystem::exists(StagingPath(path, "TX-1")),
         "audited staging artifact retained for recovery");
 
   Check(RecoverUniversePublication(path, &journal, nullptr, &error),
@@ -267,7 +273,7 @@ void TestUniversePublishRecovery() {
                    std::istreambuf_iterator<char>());
   recovered.close();
   Check(published == "new\n", "recovered publication has audited content");
-  Check(!std::filesystem::exists(path + ".staging.TX-1"),
+  Check(!std::filesystem::exists(StagingPath(path, "TX-1")),
         "staging artifact consumed by recovery");
   Check(RecoverUniversePublication(path, &journal, nullptr, &error),
         "second reconciliation is idempotent");
@@ -344,7 +350,7 @@ void TestUniversePublishRecovery() {
         "conflicting retry does not touch committed content");
   Check(!error.empty(), "conflicting retry reports an explicit reason");
 
-  std::ofstream tampered(path + ".staging.TX-4");
+  std::ofstream tampered(StagingPath(path, "TX-4"));
   tampered << "tampered\n";
   tampered.close();
   Check(!PublishUniverse(path,
@@ -1024,6 +1030,55 @@ void TestEventRuntimeOrdering() {
         "sequence reusable after abort");
 }
 
+void TestPublicationFilesystemBoundary() {
+  const std::string path = TempPath("publish_boundary.csv");
+  const std::string journal_path = TempPath("publish_boundary.jnl");
+  std::remove(path.c_str());
+  std::remove(journal_path.c_str());
+  std::string error;
+  Journal journal;
+  Check(journal.Open(journal_path, &error), "boundary journal opens");
+  Check(!PublishUniverse(path,
+                         "x\n",
+                         &journal,
+                         "../escape",
+                         PublicationFailurePoint::kNone,
+                         &error),
+        "transaction id with traversal is rejected");
+  Check(
+      !PublishUniverse(
+          path, "x\n", &journal, "A/B", PublicationFailurePoint::kNone, &error),
+      "transaction id with separator is rejected");
+  Check(
+      !PublishUniverse(
+          path, "x\n", &journal, "A.B", PublicationFailurePoint::kNone, &error),
+      "transaction id with dot segment is rejected");
+
+  const std::string staging = StagingPath(path, "TX-SYM");
+  std::filesystem::remove(staging);
+  const std::string target = TempPath("publish_symlink_target");
+  std::ofstream(target) << "attacker\n";
+  std::filesystem::create_symlink(target, staging);
+  Check(!PublishUniverse(path,
+                         "safe\n",
+                         &journal,
+                         "TX-SYM",
+                         PublicationFailurePoint::kNone,
+                         &error),
+        "symlink staging replacement is rejected");
+  Check(std::filesystem::is_symlink(staging),
+        "attacker symlink is left untouched");
+  std::filesystem::remove(staging);
+  Check(PublishUniverse(path,
+                        "safe\n",
+                        &journal,
+                        "TX-SYM",
+                        PublicationFailurePoint::kNone,
+                        &error),
+        "valid transaction publishes after symlink removal");
+  journal.Close();
+}
+
 void TestUniverseTransactionConsistency() {
   const std::string path = TempPath("universe_tx.csv");
   const std::string journal_path = TempPath("universe_tx.jnl");
@@ -1052,21 +1107,43 @@ void TestUniverseTransactionConsistency() {
   Check(audit("UNIVERSE_PUBLISH", "TX-DUP", digest, 8),
         "identical retry recorded");
   std::ofstream(path) << "content\n";
-  UniverseRecoveryReport report;
-  Check(RecoverUniversePublication(path, &journal, &report, &error),
-        "duplicate retry recovers to one commit");
-  Check(report.recovered == 1, "only one commit appended");
-
-  Check(audit("UNIVERSE_PUBLISH", "TX-BAD", digest, 8),
-        "mismatch fixture publish");
-  Check(audit("UNIVERSE_PUBLISH_COMMIT", "TX-BAD", "wrong", 8),
-        "mismatched commit recorded");
   Check(!RecoverUniversePublication(path, &journal, nullptr, &error),
+        "duplicate publish-begin records are rejected");
+  Check(std::string(error).find("duplicate publish-begin") != std::string::npos,
+        "duplicate publish-begin failure is explicit");
+
+  journal.Close();
+  const std::string mismatch_journal_path =
+      TempPath("universe_tx_mismatch.jnl");
+  std::remove(mismatch_journal_path.c_str());
+  Journal mismatch_journal;
+  Check(mismatch_journal.Open(mismatch_journal_path, &error),
+        "mismatch journal opens");
+  auto append_audit = [&](const char* action,
+                          const std::string& id,
+                          const std::string& value,
+                          size_t size) {
+    Json::Object payload;
+    payload["action"] = quant::Json::String(action);
+    payload["transaction_id"] = quant::Json::String(id);
+    payload["content_digest"] = quant::Json::String(value);
+    payload["schema_version"] = quant::Json::UInteger(1);
+    payload["records"] = quant::Json::UInteger(static_cast<uint64_t>(size));
+    Event event;
+    event.type = EventType::kHeartbeat;
+    event.payload = quant::Json::ObjectValue(payload).Dump();
+    return mismatch_journal.Append(&event, &error);
+  };
+  Check(append_audit("UNIVERSE_PUBLISH", "TX-BAD", digest, 8),
+        "mismatch fixture publish");
+  Check(append_audit("UNIVERSE_PUBLISH_COMMIT", "TX-BAD", "wrong", 8),
+        "mismatched commit recorded");
+  Check(!RecoverUniversePublication(path, &mismatch_journal, nullptr, &error),
         "mismatched commit digest fails recovery");
   Check(std::string(error).find("commit") != std::string::npos ||
             std::string(error).find("mismatch") != std::string::npos,
         "mismatch failure is explicit");
-  journal.Close();
+  mismatch_journal.Close();
 }
 
 void TestRiskAuthorizationBinding() {
@@ -3075,6 +3152,7 @@ int main() {
   TestCancelAfterPartialReplay();
   TestMalformedFillReplay();
   TestUniverseTransactionConsistency();
+  TestPublicationFilesystemBoundary();
   TestEventRuntimeOrdering();
   TestDatasetManifestContract();
   TestInstrumentReferenceModel();

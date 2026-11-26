@@ -1,6 +1,7 @@
 #include "quant.hpp"
 
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <filesystem>
 #include <unistd.h>
 
@@ -253,10 +254,8 @@ bool BuildUniverseTransactions(Journal* journal,
     if (transaction.id.empty())
       transaction.id = id;
     if (action->as_string() == "UNIVERSE_PUBLISH") {
-      if (transaction.published &&
-          (transaction.digest != value ||
-           transaction.size != static_cast<size_t>(records)))
-        return fail("transaction id reused with a different payload");
+      if (transaction.published)
+        return fail("duplicate publish-begin record for one transaction");
       if (transaction.committed &&
           (transaction.digest != value ||
            transaction.size != static_cast<size_t>(records)))
@@ -297,6 +296,88 @@ bool SyncDirectory(const std::string& path, std::string* error) {
 }
 
 }  // namespace
+
+bool ValidTransactionId(std::string_view id) {
+  if (id.empty() || id.size() > 64)
+    return false;
+  const unsigned char first = static_cast<unsigned char>(id.front());
+  if (!(std::isalnum(first) || id.front() == '_'))
+    return false;
+  for (char c : id) {
+    const unsigned char value = static_cast<unsigned char>(c);
+    if (!(std::isalnum(value) || c == '_' || c == '-'))
+      return false;
+  }
+  return true;
+}
+
+bool WriteStagedExclusive(const std::string& directory,
+                          const std::string& name,
+                          const std::string& content,
+                          std::string* error) {
+  auto fail = [error](const char* reason) {
+    if (error)
+      *error = reason;
+    return false;
+  };
+  int dirfd = open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (dirfd < 0)
+    return fail("cannot open publication directory");
+  int fd = openat(dirfd,
+                  name.c_str(),
+                  O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                  0600);
+  if (fd < 0) {
+    close(dirfd);
+    return fail(("exclusive staging creation failed: " +
+                 std::string(std::strerror(errno)))
+                    .c_str());
+  }
+  struct stat metadata{};
+  if (fstat(fd, &metadata) != 0 || !S_ISREG(metadata.st_mode)) {
+    close(fd);
+    close(dirfd);
+    return fail("staging object is not a regular file");
+  }
+  size_t written = 0;
+  while (written < content.size()) {
+    const ssize_t count =
+        write(fd, content.data() + written, content.size() - written);
+    if (count < 0 && errno == EINTR)
+      continue;
+    if (count <= 0) {
+      close(fd);
+      close(dirfd);
+      return fail("staged write failed");
+    }
+    written += static_cast<size_t>(count);
+  }
+  const bool durable = fsync(fd) == 0;
+  close(fd);
+  const bool directory_durable = fsync(dirfd) == 0;
+  close(dirfd);
+  if (!durable || !directory_durable)
+    return fail("staged fsync failed");
+  return true;
+}
+
+bool RenameStaged(const std::string& directory,
+                  const std::string& from,
+                  const std::string& to,
+                  std::string* error) {
+  int dirfd = open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (dirfd < 0) {
+    if (error)
+      *error = "cannot open publication directory for rename";
+    return false;
+  }
+  const bool ok = renameat(dirfd, from.c_str(), dirfd, to.c_str()) == 0 &&
+                  fsync(dirfd) == 0;
+  close(dirfd);
+  if (!ok && error)
+    *error = "descriptor-relative publication rename failed";
+  return ok;
+}
 
 bool WriteAndSyncFile(const std::string& path,
                       const std::string& content,
@@ -347,11 +428,12 @@ bool PublishUniverse(const std::string& path,
       *error = reason;
     return false;
   };
-  if (transaction_id.empty())
-    return fail("publication transaction id required");
+  if (!ValidTransactionId(transaction_id))
+    return fail("publication transaction id violates canonical grammar");
   std::map<std::string, UniverseTransaction> known;
-  if (!BuildUniverseTransactions(journal, &known, error))
+  if (!BuildUniverseTransactions(journal, &known, error)) {
     return false;
+  }
   const std::string digest = UniverseAuditDigest(content);
   const auto prior = known.find(transaction_id);
   if (prior != known.end()) {
@@ -368,13 +450,14 @@ bool PublishUniverse(const std::string& path,
     }
     return fail("pending transaction requires recovery, not a new publish");
   }
-  const std::string staged = path + ".staging." + transaction_id;
-  if (std::filesystem::exists(staged))
-    return fail("transaction staging path already exists");
-  if (!WriteAndSyncFile(staged, content, error))
+  const std::string staging_name = ".staging." + transaction_id;
+  const size_t separator = path.find_last_of('/');
+  const std::string directory =
+      separator == std::string::npos ? "." : path.substr(0, separator);
+  const std::string staged = directory + "/" + staging_name;
+  if (!WriteStagedExclusive(directory, staging_name, content, error)) {
     return false;
-  if (!SyncDirectory(staged, error))
-    return false;
+  }
   const std::string staged_content = [](const std::string& p) {
     std::ifstream input(p, std::ios::binary);
     return std::string((std::istreambuf_iterator<char>(input)),
@@ -392,10 +475,13 @@ bool PublishUniverse(const std::string& path,
     return false;
   if (inject == PublicationFailurePoint::kAfterAuditBeforeRename)
     return false;
-  if (rename(staged.c_str(), path.c_str()) != 0)
-    return fail("universe publication rename failed");
-  if (!SyncDirectory(path, error))
+  const size_t final_separator = path.find_last_of('/');
+  const std::string final_name = final_separator == std::string::npos
+                                     ? path
+                                     : path.substr(final_separator + 1);
+  if (!RenameStaged(directory, staging_name, final_name, error)) {
     return false;
+  }
   if (inject == PublicationFailurePoint::kAfterRenameBeforeCommit)
     return false;
   std::ifstream final_input(path, std::ios::binary);
@@ -430,7 +516,10 @@ bool RecoverUniversePublication(const std::string& path,
       ++local.committed;
       continue;
     }
-    const std::string staged = path + ".staging." + id;
+    const size_t separator = path.find_last_of('/');
+    const std::string directory =
+        separator == std::string::npos ? "." : path.substr(0, separator);
+    const std::string staged = directory + "/.staging." + id;
     bool published = false;
     std::string content;
     if (std::filesystem::exists(staged)) {
@@ -439,8 +528,12 @@ bool RecoverUniversePublication(const std::string& path,
                      std::istreambuf_iterator<char>());
       if (UniverseAuditDigest(content) == transaction.digest &&
           content.size() == transaction.size) {
-        if (rename(staged.c_str(), path.c_str()) != 0)
-          return fail("universe recovery rename failed");
+        const size_t final_separator = path.find_last_of('/');
+        const std::string final_name = final_separator == std::string::npos
+                                           ? path
+                                           : path.substr(final_separator + 1);
+        if (!RenameStaged(directory, ".staging." + id, final_name, error))
+          return false;
         published = true;
       }
     }
