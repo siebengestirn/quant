@@ -730,24 +730,39 @@ with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
 
 
 def test_stale_writer_lock_recovery(isolated_q):
+    import subprocess
+
     hdb = isolated_q.directory / "hdb-stale-lock"
     lock = hdb / ".writer.lock"
     lock.mkdir(parents=True)
+    host = subprocess.check_output(["hostname"], text=True).strip()
     script = """
 import json
 import pykx as kx
 
 with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
-    q('.[set; (hsym `$"' + LOCK + '/owner"; `pid`host`token`createdMs!(999999;"dead-host";"";2026.01.01D00:00:00.000000000)); {::}]')
+    owner = LOCK + "/owner"
+    local = '.[set; (hsym `$"' + owner + '"; `pid`host`token`createdMs!(999999;"' + HOST + '";"";2026.01.01D00:00:00.000000000)); {::}]'
+    q(local)
     recovered = q('.quant.staleLockRecovery["' + HDB + '"]').py()
-    print(json.dumps({"recovered": str(recovered).lower()}))
+    import os
+    os.makedirs(LOCK + "/.writer.lock", exist_ok=True) if False else None
+    q('.quant.checkedSystem[("mkdir ",.quant.quotePath["' + LOCK + '"])]')
+    foreign = '.[set; (hsym `$"' + owner + '"; `pid`host`token`createdMs!(999999;"other-host";"";2026.01.01D00:00:00.000000000)); {::}]'
+    q(foreign)
+    rejected = q('.quant.staleLockRecovery["' + HDB + '"]').py()
+    print(json.dumps({"recovered": str(recovered).lower(),
+                      "foreign": str(rejected).lower()}))
 """.replace("PORT", str(isolated_q.port))
     script = script.replace("HDB", json.dumps(str(hdb)))
     script = script.replace("LOCK", json.dumps(str(lock)))
+    script = script.replace("HOST", json.dumps(host))
     code, out = run([str(PYKX_PYTHON), "-c", script])
     assert code == 0, out
-    assert json.loads(out.strip().splitlines()[-1])["recovered"] == "true"
-    assert not lock.exists()
+    values = json.loads(out.strip().splitlines()[-1])
+    assert values["recovered"] == "true"
+    assert values["foreign"] == "false"
+    assert lock.exists()
 
 
 def test_sha256_digest_is_canonical(isolated_q):
@@ -851,3 +866,41 @@ with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
     assert result["first"] == "ok"
     assert result["retry"] == "duplicate_identical"
     assert result["conflict"] == "sequence_conflict"
+
+
+def test_executable_allowlist_and_secure_temp(isolated_q):
+    script = """
+import json
+import os
+import pykx as kx
+
+with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
+    values = {
+        "absolute": bool(q('.quant.safeExecutable["/usr/bin/q"]').py()),
+        "spaces": bool(q('.quant.safeExecutable["/tmp/my q"]').py()),
+        "traversal": bool(q('.quant.safeExecutable["/tmp/../q"]').py()),
+    }
+    tmp = str(q('first @[system;(".quant temp placeholder");{enlist ""}]'))
+    print(json.dumps(values))
+""".replace("PORT", str(isolated_q.port))
+    code, out = run([str(PYKX_PYTHON), "-c", script])
+    assert code == 0, out
+    assert json.loads(out.strip().splitlines()[-1]) == {
+        "absolute": True,
+        "spaces": False,
+        "traversal": False,
+    }
+    temp_dir = ROOT / "data" / "cache" / "qtmp"
+    assert temp_dir.is_dir()
+    created = subprocess.run(
+        [str(QUANT), "mktemp", "reviewtest"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    path = Path(created)
+    assert path.exists() and path.resolve().parent == temp_dir
+    mode = path.stat().st_mode & 0o777
+    assert mode == 0o600
+    path.unlink()

@@ -1246,6 +1246,27 @@ bool SyncParentDirectory(const std::string& path, std::string* error) {
   return ok;
 }
 
+int CommandMkTemp(const std::string& prefix) {
+  if (prefix.empty())
+    return 2;
+  const std::string directory = "data/cache/qtmp";
+  std::error_code ec;
+  std::filesystem::create_directories(directory, ec);
+  if (ec)
+    return 1;
+  std::filesystem::permissions(
+      directory, std::filesystem::perms::owner_all, ec);
+  std::string pattern = directory + "/" + prefix + "-XXXXXX";
+  std::vector<char> buffer(pattern.begin(), pattern.end());
+  buffer.push_back('\0');
+  const int fd = mkstemp(buffer.data());
+  if (fd < 0)
+    return 1;
+  close(fd);
+  std::cout << std::string(buffer.data()) << "\n";
+  return 0;
+}
+
 int CommandRemoveTree(const std::string& path) {
   if (path.empty() || path.front() != '/' ||
       path.find("..") != std::string::npos)
@@ -1296,6 +1317,8 @@ int RunCli(int argc, char** argv) {
     return CommandFsync(argv[2]);
   if (command == "rmrf" && argc == 3)
     return CommandRemoveTree(argv[2]);
+  if (command == "mktemp" && argc == 3)
+    return CommandMkTemp(argv[2]);
   std::string error;
   App app = Initialize(&error);
   if (!app.ready) {

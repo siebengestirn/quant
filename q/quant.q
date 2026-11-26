@@ -275,28 +275,47 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
 / computation is delegated to the checked quant CLI so both languages use
 / the same algorithm. Digests detect corruption but are not authentication.
 .quant.quantBin:{[] .quant.cliArg["-quantBin"]}
-.quant.fileDigest:{[path]
+.quant.executableAlphabet:
+  "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._-"
+.quant.safeExecutable:{[tool]
+  p:$[10h=type tool; tool; string tool];
+  if[not p like "/*"; :0b];
+  if[not all p in\: .quant.executableAlphabet; :0b];
+  :not (p like "*..*")}
+.quant.shellQuote:{[arg]
+  s:$[10h=type arg; arg; string arg];
+  if[any s in " ;$&|`"; '`unsafe_argument];
+  :"'", s, "'"}
+.quant.commandPath:{[]
   tool:.quant.quantBin[];
-  if[not count tool; tool:"build/quant"];
-  out:@[system;(tool," digest ",.quant.quotePath path);{`q_digest_error}];
+  if[not count tool; tool:.quant.canonicalPath "build/quant"];
+  if[not .quant.safeExecutable[tool]; '`unsafe_executable];
+  c:.quant.canonicalPath tool;
+  :$[c like "/*"; c; (first system "pwd"),"/",c]}
+.quant.fileDigest:{[path]
+  tool:.quant.commandPath[];
+  out:@[system;((.quant.shellQuote tool)," digest ",
+    .quant.quotePath path);{`q_digest_error}];
   if[not (type out) in (0h;10h); '`digest_failed];
   if[0=count out; '`digest_failed];
   :$[10h=type out; out; first out]}
 .quant.digestCounter:0
 .quant.digest:{[x]
-  tool:.quant.quantBin[];
-  if[not count tool; tool:"build/quant"];
+  tool:.quant.commandPath[];
   .quant.digestCounter::.quant.digestCounter+1;
-  tmp:"/tmp/quant-digest-", (string `long$.z.p), "-",
-    string .quant.digestCounter;
+  out:@[system;((.quant.shellQuote tool)," mktemp qdigest");
+    {`q_mktemp_error}];
+  if[(type out)<>0h; '`digest_failed];
+  if[0=count out; '`digest_failed];
+  tmp:first out;
   hsym[`$tmp] set .j.j x;
-  out:.quant.fileDigest[tmp];
+  digest:.quant.fileDigest[tmp];
   .quant.checkedSystem[("rm -f ",.quant.quotePath tmp)];
-  :out}
+  :digest}
 .quant.syncFile:{[path]
-  tool:.quant.quantBin[];
-  if[not count tool; tool:"build/quant"];
-  r:@[system;(tool," fsync ",.quant.quotePath path);{`q_fsync_error}];
+  tool:.quant.commandPath[];
+  r:@[system;((.quant.shellQuote tool)," fsync ",
+              .quant.quotePath path);{`q_fsync_error}];
   :((type r)=0h) and (1=count r) and ((first r) ~ "ok")}
 .quant.generationDir:{[p;g] `$((.quant.pathString p),"/gen-",string g)}
 .quant.currentGeneration:{[p]
@@ -369,6 +388,9 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
   record:get hsym `$(.quant.ownerPath p);
   pid:string record`pid;
   if[not .quant.validPid pid; :0b];
+  host:$[10h=type record`host; record`host; string record`host];
+  current:first system "hostname";
+  if[not (host ~ current); :0b];
   alive:@[system;("kill -0 ",pid," 2>/dev/null");{::}];
   if[(type alive)=0h; if[0<count alive; :0b]];
   :.quant.checkedRemoveLock p}
@@ -465,14 +487,20 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
 
 .quant.stagingNameValid:{[name]
   s:$[10h=type name; name; string name];
-  if[all s like "gen-[0-9]*.staging"; :1b];
-  :0b}
+  if[(count s)<13; :0b];
+  if[not ("gen-" ~ 4#s); :0b];
+  if[not (".staging" ~ (-8)#s); :0b];
+  digits:(count s)-12;
+  if[digits<1; :0b];
+  core:digits#4_s;
+  if[not all core in\: "0123456789"; :0b];
+  :1b}
 .quant.removeStaged:{[path;name]
   if[not .quant.stagingNameValid[name]; :0b];
   target:.quant.quotePath[(.quant.canonicalPath path),"/",string name];
-  tool:.quant.quantBin[];
-  if[not count tool; tool:"build/quant"];
-  r:@[system;(tool," rmrf ",target);{`q_remove_error}];
+  tool:.quant.commandPath[];
+  r:@[system;((.quant.shellQuote tool)," rmrf ",target);
+    {`q_remove_error}];
   ok:((type r)=0h) and (1=count r) and (first r like "ok*");
   if[ok; .quant.sync[]];
   :ok}
