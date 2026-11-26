@@ -51,20 +51,27 @@ TRIALS = 8
 SEED = 20261125
 
 
-def load_history(directory: Path) -> dict[str, list[dict[str, float]]]:
-    """Load cached daily candles written by data sync (VERIFIED source)."""
+def load_history_with_errors(
+    directory: Path,
+) -> tuple[dict[str, list[dict[str, float]]], int, list[str]]:
+    """Load history without silently discarding malformed source rows."""
     history: dict[str, list[dict[str, float]]] = {}
+    parse_errors: list[str] = []
     if not directory.is_dir():
-        return history
+        return history, 0, parse_errors
     for path in sorted(directory.glob("*.csv")):
         rows: list[dict[str, float]] = []
         with path.open(newline="", encoding="utf-8") as handle:
             reader = csv.DictReader(handle)
-            for raw in reader:
+            expected = {"date", "open", "high", "low", "close", "volume"}
+            if reader.fieldnames is None or set(reader.fieldnames) != expected:
+                parse_errors.append(f"{path.name}: invalid header")
+                continue
+            for line, raw in enumerate(reader, start=2):
                 try:
                     rows.append(
                         {
-                            "date": raw["date"],
+                            "date": str(raw["date"]),
                             "open": float(raw["open"]),
                             "high": float(raw["high"]),
                             "low": float(raw["low"]),
@@ -73,10 +80,48 @@ def load_history(directory: Path) -> dict[str, list[dict[str, float]]]:
                         }
                     )
                 except (KeyError, ValueError, TypeError):
-                    continue
+                    parse_errors.append(f"{path.name}:{line}")
         rows.sort(key=lambda row: row["date"])
         if rows:
             history[path.stem] = rows
+    return history, len(parse_errors), parse_errors
+
+
+def load_universe_status(path: Path) -> list[dict]:
+    """Versioned, dated instrument eligibility records."""
+    records: list[dict] = []
+    if not path.is_file():
+        return records
+    with path.open(newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            try:
+                records.append(
+                    {
+                        "symbol": str(row["symbol"]),
+                        "effective_from": str(row["effective_from"]),
+                        "effective_to": str(row.get("effective_to", "")),
+                        "eligible": str(row["eligible"]).lower() == "true",
+                        "revision": int(row.get("revision", 0)),
+                    }
+                )
+            except (KeyError, ValueError, TypeError):
+                continue
+    return records
+
+
+def load_session_calendar(path: Path) -> list[str]:
+    if not path.is_file():
+        return []
+    return [
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def load_history(directory: Path) -> dict[str, list[dict[str, float]]]:
+    """Load cached daily candles written by data sync."""
+    history, _errors, _detail = load_history_with_errors(directory)
     return history
 
 
@@ -92,35 +137,50 @@ class ValidatedDataset:
     vintage: str
     invalid_rows: int
     corporate_actions: str = "NOT INCORPORATED"
+    pit_enforced: bool = False
+    parse_errors: int = 0
+    calendar_basis: str = "OBSERVED_ONLY"
 
 
 def load_history_validated(
     directory: Path,
     instrument_status: list[dict] | None = None,
     vintage: str = "UNSPECIFIED",
+    session_calendar: list[str] | None = None,
 ) -> ValidatedDataset:
     """Load history with mandatory quality and point-in-time eligibility."""
-    raw_history = load_history(directory)
-    expected = sorted(
-        {row["date"] for rows in raw_history.values() for row in rows}
+    raw_history, parse_errors, _detail = load_history_with_errors(directory)
+    expected = (
+        sorted(session_calendar)
+        if session_calendar
+        else sorted(
+            {row["date"] for rows in raw_history.values() for row in rows}
+        )
+    )
+    calendar_basis = (
+        "EXCHANGE_CALENDAR" if session_calendar else "OBSERVED_ONLY"
     )
     quality: dict[str, dict] = {}
     for symbol, rows in raw_history.items():
         quality[symbol] = dataset_quality(rows, expected)
     eligible_dates: dict[str, list[str]] = {}
-    if instrument_status:
+    pit_enforced = bool(instrument_status)
+    if pit_enforced:
         for date in expected:
             eligible_dates[date] = point_in_time_universe(
                 instrument_status, date
             )
     statuses = {item["status"] for item in quality.values()}
-    if not quality or "BLOCKED" in statuses:
+    if not quality or parse_errors or "BLOCKED" in statuses:
         status = "BLOCKED"
     elif "PARTIAL" in statuses:
         status = "PARTIAL"
     else:
         status = "COMPLETE"
-    invalid_rows = sum(item["invalid_bar_count"] for item in quality.values())
+    invalid_rows = (
+        sum(item["invalid_bar_count"] for item in quality.values())
+        + parse_errors
+    )
     acceptable = {
         symbol: rows
         for symbol, rows in raw_history.items()
@@ -135,6 +195,9 @@ def load_history_validated(
         source=str(directory),
         vintage=vintage,
         invalid_rows=invalid_rows,
+        pit_enforced=pit_enforced,
+        parse_errors=parse_errors,
+        calendar_basis=calendar_basis,
     )
 
 
@@ -481,7 +544,7 @@ def forward_label(
 
 def spearman_strict(xs: list[float], ys: list[float]) -> float | None:
     """Rank correlation that reports UNDEFINED instead of a fabricated zero."""
-    if len(xs) != len(ys) or len(xs) < 5:
+    if len(xs) != len(ys) or len(xs) < 4:
         return None
     if not all(math.isfinite(v) for v in xs + ys):
         return None
@@ -493,6 +556,7 @@ def cross_sectional_spread_returns(
     history: dict[str, list[dict[str, float]]],
     score_fn: Callable[[dict[str, float]], float],
     horizon: int = HOLDING_SESSIONS,
+    eligible: dict[str, list[str]] | None = None,
 ) -> list[float]:
     """Gross top-minus-bottom spread returns; no execution costs included."""
     by_date: dict[str, list[tuple[float, float]]] = {}
@@ -501,6 +565,10 @@ def cross_sectional_spread_returns(
             continue
         for index, row in enumerate(rows):
             if index < MIN_HISTORY:
+                continue
+            if eligible is not None and symbol not in eligible.get(
+                row["date"], []
+            ):
                 continue
             label = forward_label(rows, index, horizon)
             if label is None:
@@ -526,6 +594,7 @@ def daily_cross_sectional_ic(
     score_fn: Callable[[dict[str, float]], float],
     horizon: int = HOLDING_SESSIONS,
     min_instruments: int = 5,
+    eligible: dict[str, list[str]] | None = None,
 ) -> dict:
     """Daily Spearman IC across the eligible universe for each decision date.
 
@@ -538,6 +607,10 @@ def daily_cross_sectional_ic(
             continue
         for index, row in enumerate(rows):
             if index < MIN_HISTORY:
+                continue
+            if eligible is not None and symbol not in eligible.get(
+                row["date"], []
+            ):
                 continue
             by_date.setdefault(row["date"], {})[symbol] = (
                 index,
@@ -881,6 +954,9 @@ def analyze(
         return {
             "labels": {"statistics": dataset.status},
             "input_series": 0,
+            "observations_per_series": 0,
+            "multiple_testing": {},
+            "best_strategy": "none",
             "conclusion": (
                 f"{dataset.status}: research input failed its data contract"
             ),
@@ -897,8 +973,11 @@ def analyze(
                 f"{dataset.status} research dataset rejected before analysis"
             ],
         }
+    eligibility = None
     if dataset is not None:
         history = dataset.history
+        if dataset.pit_enforced:
+            eligibility = dataset.eligible_dates
     usable = {
         symbol: rows
         for symbol, rows in history.items()
@@ -924,7 +1003,9 @@ def analyze(
                 else dataset.corporate_actions
             ),
             "session_eligibility": (
-                {} if dataset is None else dataset.eligible_dates
+                "NOT ENFORCED"
+                if dataset is None or not dataset.pit_enforced
+                else "ENFORCED"
             ),
         },
         "observations_per_series": min(
@@ -947,10 +1028,11 @@ def analyze(
             "INCONCLUSIVE: fewer than 5 usable instruments; "
             "no signal claims made"
         )
+        report["conclusion"] = "INCONCLUSIVE: insufficient eligible universe"
         return report
 
     for name, score_fn in STRATEGIES.items():
-        stats = daily_cross_sectional_ic(usable, score_fn)
+        stats = daily_cross_sectional_ic(usable, score_fn, eligible=eligibility)
         stats["folds"] = stats["observations"]
         stats["fold_ics"] = stats["daily_ics"]
         report["walk_forward"][name] = stats
@@ -962,7 +1044,9 @@ def analyze(
             report["walk_forward"][name]["deflated_mean_ic"] = deflated(
                 stats["mean_ic"], TRIALS, stats["observations"]
             )
-            spread = cross_sectional_spread_returns(usable, score_fn)
+            spread = cross_sectional_spread_returns(
+                usable, score_fn, eligible=eligibility
+            )
             ratio = deflated_sharpe_ratio(spread, TRIALS)
             report["walk_forward"][name]["dsr"] = ratio
             report["walk_forward"][name]["gross_spread_observations"] = len(
@@ -1108,6 +1192,8 @@ def main() -> int:
         "--data", default=str(root / "data" / "cache" / "history")
     )
     parser.add_argument("--out", default=str(root / "data" / "reports"))
+    parser.add_argument("--universe-status", default="")
+    parser.add_argument("--sessions", default="")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument(
         "--kdbx-check",
@@ -1122,19 +1208,17 @@ def main() -> int:
         print(json.dumps(summary, indent=2))
         values = [item.get("status") for item in summary.values()]
         return 0 if values.count("VERIFIED") == len(values) else 2
-    dataset = load_history_validated(Path(args.data))
-    if dataset.status == "BLOCKED":
-        report = analyze(dataset.history, root, dataset)
-        out = Path(args.out)
-        out.mkdir(parents=True, exist_ok=True)
-        (out / "research.json").write_text(
-            json.dumps(report, indent=2), encoding="utf-8"
-        )
-        (out / "research.md").write_text(
-            render_markdown(report), encoding="utf-8"
-        )
-        print(render_markdown(report))
-        return 2
+    universe_status = (
+        load_universe_status(Path(args.universe_status))
+        if args.universe_status
+        else None
+    )
+    sessions = (
+        load_session_calendar(Path(args.sessions)) if args.sessions else None
+    )
+    dataset = load_history_validated(
+        Path(args.data), universe_status, "CACHED", sessions
+    )
     report = analyze(dataset.history, root, dataset)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -1144,6 +1228,10 @@ def main() -> int:
     (out / "research.md").write_text(render_markdown(report), encoding="utf-8")
     print(render_markdown(report))
     print(f"Saved: {out / 'research.json'}")
+    if dataset.status == "BLOCKED":
+        return 2
+    if dataset.status == "PARTIAL":
+        return 3
     return 0
 
 

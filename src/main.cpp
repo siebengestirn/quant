@@ -1045,102 +1045,21 @@ int CommandReplay(App& app) {
   return 0;
 }
 
-// Accounting events carry the amounts that were actually posted at the time
-// of the transaction. Replay must never reconstruct old charges from today's
-// cost configuration.
-bool ParseRecordedCosts(const Json& payload,
-                        CostBreakdown* out,
-                        std::string* error) {
-  const Json* recorded = payload.Find("recorded_costs_paise");
-  if (recorded == nullptr || recorded->type() != Json::Type::kObject) {
-    *error = "accounting event has no recorded cost amounts; replay refused";
-    return false;
-  }
-  static const char* fields[] = {"brokerage",
-                                 "stt",
-                                 "exchange_fee",
-                                 "gst",
-                                 "sebi",
-                                 "stamp",
-                                 "dp",
-                                 "slippage",
-                                 "total"};
-  int64_t values[9] = {};
-  for (size_t i = 0; i < 9; ++i) {
-    const Json* field = recorded->Find(fields[i]);
-    if (field == nullptr || field->type() != Json::Type::kNumber) {
-      *error = std::string("recorded cost field missing: ") + fields[i];
-      return false;
-    }
-    values[i] = field->as_int(0);
-  }
-  out->brokerage = Money::FromPaise(values[0]);
-  out->stt = Money::FromPaise(values[1]);
-  out->exchange_fee = Money::FromPaise(values[2]);
-  out->gst = Money::FromPaise(values[3]);
-  out->sebi = Money::FromPaise(values[4]);
-  out->stamp = Money::FromPaise(values[5]);
-  out->dp = Money::FromPaise(values[6]);
-  out->slippage = Money::FromPaise(values[7]);
-  out->total = Money::FromPaise(values[8]);
-  out->status = CalculationStatus::kCalculated;
-  if (!out->usable()) {
-    *error = "recorded cost amounts are invalid";
-    return false;
-  }
-  return true;
-}
-
 bool RebuildPortfolio(App& app, Portfolio* out, std::string* error) {
   Portfolio portfolio(app.config.initial_capital);
   const std::vector<Event> events = app.journal.Replay(error);
   if (!error->empty())
     return false;
+  std::set<std::string> applied_postings;
   for (const Event& event : events) {
     if (event.type != EventType::kAccounting)
       continue;
-    Json payload;
-    if (!Json::Parse(event.payload, &payload, error))
+    AccountingPosting posting;
+    if (!ParseAccountingPosting(event, &posting, error))
       return false;
-    const Json* action = payload.Find("action");
-    const Json* symbol = payload.Find("symbol");
-    const Json* qty = payload.Find("qty");
-    const Json* price = payload.Find("price_paise");
-    if (action == nullptr || symbol == nullptr || qty == nullptr ||
-        price == nullptr) {
-      *error = "accounting event " + std::to_string(event.sequence) +
-               " is missing required fields";
-      return false;
-    }
-    const Money value = Money::FromPaise(price->as_int(0));
-    const int64_t quantity_value = qty->as_int(0);
-    if (quantity_value <= 0 ||
-        quantity_value > std::numeric_limits<int>::max() || !value.valid()) {
-      *error = "accounting event has invalid quantity or price";
-      return false;
-    }
-    const int quantity = static_cast<int>(quantity_value);
-    bool posted = false;
-    if (action->as_string() == "BUY" || action->as_string() == "SELL") {
-      CostBreakdown costs;
-      if (!ParseRecordedCosts(payload, &costs, error))
-        return false;
-      posted = action->as_string() == "BUY"
-                   ? portfolio.Buy(
-                         symbol->as_string(), quantity, value, costs, error)
-                   : portfolio.Sell(
-                         symbol->as_string(), quantity, value, costs, error);
-    } else if (action->as_string() == "EXPENSE") {
-      posted = portfolio.RecordOperatingExpense(value, error);
-    } else if (action->as_string() == "FLOW") {
-      posted =
-          portfolio.RecordExternalFlow(value, "external flow observed", error);
-    } else {
-      *error = "unknown accounting action at sequence " +
-               std::to_string(event.sequence);
-      return false;
-    }
-    if (!posted) {
+    if (!applied_postings.insert(posting.posting_id).second)
+      continue;  // Idempotent replay: apply each posting once.
+    if (!ApplyAccountingPosting(posting, &portfolio, error)) {
       *error = "accounting replay failed at sequence " +
                std::to_string(event.sequence) + ": " + *error;
       return false;

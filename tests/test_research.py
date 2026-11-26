@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import math
 import sys
 from pathlib import Path
@@ -259,3 +260,101 @@ def test_point_in_time_universe_uses_revision_precedence():
         },
     ]
     assert research.point_in_time_universe(records, "2020-06-01") == []
+
+
+def test_eligibility_map_filters_daily_cross_section():
+    history = research.synthetic_history()
+    all_symbols = sorted(k for k in history if k != "NIFTY 50")
+    eligible = {row["date"]: all_symbols for row in history["AAA"]}
+    full = research.daily_cross_sectional_ic(
+        history,
+        research.score_momentum,
+        eligible=eligible,
+        min_instruments=4,
+    )
+    restricted_map = {
+        date: [symbol for symbol in symbols if symbol != "AAA"]
+        for date, symbols in eligible.items()
+    }
+    restricted = research.daily_cross_sectional_ic(
+        history,
+        research.score_momentum,
+        eligible=restricted_map,
+        min_instruments=4,
+    )
+    assert full["status"] == "CALCULATED"
+    assert restricted["status"] == "CALCULATED"
+    assert restricted["coverage"] == full["coverage"] - 1
+    assert restricted["effective_sample_size"] < full["effective_sample_size"]
+
+
+def _run_cli(data: Path, out: Path, *extra: str) -> tuple[int, dict]:
+    import subprocess
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "python" / "research.py"),
+            "--data",
+            str(data),
+            "--out",
+            str(out),
+            *extra,
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return completed.returncode, json.loads((out / "research.json").read_text())
+
+
+def test_cli_exit_codes_reflect_dataset_status(tmp_path):
+    data = tmp_path / "history"
+    data.mkdir()
+    out = tmp_path / "reports"
+    (data / "AAA.csv").write_text(
+        "date,open,high,low,close,volume\n"
+        "2026-01-01,100,102,99,101,1000\n"
+        "2026-01-02,101,103,100,102,1000\n"
+    )
+    code, report = _run_cli(data, out)
+    assert code == 0
+    assert report["data_contract"]["status"] == "COMPLETE"
+
+    (data / "AAA.csv").write_text(
+        "date,open,high,low,close,volume\n"
+        "2026-01-01,100,102,99,101,1000\n"
+        "2026-01-02,50,103,100,102,1000\n"
+    )
+    code, report = _run_cli(data, out)
+    assert code == 3
+    assert report["conclusion"].startswith("PARTIAL")
+
+    (data / "AAA.csv").write_text(
+        "date,open,high,low,close,volume\n"
+        "2026-01-01,100,102,not-a-number,101,1000\n"
+    )
+    code, report = _run_cli(data, out)
+    assert code == 2
+    assert report["conclusion"].startswith("BLOCKED")
+    assert report["data_contract"]["invalid_rows"] >= 1
+
+
+def test_cli_enforces_point_in_time_status_file(tmp_path):
+    data = tmp_path / "history"
+    data.mkdir()
+    out = tmp_path / "reports"
+    (data / "AAA.csv").write_text(
+        "date,open,high,low,close,volume\n"
+        "2026-01-01,100,102,99,101,1000\n"
+        "2026-01-02,101,103,100,102,1000\n"
+    )
+    status = tmp_path / "status.csv"
+    status.write_text(
+        "symbol,effective_from,effective_to,eligible,revision\n"
+        "AAA,2026-01-01,,true,1\n"
+    )
+    code, report = _run_cli(data, out, "--universe-status", str(status))
+    assert code == 0
+    assert report["data_contract"]["session_eligibility"] == "ENFORCED"
