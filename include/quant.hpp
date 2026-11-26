@@ -637,9 +637,13 @@ class Portfolio {
   std::vector<std::string> audit_;
 };
 
-// Deterministic, single-writer event runtime. State changes are applied by a
-// pure ordered reducer; queues are bounded and overload policy is explicit.
-enum class QueuePolicy { kReject, kBlock };
+// In-memory deterministic event queue prototype. It is NOT a durable event
+// backbone: there is no journal, reducer transaction or persisted offset.
+// It separates received/committed semantics and uses bounded non-blocking
+// overload policies; durability claims are explicitly out of scope.
+// Non-blocking overload policies. kRetry means the caller must retry later;
+// no thread is blocked or suspended by this runtime.
+enum class QueuePolicy { kReject, kRetry };
 
 struct EventEnvelope {
   std::string event_id;
@@ -653,12 +657,13 @@ struct EventEnvelope {
 };
 
 struct RuntimeResult {
-  size_t accepted = 0;
+  size_t received = 0;
+  size_t committed = 0;
   size_t rejected = 0;
   size_t duplicates = 0;
   size_t conflicts = 0;
   size_t out_of_order = 0;
-  size_t processed = 0;
+  size_t offset_failures = 0;
   bool quarantined = false;
   std::string detail;
 };
@@ -684,6 +689,9 @@ class EventRuntime {
   const RuntimeResult& result() const {
     return result_;
   }
+  size_t applied() const {
+    return applied_;
+  }
 
  private:
   std::deque<EventEnvelope> queue_;
@@ -691,6 +699,7 @@ class EventRuntime {
   std::map<std::string, uint64_t> sequences_;
   std::map<std::string, std::string> digests_;
   RuntimeResult result_;
+  size_t applied_ = 0;
   size_t capacity_;
   QueuePolicy policy_;
 };
