@@ -32,6 +32,7 @@ CONTRACT_PREFIX = "QUANT-DATASET-CONTRACT-V2"
 
 _SYMBOL_RE = re.compile(r"^[A-Z0-9 .&/_-]+$")
 _ID_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
+_STORAGE_KEY_RE = re.compile(r"^s[0-9a-f]{31}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 CONTRACT_FIELDS = {
@@ -46,6 +47,7 @@ CONTRACT_FIELDS = {
     "last_date",
     "min_rows",
     "instrument_ids",
+    "storage_keys",
 }
 MANIFEST_FIELDS = {
     "schema_version",
@@ -61,6 +63,7 @@ FILE_FIELDS = {
     "first_date",
     "last_date",
     "instrument_id",
+    "storage_key",
     "raw_digest",
 }
 
@@ -74,6 +77,26 @@ class DatasetResult:
     file_digests: dict[str, str] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
     rows: dict[str, int] = field(default_factory=dict)
+
+
+def strict_json_loads(text: str) -> object:
+    """Parse JSON, rejecting duplicate object keys in every object."""
+
+    def no_duplicates(pairs: list[tuple[str, object]]) -> dict:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON object key: {key}")
+            result[key] = value
+        return result
+
+    return json.loads(text, object_pairs_hook=no_duplicates)
+
+
+def storage_key(instrument_id: str) -> str:
+    """Derive the sole physical filename from permanent instrument identity."""
+    material = f"QUANT-DATASET-STORAGE-V1\n{instrument_id}".encode()
+    return "s" + hashlib.sha256(material).hexdigest()[:31]
 
 
 def sha256_hex(content: bytes) -> str:
@@ -102,7 +125,7 @@ def canonical_expectations(expectations: dict) -> str:
     symbols = sorted(expectations["symbols"])
     sessions = sorted(expectations["sessions"])
     ids = expectations["instrument_ids"]
-    pairs = ",".join(f"{symbol}:{ids[symbol]}" for symbol in symbols)
+    pairs = ",".join(f"{symbol}:{ids.get(symbol, '')}" for symbol in symbols)
     lines = [
         CONTRACT_PREFIX,
         "schema_version=2",
@@ -117,6 +140,11 @@ def canonical_expectations(expectations: dict) -> str:
         f"last_date={expectations['last_date']}",
         f"min_rows={expectations['min_rows']}",
         f"instrument_ids={pairs}",
+        "storage_keys="
+        + ",".join(
+            f"{symbol}:{expectations.get('storage_keys', {}).get(symbol, '')}"
+            for symbol in symbols
+        ),
     ]
     return "".join(f"{line}\n" for line in lines)
 
@@ -174,6 +202,10 @@ def _validate_range(expectations: dict) -> list[str]:
         errors.append("min_rows must be at least one")
     first = expectations["first_date"]
     last = expectations["last_date"]
+    sessions_list = expectations["sessions"]
+    if isinstance(sessions_list, list) and sessions_list:
+        if first != sessions_list[0] or last != sessions_list[-1]:
+            errors.append("first_date and last_date must bound sessions")
     if is_canonical_date(first) and is_canonical_date(last) and first > last:
         errors.append("first_date is after last_date")
     return errors
@@ -221,8 +253,13 @@ def read_expectations(directory: Path) -> tuple[dict | None, list[str]]:
     if not path.is_file():
         return None, ["contract.json: snapshot contract absent"]
     try:
-        expectations = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        expectations = strict_json_loads(path.read_text(encoding="utf-8"))
+    except (
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        ValueError,
+    ) as exc:
         return None, [f"contract.json: invalid JSON: {exc}"]
     errors = validate_expectations(expectations)
     first = (
@@ -322,7 +359,7 @@ def write_manifest(
     raw = raw_digests or {}
     files: dict[str, dict] = {}
     for symbol in expectations["symbols"]:
-        path = directory / f"{symbol}.csv"
+        path = directory / f"{expectations['storage_keys'][symbol]}.csv"
         if not path.is_file():
             errors.append(f"{symbol}: missing series")
             continue
@@ -339,6 +376,7 @@ def write_manifest(
             "first_date": sessions[0] if sessions else "",
             "last_date": sessions[-1] if sessions else "",
             "instrument_id": expectations["instrument_ids"][symbol],
+            "storage_key": expectations["storage_keys"][symbol],
             "raw_digest": raw.get(symbol, ""),
         }
         if len(candles) < expectations["min_rows"]:
@@ -404,8 +442,15 @@ def verify_dataset(directory: Path) -> DatasetResult:
         result.errors.append("manifest.json: snapshot manifest absent")
         return result
     try:
-        raw_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raw_manifest = strict_json_loads(
+            manifest_path.read_text(encoding="utf-8")
+        )
+    except (
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        ValueError,
+    ) as exc:
         result.status = "BLOCKED"
         result.errors.append(f"manifest.json: invalid JSON: {exc}")
         return result
@@ -465,7 +510,10 @@ def _verify_files(
         ):
             result.errors.append(f"{symbol}: malformed raw digest")
             continue
-        path = directory / f"{symbol}.csv"
+        if entry["storage_key"] != expectations["storage_keys"][symbol]:
+            result.errors.append(f"{symbol}: storage key mismatch")
+            continue
+        path = directory / f"{expectations['storage_keys'][symbol]}.csv"
         if not path.is_file():
             result.errors.append(f"{symbol}: series absent")
             continue

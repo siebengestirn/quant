@@ -1610,7 +1610,9 @@ struct DatasetExpectations {
   std::string last_date;
   int64_t min_rows = 1;
   std::map<std::string, std::string> instrument_ids;
+  std::map<std::string, std::string> storage_keys;
 };
+std::string DatasetStorageKey(const std::string& instrument_id);
 
 Json::Object DatasetExpectationsJson(const DatasetExpectations& expected);
 std::string CanonicalDatasetExpectations(const DatasetExpectations& expected);

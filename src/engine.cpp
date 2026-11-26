@@ -4825,6 +4825,8 @@ class JsonParser {
       if (pos_ >= text_.size() || text_[pos_] != ':')
         return false;
       ++pos_;
+      if (values.find(key) != values.end())
+        return false;  // Duplicate object keys are rejected by the contract.
       Json value;
       if (!Value(&value))
         return false;

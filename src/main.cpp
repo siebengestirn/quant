@@ -707,8 +707,10 @@ std::map<std::string, std::vector<Candle>> LoadHistory(App& app) {
   for (const std::string& symbol : expected.symbols) {
     std::string error;
     std::vector<Candle> candles;
-    if (ReadCsvCandles(
-            app.config.history_dir + "/" + symbol + ".csv", &candles, &error))
+    if (ReadCsvCandles(app.config.history_dir + "/" +
+                           expected.storage_keys.at(symbol) + ".csv",
+                       &candles,
+                       &error))
       history[symbol] = candles;
   }
   return history;

@@ -928,8 +928,11 @@ DatasetExpectations TestDatasetExpectations(
   expected.first_date = sessions.front();
   expected.last_date = sessions.back();
   expected.min_rows = min_rows;
-  for (const std::string& symbol : symbols)
+  for (const std::string& symbol : symbols) {
     expected.instrument_ids[symbol] = "ID-" + symbol;
+    expected.storage_keys[symbol] =
+        DatasetStorageKey(expected.instrument_ids[symbol]);
+  }
   return expected;
 }
 
@@ -941,9 +944,9 @@ void TestDatasetManifestContract() {
       "2026-01-01,100,103,99,102,1000\n"
       "2026-01-02,102,105,101,104,1200\n";
   std::filesystem::create_directories(dir);
-  std::ofstream(dir + "/AAA.csv") << csv;
   const DatasetExpectations expected =
       TestDatasetExpectations({"AAA"}, {"2026-01-01", "2026-01-02"});
+  std::ofstream(dir + "/" + expected.storage_keys.at("AAA") + ".csv") << csv;
   std::string error;
   Check(VerifyDataset(dir, &error).status == DatasetStatus::kBlocked,
         "dataset without authoritative expectations is blocked");
@@ -958,11 +961,12 @@ void TestDatasetManifestContract() {
   Check(result.file_digests.at("AAA") == Sha256Hex(csv),
         "manifest uses the SHA-256 digest algorithm");
 
-  std::ofstream(dir + "/AAA.csv") << "date,open,high,low,close,volume\n";
+  std::ofstream(dir + "/" + expected.storage_keys.at("AAA") + ".csv")
+      << "date,open,high,low,close,volume\n";
   result = VerifyDataset(dir, &expected, &error);
   Check(result.status == DatasetStatus::kFailed && !result.errors.empty(),
         "zero-row dataset is rejected");
-  std::ofstream(dir + "/AAA.csv") << csv;
+  std::ofstream(dir + "/" + expected.storage_keys.at("AAA") + ".csv") << csv;
 
   DatasetExpectations omitted = expected;
   omitted.sessions = {"2026-01-01"};
@@ -972,6 +976,7 @@ void TestDatasetManifestContract() {
   DatasetExpectations extra = expected;
   extra.symbols = {"AAA", "BBB"};
   extra.instrument_ids["BBB"] = "ID-BBB";
+  extra.storage_keys["BBB"] = DatasetStorageKey(extra.instrument_ids["BBB"]);
   Check(VerifyDataset(dir, &extra, &error).status == DatasetStatus::kBlocked,
         "omitted required instrument is blocked");
   DatasetExpectations stale = expected;
@@ -979,17 +984,17 @@ void TestDatasetManifestContract() {
   Check(VerifyDataset(dir, &stale, &error).status == DatasetStatus::kBlocked,
         "stale generation is blocked");
 
-  std::ofstream(dir + "/BBB.csv") << csv;
+  std::ofstream(dir + "/" + extra.storage_keys.at("BBB") + ".csv") << csv;
   Check(WriteDatasetManifest(dir, extra, &error),
         "two-symbol snapshot published");
-  std::filesystem::remove(dir + "/BBB.csv");
+  std::filesystem::remove(dir + "/" + extra.storage_keys.at("BBB") + ".csv");
   result = VerifyDataset(dir, &extra, &error);
   Check(result.status == DatasetStatus::kPartial,
         "missing required series is PARTIAL, never COMPLETE");
   Check(VerifyDataset(dir, &expected, &error).status == DatasetStatus::kBlocked,
         "unexpected additional instrument is blocked");
 
-  std::ofstream(dir + "/BBB.csv") << csv;
+  std::ofstream(dir + "/" + extra.storage_keys.at("BBB") + ".csv") << csv;
   std::ifstream manifest_input(dir + "/manifest.json");
   std::string manifest((std::istreambuf_iterator<char>(manifest_input)),
                        std::istreambuf_iterator<char>());

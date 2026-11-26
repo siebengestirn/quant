@@ -904,8 +904,11 @@ HistorySyncResult MarketDataService::SyncHistory(
   for (const Instrument& instrument : targets)
     contract.instrument_ids[instrument.symbol] = safe_identity(
         instrument.isin.empty() ? instrument.provider_key : instrument.isin);
-  for (const std::string& symbol : config_.index_symbols)
+  for (const std::string& symbol : config_.index_symbols) {
     contract.instrument_ids[symbol] = safe_identity(IndexKey(symbol));
+    contract.storage_keys[symbol] =
+        DatasetStorageKey(contract.instrument_ids[symbol]);
+  }
   for (const auto& [symbol, ignored] : contract.instrument_ids) {
     (void)ignored;
     contract.symbols.push_back(symbol);
@@ -956,7 +959,8 @@ HistorySyncResult MarketDataService::SyncHistory(
     for (const Json& row : candles->array())
       if (row.type() == Json::Type::kArray && !row.array().empty())
         sessions.insert(row.array()[0].as_string().substr(0, 10));
-    const std::string path = config_.history_dir + "/" + symbol + ".csv";
+    const std::string path =
+        config_.history_dir + "/" + contract.storage_keys.at(symbol) + ".csv";
     std::string publish_error;
     if (!PublishHistoryFile(path, parsed.csv, &publish_error)) {
       failures.push_back(symbol + ": " + publish_error);
@@ -998,7 +1002,8 @@ HistorySyncResult MarketDataService::SyncHistory(
   }
   Json::Object files;
   for (const std::string& symbol : contract.symbols) {
-    const std::string path = config_.history_dir + "/" + symbol + ".csv";
+    const std::string path =
+        config_.history_dir + "/" + contract.storage_keys.at(symbol) + ".csv";
     std::ifstream input(path, std::ios::binary);
     if (!input.is_open())
       continue;  // Missing required instruments leave the dataset PARTIAL.

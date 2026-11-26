@@ -34,6 +34,7 @@ The expectations object has exactly these fields:
 | `last_date` | string | canonical date, `>= first_date` |
 | `min_rows` | unsigned integer | `>= 1` |
 | `instrument_ids` | object | exactly the `symbols` keys; values non-empty `[A-Za-z0-9._:-]+` |
+| `storage_keys` | object | exactly the `symbols` keys; values `s[0-9a-f]{31}` derived from permanent identity |
 
 The canonical byte string for hashing is built in this exact order, with a
 single trailing newline after every line and no spaces around `=` or `,`:
@@ -52,11 +53,24 @@ first_date=<first_date>
 last_date=<last_date>
 min_rows=<min_rows>
 instrument_ids=<symbol>:<id>,... sorted by symbol
+storage_keys=<symbol>:<key>,... sorted by symbol
 ```
 
 `contract_digest` is the lowercase hex SHA-256 of those exact bytes. SHA-256
 is the only accepted digest algorithm; `digest_algorithm` in `manifest.json`
 must equal the literal string `sha256`, and an unknown value is a hard failure.
+
+The storage key is the sole physical filename. It is derived from the permanent
+instrument identity, never from the provider symbol:
+
+```
+key = "s" + first 31 hex characters of SHA256(
+        "QUANT-DATASET-STORAGE-V1\n" + instrument_id)
+```
+
+Symbols and provider identifiers are logical aliases only. No external
+identifier may appear in a filesystem path. Both languages reject any contract
+whose `storage_keys` do not match this derivation exactly.
 
 ## 3. Manifest
 
@@ -96,7 +110,10 @@ Each entry in `files` has exactly:
 7. `rows >= min_rows` and `rows > 0` (a header-only file is never COMPLETE).
 8. The CSV session dates are exactly the declared `sessions`; missing or extra
    sessions indicate a stale or mixed generation.
-9. `first_date`/`last_date` and `instrument_id` match the manifest/contract.
+9. `first_date == sessions[0]` and `last_date == sessions[-1]`, and both match
+   the manifest file identity.
+10. All JSON objects are free of duplicate keys; arrays are already sorted and
+    unique; `manifest.expectations` equals `contract.json` field for field.
 
 `PARTIAL` means some files verified but at least one symbol failed.
 `FAILED` means no file verified. `BLOCKED` means the contract itself could not

@@ -32,6 +32,24 @@ bool LowerHex(std::string_view value) {
   return true;
 }
 
+std::string Sha256(std::string_view bytes);
+
+std::string StorageKeyForIdentity(const std::string& instrument_id) {
+  return "s" +
+         Sha256("QUANT-DATASET-STORAGE-V1\n" + instrument_id).substr(0, 31);
+}
+
+bool ValidStorageKey(std::string_view key) {
+  if (key.size() != 32 || key.front() != 's')
+    return false;
+  for (size_t i = 1; i < key.size(); ++i) {
+    const char c = key[i];
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+      return false;
+  }
+  return true;
+}
+
 std::string BytesToHex(const std::array<uint8_t, 32>& digest) {
   static constexpr char kHex[] = "0123456789abcdef";
   std::string out;
@@ -232,6 +250,10 @@ Json::Object ExpectationsJson(const DatasetExpectations& expected) {
   result["last_date"] = Json::String(expected.last_date);
   result["min_rows"] = Json::UInteger(static_cast<uint64_t>(expected.min_rows));
   result["instrument_ids"] = Json::ObjectValue(ids);
+  Json::Object keys;
+  for (const auto& [symbol, key] : expected.storage_keys)
+    keys[symbol] = Json::String(key);
+  result["storage_keys"] = Json::ObjectValue(keys);
   return result;
 }
 
@@ -248,7 +270,8 @@ bool ParseExpectations(const Json& value,
                                                "first_date",
                                                "last_date",
                                                "min_rows",
-                                               "instrument_ids"};
+                                               "instrument_ids",
+                                               "storage_keys"};
   if (value.type() != Json::Type::kObject) {
     if (error)
       *error = "expectations must be an object";
@@ -313,14 +336,14 @@ bool ParseExpectations(const Json& value,
     }
     parsed.sessions.push_back(item.as_string());
   }
-  std::sort(parsed.symbols.begin(), parsed.symbols.end());
-  std::sort(parsed.sessions.begin(), parsed.sessions.end());
-  if (std::adjacent_find(parsed.symbols.begin(), parsed.symbols.end()) !=
+  if (!std::is_sorted(parsed.symbols.begin(), parsed.symbols.end()) ||
+      !std::is_sorted(parsed.sessions.begin(), parsed.sessions.end()) ||
+      std::adjacent_find(parsed.symbols.begin(), parsed.symbols.end()) !=
           parsed.symbols.end() ||
       std::adjacent_find(parsed.sessions.begin(), parsed.sessions.end()) !=
           parsed.sessions.end()) {
     if (error)
-      *error = "symbols and sessions must be unique";
+      *error = "symbols and sessions must be sorted and unique";
     return false;
   }
   const Json* first = value.Find("first_date");
@@ -354,6 +377,28 @@ bool ParseExpectations(const Json& value,
     }
     parsed.instrument_ids[symbol] = id->as_string();
   }
+  const Json* keys = value.Find("storage_keys");
+  if (keys == nullptr || keys->type() != Json::Type::kObject ||
+      keys->object().size() != parsed.symbols.size()) {
+    if (error)
+      *error = "storage keys must cover exactly the symbols";
+    return false;
+  }
+  for (const std::string& symbol : parsed.symbols) {
+    const Json* key = keys->Find(symbol);
+    const auto identity = parsed.instrument_ids.find(symbol);
+    if (key == nullptr || key->type() != Json::Type::kString ||
+        identity == parsed.instrument_ids.end() ||
+        !ValidStorageKey(key->as_string()) ||
+        key->as_string() != StorageKeyForIdentity(identity->second)) {
+      if (error)
+        *error = "storage key differs from permanent identity: " + symbol;
+      return false;
+    }
+    parsed.storage_keys[symbol] = key->as_string();
+  }
+  if (!ValidateDatasetExpectations(parsed, error))
+    return false;
   *expected = parsed;
   return true;
 }
@@ -404,15 +449,31 @@ std::string CanonicalDatasetExpectations(const DatasetExpectations& expected) {
   for (size_t i = 0; i < expected.symbols.size(); ++i) {
     if (i > 0)
       identities += ",";
-    identities += expected.symbols[i] + ":" +
-                  expected.instrument_ids.at(expected.symbols[i]);
+    const auto identity = expected.instrument_ids.find(expected.symbols[i]);
+    identities +=
+        expected.symbols[i] + ":" +
+        (identity == expected.instrument_ids.end() ? std::string()
+                                                   : identity->second);
   }
   AppendLine(&out, "instrument_ids=" + identities);
+  std::string keys;
+  for (size_t i = 0; i < expected.symbols.size(); ++i) {
+    if (i > 0)
+      keys += ",";
+    const auto key = expected.storage_keys.find(expected.symbols[i]);
+    keys += expected.symbols[i] + ":" +
+            (key == expected.storage_keys.end() ? std::string() : key->second);
+  }
+  AppendLine(&out, "storage_keys=" + keys);
   return out;
 }
 
 std::string DatasetContractDigest(const DatasetExpectations& expected) {
   return Sha256Hex(CanonicalDatasetExpectations(expected));
+}
+
+std::string DatasetStorageKey(const std::string& instrument_id) {
+  return StorageKeyForIdentity(instrument_id);
 }
 
 bool ValidateDatasetExpectations(const DatasetExpectations& expected,
@@ -432,13 +493,19 @@ bool ValidateDatasetExpectations(const DatasetExpectations& expected,
   if (!SafeToken(copy.snapshot_id) || !SafeToken(copy.calendar_id) ||
       !SafeToken(copy.provenance) || copy.generated_at_ms < 0 ||
       !ValidDate(copy.first_date) || !ValidDate(copy.last_date) ||
-      copy.first_date > copy.last_date || copy.min_rows < 1) {
+      copy.first_date > copy.last_date || copy.min_rows < 1 ||
+      copy.sessions.empty() || copy.first_date != copy.sessions.front() ||
+      copy.last_date != copy.sessions.back()) {
     if (error)
       *error = "invalid snapshot identity, provenance, range or history";
     return false;
   }
   for (const std::string& symbol : copy.symbols) {
-    if (!SafeSymbol(symbol) || !SafeToken(copy.instrument_ids.at(symbol))) {
+    const auto identity = copy.instrument_ids.find(symbol);
+    const auto key = copy.storage_keys.find(symbol);
+    if (!SafeSymbol(symbol) || identity == copy.instrument_ids.end() ||
+        key == copy.storage_keys.end() || !SafeToken(identity->second) ||
+        key->second != StorageKeyForIdentity(identity->second)) {
       if (error)
         *error = "invalid symbol or instrument identity";
       return false;
@@ -502,7 +569,8 @@ bool WriteDatasetManifest(const std::string& history_dir,
     return false;
   Json::Object files;
   for (const std::string& symbol : expected.symbols) {
-    const std::string path = history_dir + "/" + symbol + ".csv";
+    const std::string path =
+        history_dir + "/" + expected.storage_keys.at(symbol) + ".csv";
     std::string read_error;
     const std::string bytes = ReadFile(path, &read_error);
     if (!read_error.empty()) {
@@ -528,6 +596,7 @@ bool WriteDatasetManifest(const std::string& history_dir,
     entry["first_date"] = Json::String(sessions.front());
     entry["last_date"] = Json::String(sessions.back());
     entry["instrument_id"] = Json::String(expected.instrument_ids.at(symbol));
+    entry["storage_key"] = Json::String(expected.storage_keys.at(symbol));
     entry["raw_digest"] = Json::String("");
     files[symbol] = Json::ObjectValue(entry);
   }
@@ -629,6 +698,18 @@ DatasetVerification VerifyDataset(const std::string& history_dir,
       !ParseExpectations(*expectations, &manifest_expectations, &parse_error))
     return block("manifest expectations invalid: " + parse_error);
   const std::string canonical = CanonicalDatasetExpectations(contract);
+  if (manifest_expectations.snapshot_id != contract.snapshot_id ||
+      manifest_expectations.calendar_id != contract.calendar_id ||
+      manifest_expectations.generated_at_ms != contract.generated_at_ms ||
+      manifest_expectations.provenance != contract.provenance ||
+      manifest_expectations.symbols != contract.symbols ||
+      manifest_expectations.sessions != contract.sessions ||
+      manifest_expectations.first_date != contract.first_date ||
+      manifest_expectations.last_date != contract.last_date ||
+      manifest_expectations.min_rows != contract.min_rows ||
+      manifest_expectations.instrument_ids != contract.instrument_ids ||
+      manifest_expectations.storage_keys != contract.storage_keys)
+    return block("manifest expectations differ from snapshot contract");
   if (digest->as_string() != Sha256Hex(canonical))
     return block("contract digest mismatch");
   const std::string contract_bytes =
@@ -648,7 +729,7 @@ DatasetVerification VerifyDataset(const std::string& history_dir,
       continue;
     }
     const Json& entry = file->second;
-    if (entry.type() != Json::Type::kObject || entry.object().size() != 6) {
+    if (entry.type() != Json::Type::kObject || entry.object().size() != 7) {
       result.errors.push_back("malformed file identity: " + symbol);
       continue;
     }
@@ -657,6 +738,7 @@ DatasetVerification VerifyDataset(const std::string& history_dir,
                                                       "first_date",
                                                       "last_date",
                                                       "instrument_id",
+                                                      "storage_key",
                                                       "raw_digest"};
     bool well_formed = true;
     for (const auto& [key, ignored] : entry.object()) {
@@ -669,12 +751,13 @@ DatasetVerification VerifyDataset(const std::string& history_dir,
     const Json* first = entry.Find("first_date");
     const Json* last = entry.Find("last_date");
     const Json* instrument = entry.Find("instrument_id");
+    const Json* storage = entry.Find("storage_key");
     const Json* raw = entry.Find("raw_digest");
     if (!well_formed || file_digest == nullptr || rows == nullptr ||
         first == nullptr || last == nullptr || instrument == nullptr ||
-        raw == nullptr || !LowerHex(file_digest->as_string()) ||
-        !rows->is_exact_integer() || rows->as_int(0) <= 0 ||
-        raw->as_string().size() > 64) {
+        storage == nullptr || raw == nullptr ||
+        !LowerHex(file_digest->as_string()) || !rows->is_exact_integer() ||
+        rows->as_int(0) <= 0 || raw->as_string().size() > 64) {
       result.errors.push_back("malformed file identity: " + symbol);
       continue;
     }
@@ -686,7 +769,8 @@ DatasetVerification VerifyDataset(const std::string& history_dir,
       }
     if (!well_formed)
       continue;
-    const std::string path = history_dir + "/" + symbol + ".csv";
+    const std::string path =
+        history_dir + "/" + contract.storage_keys.at(symbol) + ".csv";
     std::ifstream input(path, std::ios::binary);
     if (!input.is_open()) {
       result.errors.push_back("dataset file missing: " + symbol);
@@ -719,7 +803,8 @@ DatasetVerification VerifyDataset(const std::string& history_dir,
     }
     if (first->as_string() != sessions.front() ||
         last->as_string() != sessions.back() ||
-        instrument->as_string() != contract.instrument_ids.at(symbol)) {
+        instrument->as_string() != contract.instrument_ids.at(symbol) ||
+        storage->as_string() != contract.storage_keys.at(symbol)) {
       result.errors.push_back("identity or range mismatch: " + symbol);
       continue;
     }
