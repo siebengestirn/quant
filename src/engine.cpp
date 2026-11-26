@@ -4,6 +4,7 @@
 #include <zlib.h>
 
 #include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -856,14 +857,14 @@ bool SaveKdbxCheckpoint(const std::string& path,
   }
   const std::string payload =
       Json::ObjectValue(
-          {{"version", Json::Number(committed.version)},
-           {"journal_watermark", Json::Number(committed.journal_watermark)},
-           {"quote_count", Json::Number(committed.quote_count)},
-           {"bar_count", Json::Number(committed.bar_count)},
-           {"feature_count", Json::Number(committed.feature_count)},
+          {{"version", Json::UInteger(committed.version)},
+           {"journal_watermark", Json::UInteger(committed.journal_watermark)},
+           {"quote_count", Json::UInteger(committed.quote_count)},
+           {"bar_count", Json::UInteger(committed.bar_count)},
+           {"feature_count", Json::UInteger(committed.feature_count)},
            {"complete", Json::Bool(committed.complete)},
            {"runtime_version", Json::String(committed.runtime_version)},
-           {"created_at_ms", Json::Number(committed.created_at_ms)},
+           {"created_at_ms", Json::Integer(committed.created_at_ms)},
            {"checksum", Json::String(committed.checksum)}})
           .Dump();
   size_t written = 0;
@@ -913,13 +914,7 @@ bool LoadKdbxCheckpoint(const std::string& path,
     return false;
   auto number = [&parsed](const char* key, uint64_t* out) {
     const Json* value = parsed.Find(key);
-    if (value == nullptr || value->type() != Json::Type::kNumber)
-      return false;
-    const double raw = value->as_double(-1.0);
-    if (raw < 0.0 || raw > 9.0e15)
-      return false;
-    *out = static_cast<uint64_t>(raw);
-    return true;
+    return value != nullptr && value->as_uinteger(out);
   };
   const Json* complete = parsed.Find("complete");
   const Json* version_text = parsed.Find("runtime_version");
@@ -939,9 +934,10 @@ bool LoadKdbxCheckpoint(const std::string& path,
   loaded.runtime_version = version_text->as_string();
   loaded.checksum = checksum->as_string();
   const Json* created = parsed.Find("created_at_ms");
-  if (created == nullptr || created->type() != Json::Type::kNumber)
+  if (created == nullptr || !created->is_exact_integer())
     return false;
-  loaded.created_at_ms = created->as_int(0);
+  if (!created->as_integer(&loaded.created_at_ms))
+    return false;
   if (loaded.version != 1 || !loaded.complete ||
       loaded.runtime_version.empty() ||
       loaded.checksum != ChecksumHex(KdbxCheckpointCanonical(loaded))) {
@@ -993,6 +989,40 @@ bool KdbxRecoveryPlan(const KdbxCheckpoint& checkpoint,
 
 // ---------------------------------------------------------------------------
 // Canonical market-data pipeline.
+
+namespace {
+
+bool ValidExchangeDate(std::string_view text) {
+  if (text.size() != 10 || text[4] != '-' || text[7] != '-')
+    return false;
+  for (size_t i = 0; i < text.size(); ++i) {
+    if (i == 4 || i == 7)
+      continue;
+    if (text[i] < '0' || text[i] > '9')
+      return false;
+  }
+  const int month = (text[5] - '0') * 10 + (text[6] - '0');
+  const int day = (text[8] - '0') * 10 + (text[9] - '0');
+  return month >= 1 && month <= 12 && day >= 1 && day <= 31;
+}
+
+// 0 < L <= min(O, C) and max(O, C) <= H, volume finite and non-negative.
+bool ValidCanonicalBar(const Candle& candle, const std::string& symbol) {
+  if (symbol.empty() || !ValidExchangeDate(candle.date))
+    return false;
+  const double open = candle.open;
+  const double high = candle.high;
+  const double low = candle.low;
+  const double close = candle.close;
+  const double volume = candle.volume;
+  if (!std::isfinite(open) || !std::isfinite(high) || !std::isfinite(low) ||
+      !std::isfinite(close) || !std::isfinite(volume))
+    return false;
+  return low > 0.0 && low <= std::min(open, close) &&
+         std::max(open, close) <= high && close > 0.0 && volume >= 0.0;
+}
+
+}  // namespace
 // ---------------------------------------------------------------------------
 const char* PipelineStatusName(PipelineStatus status) {
   switch (status) {
@@ -1021,6 +1051,7 @@ bool MarketDataPipeline::IngestQuote(const Quote& quote, std::string* error) {
       !(quote.last > 0.0) || !(quote.bid > 0.0) || !(quote.ask >= quote.bid) ||
       quote.ask_qty <= 0 || quote.bid_qty <= 0 || !std::isfinite(quote.last) ||
       !std::isfinite(quote.bid) || !std::isfinite(quote.ask) ||
+      !std::isfinite(quote.volume) || quote.volume < 0.0 ||
       quote.exchange_timestamp_ms <= 0 || quote.provider_timestamp_ms <= 0 ||
       quote.receive_timestamp_ms <= 0) {
     if (error)
@@ -1034,14 +1065,14 @@ bool MarketDataPipeline::IngestQuote(const Quote& quote, std::string* error) {
   payload["last"] = Json::Number(quote.last);
   payload["bid"] = Json::Number(quote.bid);
   payload["ask"] = Json::Number(quote.ask);
-  payload["bid_qty"] = Json::Number(quote.bid_qty);
-  payload["ask_qty"] = Json::Number(quote.ask_qty);
+  payload["bid_qty"] = Json::Integer(quote.bid_qty);
+  payload["ask_qty"] = Json::Integer(quote.ask_qty);
   payload["volume"] = Json::Number(quote.volume);
-  payload["exchange_timestamp_ms"] = Json::Number(quote.exchange_timestamp_ms);
-  payload["provider_timestamp_ms"] = Json::Number(quote.provider_timestamp_ms);
+  payload["exchange_timestamp_ms"] = Json::Integer(quote.exchange_timestamp_ms);
+  payload["provider_timestamp_ms"] = Json::Integer(quote.provider_timestamp_ms);
   payload["last_trade_timestamp_ms"] =
-      Json::Number(quote.last_trade_timestamp_ms);
-  payload["receive_timestamp_ms"] = Json::Number(quote.receive_timestamp_ms);
+      Json::Integer(quote.last_trade_timestamp_ms);
+  payload["receive_timestamp_ms"] = Json::Integer(quote.receive_timestamp_ms);
   payload["quality"] = Json::String(quote.quality);
   Event event;
   event.type = EventType::kQuote;
@@ -1057,13 +1088,9 @@ bool MarketDataPipeline::IngestBar(const Candle& candle,
       *error = "market-data journal unavailable";
     return false;
   }
-  if (symbol.empty() || candle.date.empty() || !(candle.close > 0.0) ||
-      !(candle.high >= candle.close) || !(candle.low <= candle.close) ||
-      !(candle.volume >= 0.0) || !std::isfinite(candle.close) ||
-      !std::isfinite(candle.high) || !std::isfinite(candle.low) ||
-      !std::isfinite(candle.volume)) {
+  if (!ValidCanonicalBar(candle, symbol)) {
     if (error)
-      *error = "canonical bar failed validation";
+      *error = "canonical bar failed OHLCV validation";
     return false;
   }
   Json::Object payload;
@@ -1211,6 +1238,42 @@ PaperBroker::PaperBroker(Config config,
       portfolio_(std::move(portfolio)) {
 }
 
+namespace {
+bool IsValidPaperTransition(PaperOrderState from, PaperOrderState to) {
+  if (from == to)
+    return true;
+  switch (from) {
+    case PaperOrderState::kIntent:
+      return to == PaperOrderState::kRiskApproved ||
+             to == PaperOrderState::kRejected;
+    case PaperOrderState::kRiskApproved:
+      return to == PaperOrderState::kSubmitted ||
+             to == PaperOrderState::kRejected ||
+             to == PaperOrderState::kCancelled;
+    case PaperOrderState::kSubmitted:
+      return to == PaperOrderState::kAcknowledged ||
+             to == PaperOrderState::kRejected ||
+             to == PaperOrderState::kCancelled;
+    case PaperOrderState::kAcknowledged:
+    case PaperOrderState::kWorking:
+    case PaperOrderState::kPartiallyFilled:
+      return to == PaperOrderState::kWorking ||
+             to == PaperOrderState::kPartiallyFilled ||
+             to == PaperOrderState::kFilled ||
+             to == PaperOrderState::kCancelled ||
+             to == PaperOrderState::kExpired ||
+             to == PaperOrderState::kAmbiguous;
+    case PaperOrderState::kFilled:
+    case PaperOrderState::kRejected:
+    case PaperOrderState::kCancelled:
+    case PaperOrderState::kExpired:
+    case PaperOrderState::kAmbiguous:
+      return false;
+  }
+  return false;
+}
+}  // namespace
+
 bool PaperBroker::Transition(PaperOrder* order,
                              PaperOrderState state,
                              const std::string& reason,
@@ -1220,14 +1283,19 @@ bool PaperBroker::Transition(PaperOrder* order,
       *error = "unknown order";
     return false;
   }
+  if (!IsValidPaperTransition(order->state, state)) {
+    if (error)
+      *error = "invalid paper order state transition";
+    return false;
+  }
   Json::Object payload;
   payload["order_id"] = Json::String(order->id);
   payload["symbol"] = Json::String(order->symbol);
   payload["side"] =
       Json::String(order->side == OrderSide::kBuy ? "BUY" : "SELL");
   payload["state"] = Json::String(PaperOrderStateName(state));
-  payload["quantity"] = Json::Number(order->quantity);
-  payload["filled_quantity"] = Json::Number(order->filled_quantity);
+  payload["quantity"] = Json::Integer(order->quantity);
+  payload["filled_quantity"] = Json::Integer(order->filled_quantity);
   payload["reason"] = Json::String(reason);
   Event event;
   event.type = EventType::kPaperIntent;
@@ -1329,6 +1397,7 @@ bool PaperBroker::ApplyQuote(const std::string& id,
     return false;
   }
   PaperOrder& order = it->second;
+  const PaperOrder snapshot = order;
   if (quote.symbol != order.symbol) {
     if (error)
       *error = "quote symbol mismatch";
@@ -1381,18 +1450,24 @@ bool PaperBroker::ApplyQuote(const std::string& id,
   Json::Object payload;
   payload["order_id"] = Json::String(order.id);
   payload["symbol"] = Json::String(order.symbol);
-  payload["filled_quantity"] = Json::Number(order.filled_quantity);
-  payload["fill_price_paise"] = Json::Number(price.paise());
-  payload["observation_ms"] = Json::Number(now_ms);
+  payload["filled_quantity"] = Json::Integer(order.filled_quantity);
+  payload["fill_price_paise"] = Json::Integer(price.paise());
+  payload["observation_ms"] = Json::Integer(now_ms);
   // Fills are recorded as paper intents; accounting is posted by Reconcile.
   Event event;
   event.type = EventType::kFill;
   event.payload = Json::ObjectValue(payload).Dump();
-  if (journal_ != nullptr && !journal_->Append(&event, error))
+  if (journal_ != nullptr && !journal_->Append(&event, error)) {
+    order = snapshot;
     return false;
+  }
   const std::string reason = "simulated fill " + std::to_string(fill) + " @ " +
                              std::to_string(price.paise());
-  return Transition(&order, state, reason, error);
+  if (!Transition(&order, state, reason, error)) {
+    order = snapshot;
+    return false;
+  }
+  return true;
 }
 
 bool PaperBroker::Cancel(const std::string& id, std::string* error) {
@@ -1448,16 +1523,39 @@ bool PaperBroker::Reconcile(const std::string& id, std::string* error) {
   }
   if (order.state != PaperOrderState::kFilled &&
       order.state != PaperOrderState::kPartiallyFilled) {
-    // No executed quantity: nothing to post.
     return true;
   }
-  const Money notional = Money::FromPaise(
-      order.average_fill.paise() * static_cast<int64_t>(order.filled_quantity));
-  if (!notional.valid()) {
+  const int remaining = order.filled_quantity - order.reconciled_quantity;
+  if (remaining <= 0)
+    return true;
+  if (order.reconciliation_tag.empty()) {
+    order.reconciliation_batches += 1;
+    order.reconciliation_tag =
+        order.id + ":batch-" + std::to_string(order.reconciliation_batches);
+  }
+  const std::string marker = "EXEC_TAG " + order.reconciliation_tag;
+  if (portfolio_->HasAudit(marker)) {
+    // A posting was already committed; a retry must not post it again.
+    order.reconciled_quantity = order.filled_quantity;
+    if (order.filled_quantity >= order.quantity &&
+        order.state != PaperOrderState::kFilled) {
+      return Transition(
+          &order,
+          PaperOrderState::kFilled,
+          "posting already reconciled: " + order.reconciliation_tag,
+          error);
+    }
+    return true;
+  }
+  int64_t notional_paise = 0;
+  if (!money_detail::CheckedMultiply(order.average_fill.paise(),
+                                     static_cast<int64_t>(remaining),
+                                     &notional_paise)) {
     if (error)
-      *error = "reconciliation notional invalid";
+      *error = "reconciliation notional overflow";
     return false;
   }
+  const Money notional = Money::FromPaise(notional_paise);
   const CostBreakdown costs = EstimateCosts(notional,
                                             config_.execution_delivery,
                                             order.side == OrderSide::kBuy,
@@ -1467,23 +1565,41 @@ bool PaperBroker::Reconcile(const std::string& id, std::string* error) {
       *error = "reconciliation cost calculation invalid";
     return false;
   }
+  // Record the exact intended posting before mutating the portfolio. A crash
+  // after posting is detected through the portfolio audit marker above.
+  Json::Object payload;
+  payload["order_id"] = Json::String(order.id);
+  payload["execution_tag"] = Json::String(order.reconciliation_tag);
+  payload["symbol"] = Json::String(order.symbol);
+  payload["quantity"] = Json::Integer(remaining);
+  payload["price_paise"] = Json::Integer(order.average_fill.paise());
+  Event event;
+  event.type = EventType::kAccounting;
+  event.payload = Json::ObjectValue(payload).Dump();
+  if (journal_ == nullptr || !journal_->Append(&event, error))
+    return false;
   const bool ok = order.side == OrderSide::kBuy
                       ? portfolio_->Buy(order.symbol,
-                                        order.filled_quantity,
+                                        remaining,
                                         order.average_fill,
                                         costs,
-                                        error)
+                                        error,
+                                        order.reconciliation_tag)
                       : portfolio_->Sell(order.symbol,
-                                         order.filled_quantity,
+                                         remaining,
                                          order.average_fill,
                                          costs,
-                                         error);
+                                         error,
+                                         order.reconciliation_tag);
   if (!ok)
     return false;
-  return Transition(&order,
-                    PaperOrderState::kFilled,
-                    "accounting reconciled to simulated fills",
-                    error);
+  order.reconciled_quantity = order.filled_quantity;
+  if (order.filled_quantity >= order.quantity)
+    return Transition(&order,
+                      PaperOrderState::kFilled,
+                      "accounting reconciled to simulated fills",
+                      error);
+  return true;
 }
 
 const PaperOrder* PaperBroker::Find(const std::string& id) const {
@@ -1503,8 +1619,79 @@ std::string RiskSnapshotCanonical(const RiskSnapshot& snapshot) {
       << '|' << snapshot.current_equity_paise << '|'
       << snapshot.peak_equity_paise << '|' << snapshot.low_equity_paise << '|'
       << snapshot.realized_pnl_paise << '|' << snapshot.unrealized_pnl_paise
-      << '|' << (snapshot.halted ? 1 : 0) << '|' << snapshot.halt_reason;
+      << '|' << (snapshot.halted ? 1 : 0) << '|' << snapshot.halt_reason << '|'
+      << snapshot.journal_identity << '|' << snapshot.watermark_event_checksum;
   return oss.str();
+}
+
+std::string JournalIdentity(const std::vector<Event>& events,
+                            uint64_t through_sequence) {
+  std::ostringstream canonical;
+  if (through_sequence > 0) {
+    for (const Event& event : events) {
+      if (event.sequence > through_sequence)
+        continue;
+      canonical << event.sequence << '|' << event.id << '|'
+                << event.timestamp_ms << '|' << event.checksum << ';';
+    }
+  }
+  return ChecksumHex(canonical.str());
+}
+
+bool FillRiskCheckpointIdentity(RiskSnapshot* snapshot,
+                                const std::vector<Event>& events,
+                                std::string* error) {
+  if (snapshot == nullptr) {
+    if (error)
+      *error = "checkpoint output is null";
+    return false;
+  }
+  snapshot->journal_identity =
+      JournalIdentity(events, snapshot->journal_sequence);
+  snapshot->watermark_event_checksum.clear();
+  if (snapshot->journal_sequence == 0)
+    return true;
+  for (const Event& event : events) {
+    if (event.sequence != snapshot->journal_sequence)
+      continue;
+    snapshot->watermark_event_checksum = event.checksum;
+    return true;
+  }
+  if (error)
+    *error = "checkpoint watermark is absent from the journal";
+  return false;
+}
+
+bool VerifyRiskCheckpointIdentity(const RiskSnapshot& snapshot,
+                                  const std::vector<Event>& events,
+                                  const std::string& expected_account,
+                                  std::string* error) {
+  auto reject = [error](const char* message) {
+    if (error)
+      *error = message;
+    return false;
+  };
+  if (snapshot.journal_identity.empty() ||
+      snapshot.journal_identity !=
+          JournalIdentity(events, snapshot.journal_sequence))
+    return reject("checkpoint journal identity mismatch");
+  if (!expected_account.empty() && snapshot.account_id != expected_account)
+    return reject("checkpoint account identity mismatch");
+  uint64_t highest = 0;
+  for (const Event& event : events) {
+    highest = std::max(highest, event.sequence);
+    if (event.sequence != snapshot.journal_sequence)
+      continue;
+    if (snapshot.journal_sequence > 0 &&
+        snapshot.watermark_event_checksum != event.checksum)
+      return reject("checkpoint watermark event checksum mismatch");
+  }
+  if (snapshot.journal_sequence > highest)
+    return reject("checkpoint watermark ahead of journal");
+  if (snapshot.journal_sequence > 0 &&
+      snapshot.watermark_event_checksum.empty())
+    return reject("checkpoint watermark event is absent");
+  return true;
 }
 
 bool SaveRiskSnapshot(const std::string& path,
@@ -1527,22 +1714,25 @@ bool SaveRiskSnapshot(const std::string& path,
   }
   const std::string payload =
       Json::ObjectValue(
-          {{"version", Json::Number(committed.version)},
+          {{"version", Json::UInteger(committed.version)},
            {"account_id", Json::String(committed.account_id)},
            {"session_id", Json::String(committed.session_id)},
            {"policy_version", Json::String(committed.policy_version)},
-           {"journal_sequence", Json::Number(committed.journal_sequence)},
+           {"journal_sequence", Json::UInteger(committed.journal_sequence)},
            {"starting_equity_paise",
-            Json::Number(committed.starting_equity_paise)},
+            Json::Integer(committed.starting_equity_paise)},
            {"current_equity_paise",
-            Json::Number(committed.current_equity_paise)},
-           {"peak_equity_paise", Json::Number(committed.peak_equity_paise)},
-           {"low_equity_paise", Json::Number(committed.low_equity_paise)},
-           {"realized_pnl_paise", Json::Number(committed.realized_pnl_paise)},
+            Json::Integer(committed.current_equity_paise)},
+           {"peak_equity_paise", Json::Integer(committed.peak_equity_paise)},
+           {"low_equity_paise", Json::Integer(committed.low_equity_paise)},
+           {"realized_pnl_paise", Json::Integer(committed.realized_pnl_paise)},
            {"unrealized_pnl_paise",
-            Json::Number(committed.unrealized_pnl_paise)},
+            Json::Integer(committed.unrealized_pnl_paise)},
            {"halted", Json::Bool(committed.halted)},
            {"halt_reason", Json::String(committed.halt_reason)},
+           {"journal_identity", Json::String(committed.journal_identity)},
+           {"watermark_event_checksum",
+            Json::String(committed.watermark_event_checksum)},
            {"checksum", Json::String(committed.checksum)}})
           .Dump();
   size_t written = 0;
@@ -1606,10 +1796,7 @@ bool LoadRiskSnapshot(const std::string& path,
     return false;
   auto integer = [&parsed](const char* key, int64_t* out) {
     const Json* value = parsed.Find(key);
-    if (value == nullptr || value->type() != Json::Type::kNumber)
-      return false;
-    *out = value->as_int(0);
-    return true;
+    return value != nullptr && value->as_integer(out);
   };
   auto text = [&parsed](const char* key, std::string* out) {
     const Json* value = parsed.Find(key);
@@ -1628,6 +1815,8 @@ bool LoadRiskSnapshot(const std::string& path,
       !text("session_id", &loaded.session_id) ||
       !text("policy_version", &loaded.policy_version) ||
       !text("halt_reason", &loaded.halt_reason) ||
+      !text("journal_identity", &loaded.journal_identity) ||
+      !text("watermark_event_checksum", &loaded.watermark_event_checksum) ||
       !text("checksum", &loaded.checksum))
     return false;
   if (!integer("starting_equity_paise", &loaded.starting_equity_paise) ||
@@ -1679,10 +1868,11 @@ bool AppendRiskEvent(Journal* journal,
   payload["session_id"] = Json::String(state->date);
   payload["policy_version"] = Json::String(state->policy_version);
   payload["starting_equity_paise"] =
-      Json::Number(state->starting_equity.paise());
-  payload["current_equity_paise"] = Json::Number(state->current_equity.paise());
-  payload["peak_equity_paise"] = Json::Number(state->peak_equity.paise());
-  payload["low_equity_paise"] = Json::Number(state->low_equity.paise());
+      Json::Integer(state->starting_equity.paise());
+  payload["current_equity_paise"] =
+      Json::Integer(state->current_equity.paise());
+  payload["peak_equity_paise"] = Json::Integer(state->peak_equity.paise());
+  payload["low_equity_paise"] = Json::Integer(state->low_equity.paise());
   payload["halted"] = Json::Bool(state->halted);
   payload["halt_reason"] = Json::String(state->halt_reason);
   Event event;
@@ -1699,11 +1889,19 @@ bool RecoverRiskState(const std::string& snapshot_path,
                       const std::string& journal_path,
                       DailyRiskState* state,
                       std::string* error) {
+  return RecoverRiskState(snapshot_path, journal_path, state, "", error);
+}
+
+bool RecoverRiskState(const std::string& snapshot_path,
+                      const std::string& journal_path,
+                      DailyRiskState* state,
+                      const std::string& expected_account,
+                      std::string* error) {
   Journal journal;
   if (!journal.Open(journal_path, error))
     return false;
-  const bool recovered =
-      RecoverRiskStateFromJournal(snapshot_path, &journal, state, error);
+  const bool recovered = RecoverRiskStateFromJournal(
+      snapshot_path, &journal, state, expected_account, error);
   journal.Close();
   return recovered;
 }
@@ -1711,6 +1909,7 @@ bool RecoverRiskState(const std::string& snapshot_path,
 bool RecoverRiskStateFromJournal(const std::string& snapshot_path,
                                  Journal* journal,
                                  DailyRiskState* state,
+                                 const std::string& expected_account,
                                  std::string* error) {
   if (state == nullptr || journal == nullptr) {
     if (error)
@@ -1734,7 +1933,11 @@ bool RecoverRiskStateFromJournal(const std::string& snapshot_path,
       *error = "risk recovery journal replay failed: " + replay_error;
     return false;
   }
+  if (have_snapshot &&
+      !VerifyRiskCheckpointIdentity(snapshot, events, expected_account, error))
+    return false;
   DailyRiskState recovered;
+  recovered.account_id = snapshot.account_id;
   recovered.policy_version = snapshot.policy_version;
   recovered.journal_sequence = snapshot.journal_sequence;
   int64_t starting = 0;
@@ -1964,7 +2167,8 @@ bool Portfolio::Buy(const std::string& symbol,
                     int quantity,
                     Money price,
                     const CostBreakdown& costs,
-                    std::string* error) {
+                    std::string* error,
+                    const std::string& audit_tag) {
   auto fail = [error](const char* message) {
     if (error)
       *error = message;
@@ -2056,6 +2260,8 @@ bool Portfolio::Buy(const std::string& symbol,
   audit_.push_back("BUY " + symbol + " qty=" + std::to_string(quantity) +
                    " price_paise=" + std::to_string(price_paise) +
                    " cost_paise=" + std::to_string(cost_paise));
+  if (!audit_tag.empty())
+    audit_.push_back("EXEC_TAG " + audit_tag);
   return true;
 }
 
@@ -2063,7 +2269,8 @@ bool Portfolio::Sell(const std::string& symbol,
                      int quantity,
                      Money price,
                      const CostBreakdown& costs,
-                     std::string* error) {
+                     std::string* error,
+                     const std::string& audit_tag) {
   auto fail = [error](const char* message) {
     if (error)
       *error = message;
@@ -2135,6 +2342,8 @@ bool Portfolio::Sell(const std::string& symbol,
   audit_.push_back("SELL " + symbol + " qty=" + std::to_string(quantity) +
                    " price_paise=" + std::to_string(price_paise) +
                    " pnl_paise=" + std::to_string(pnl.paise()));
+  if (!audit_tag.empty())
+    audit_.push_back("EXEC_TAG " + audit_tag);
   return true;
 }
 
@@ -3209,23 +3418,45 @@ bool Journal::Open(const std::string& path, std::string* error) {
   }
   locked_ = true;
   writer_thread_ = std::this_thread::get_id();
+  auto release = [&]() {
+    flock(lock_fd_, LOCK_UN);
+    close(lock_fd_);
+    lock_fd_ = -1;
+    locked_ = false;
+    writer_thread_ = std::thread::id();
+    healthy_ = false;
+  };
+  // Create the journal file explicitly. A file created later by Append would
+  // only be file-synced, leaving its directory entry undurable on first
+  // creation. Establish the entry before the journal is declared healthy.
   if (!std::filesystem::exists(path_)) {
-    const int dir_fd =
-        open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (dir_fd >= 0) {
-      if (fsync(dir_fd) != 0) {
-        close(dir_fd);
-        flock(lock_fd_, LOCK_UN);
-        close(lock_fd_);
-        lock_fd_ = -1;
-        locked_ = false;
-        if (error)
-          *error = "journal directory synchronization failed";
-        return false;
-      }
-      close(dir_fd);
+    const int file_fd =
+        open(path_.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (file_fd < 0) {
+      release();
+      if (error)
+        *error = "cannot create journal file";
+      return false;
+    }
+    if (fchmod(file_fd, 0600) != 0 || fsync(file_fd) != 0 ||
+        close(file_fd) != 0) {
+      release();
+      if (error)
+        *error = "journal file initialization failed";
+      return false;
     }
   }
+  const int dir_fd =
+      open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (dir_fd < 0 || fsync(dir_fd) != 0) {
+    if (dir_fd >= 0)
+      close(dir_fd);
+    release();
+    if (error)
+      *error = "journal directory synchronization failed";
+    return false;
+  }
+  close(dir_fd);
   if (std::filesystem::exists(path_)) {
     std::string replay_error;
     const std::vector<Event> existing = Replay(&replay_error);
@@ -3582,11 +3813,31 @@ class JsonParser {
     }
     if (!digits)
       return false;
-    double value = 0.0;
-    if (!ParseFloating(std::string(text_.substr(start, pos_ - start)),
-                       &value)) {
-      return false;
+    const std::string token(text_.substr(start, pos_ - start));
+    const bool integral = token.find_first_of(".eE") == std::string::npos;
+    if (integral) {
+      const char* begin = token.data();
+      const char* end = begin + token.size();
+      if (token.front() == '+')
+        ++begin;
+      if (token.front() == '-') {
+        int64_t signed_value = 0;
+        const auto parsed = std::from_chars(begin, end, signed_value, 10);
+        if (parsed.ec != std::errc() || parsed.ptr != end)
+          return false;
+        *out = Json::Integer(signed_value);
+        return true;
+      }
+      uint64_t unsigned_value = 0;
+      const auto parsed = std::from_chars(begin, end, unsigned_value, 10);
+      if (parsed.ec != std::errc() || parsed.ptr != end)
+        return false;
+      *out = Json::UInteger(unsigned_value);
+      return true;
     }
+    double value = 0.0;
+    if (!ParseFloating(token, &value))
+      return false;
     *out = Json::Number(value);
     return true;
   }
@@ -3680,6 +3931,18 @@ Json Json::Number(double value) {
   json.number_ = value;
   return json;
 }
+Json Json::Integer(int64_t value) {
+  Json json;
+  json.type_ = Type::kInteger;
+  json.integer_ = value;
+  return json;
+}
+Json Json::UInteger(uint64_t value) {
+  Json json;
+  json.type_ = Type::kUInteger;
+  json.uinteger_ = value;
+  return json;
+}
 Json Json::String(std::string value) {
   Json json;
   json.type_ = Type::kString;
@@ -3705,10 +3968,57 @@ bool Json::as_bool(bool fallback) const {
   return type_ == Type::kBool ? bool_ : fallback;
 }
 double Json::as_double(double fallback) const {
-  return type_ == Type::kNumber ? number_ : fallback;
+  switch (type_) {
+    case Type::kNumber:
+      return number_;
+    case Type::kInteger:
+      return static_cast<double>(integer_);
+    case Type::kUInteger:
+      return static_cast<double>(uinteger_);
+    default:
+      return fallback;
+  }
 }
 int64_t Json::as_int(int64_t fallback) const {
-  return type_ == Type::kNumber ? static_cast<int64_t>(number_) : fallback;
+  int64_t value = 0;
+  if (as_integer(&value))
+    return value;
+  if (type_ == Type::kNumber && std::isfinite(number_) &&
+      number_ >= static_cast<double>(std::numeric_limits<int64_t>::min()) &&
+      number_ <= static_cast<double>(std::numeric_limits<int64_t>::max()) &&
+      std::floor(number_) == number_)
+    return static_cast<int64_t>(number_);
+  if (type_ == Type::kUInteger &&
+      uinteger_ <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+    return static_cast<int64_t>(uinteger_);
+  return fallback;
+}
+bool Json::as_integer(int64_t* out) const {
+  if (out == nullptr)
+    return false;
+  if (type_ == Type::kInteger) {
+    *out = integer_;
+    return true;
+  }
+  if (type_ == Type::kUInteger &&
+      uinteger_ <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+    *out = static_cast<int64_t>(uinteger_);
+    return true;
+  }
+  return false;
+}
+bool Json::as_uinteger(uint64_t* out) const {
+  if (out == nullptr)
+    return false;
+  if (type_ == Type::kUInteger) {
+    *out = uinteger_;
+    return true;
+  }
+  if (type_ == Type::kInteger && integer_ >= 0) {
+    *out = static_cast<uint64_t>(integer_);
+    return true;
+  }
+  return false;
 }
 std::string Json::as_string(std::string fallback) const {
   return type_ == Type::kString ? string_ : std::move(fallback);
@@ -3727,6 +4037,10 @@ std::string Json::Dump() const {
       return bool_ ? "true" : "false";
     case Type::kNumber:
       return std::to_string(number_);
+    case Type::kInteger:
+      return std::to_string(integer_);
+    case Type::kUInteger:
+      return std::to_string(uinteger_);
     case Type::kString:
       return "\"" + string_ + "\"";
     case Type::kArray: {

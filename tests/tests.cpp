@@ -405,6 +405,8 @@ void TestJournal() {
   Journal journal;
   std::string error;
   Check(journal.Open(path, &error), "journal opens");
+  Check(std::filesystem::exists(path),
+        "journal file is created during Open, not deferred to Append");
   for (int i = 0; i < 3; ++i) {
     Event event;
     event.type = EventType::kHeartbeat;
@@ -1071,7 +1073,8 @@ void TestCsv() {
 
 using namespace quant;
 
-RiskSnapshot SnapshotFromState(const DailyRiskState& state) {
+RiskSnapshot SnapshotFromState(const DailyRiskState& state,
+                               const std::string& journal_path) {
   RiskSnapshot snapshot;
   snapshot.account_id = "PRIMARY";
   snapshot.session_id = state.date;
@@ -1085,6 +1088,13 @@ RiskSnapshot SnapshotFromState(const DailyRiskState& state) {
   snapshot.unrealized_pnl_paise = state.unrealized_pnl.paise();
   snapshot.halted = state.halted;
   snapshot.halt_reason = state.halt_reason;
+  std::string identity_error;
+  Journal identity_journal;
+  if (identity_journal.Open(journal_path, &identity_error)) {
+    const auto events = identity_journal.Replay(&identity_error);
+    identity_journal.Close();
+    FillRiskCheckpointIdentity(&snapshot, events, &identity_error);
+  }
   return snapshot;
 }
 
@@ -1146,6 +1156,10 @@ void TestMarketDataPipeline() {
   quote.provider_timestamp_ms = 1001;
   quote.receive_timestamp_ms = 1002;
   Check(pipeline.IngestQuote(quote, &error), "canonical quote journalled");
+  Quote bad_volume = quote;
+  bad_volume.volume = std::numeric_limits<double>::quiet_NaN();
+  Check(!pipeline.IngestQuote(bad_volume, &error),
+        "non-finite quote volume rejected");
   Candle candle;
   candle.date = "2026-11-26";
   candle.open = 100.0;
@@ -1154,6 +1168,15 @@ void TestMarketDataPipeline() {
   candle.close = 101.0;
   candle.volume = 1000.0;
   Check(pipeline.IngestBar(candle, "AAA", &error), "canonical bar journalled");
+  Candle bad_open = candle;
+  bad_open.open = 90.0;  // below low of 99.
+  Check(!pipeline.IngestBar(bad_open, "AAA", &error),
+        "open outside high/low range rejected");
+  Candle bad_date = candle;
+  bad_date.date = "26/11/2026";
+  Check(!pipeline.IngestBar(bad_date, "AAA", &error),
+        "non-exchange date rejected");
+
   Check(journal.Replay(&error).size() == 2,
         "journal holds exactly the committed market events");
 
@@ -1237,6 +1260,15 @@ void TestPaperExecution() {
   Check(broker.Reconcile(intent->id, &error), "fill reconciled to portfolio");
   Check(portfolio->open_position_count() == 1,
         "reconciliation posts one position");
+  const Money cash_after_reconcile = portfolio->available_cash();
+  Check(broker.Reconcile(intent->id, &error),
+        "repeated reconciliation succeeds without mutation");
+  Check(portfolio->available_cash() == cash_after_reconcile &&
+            portfolio->open_position_count() == 1,
+        "repeated reconciliation cannot duplicate a fill");
+  Check(!broker.RiskApprove(intent->id, &error),
+        "filled order cannot return to an earlier state");
+  Check(!broker.Cancel(intent->id, &error), "filled order cannot be cancelled");
 
   PaperOrder* rejected = broker.CreateIntent(
       "BBB", OrderSide::kBuy, 1, Money::FromRupees(10.0), &error);
@@ -1260,16 +1292,86 @@ void TestPaperExecution() {
 
   PaperOrder* ambiguous = broker.CreateIntent(
       "BBB", OrderSide::kBuy, 1, Money::FromRupees(10.0), &error);
+  Check(broker.RiskApprove(ambiguous->id, &error) &&
+            broker.Submit(ambiguous->id, &error) &&
+            broker.Acknowledge(ambiguous->id, &error),
+        "ambiguous fixture working");
   Check(broker.MarkAmbiguous(ambiguous->id, &error),
         "ambiguous outcome recorded");
   Check(!broker.Reconcile(ambiguous->id, &error),
         "ambiguous order cannot be auto-reconciled");
-  Check(broker.Expire(ambiguous->id, &error), "expiry transition recorded");
-  Check(broker.order_count() == 4, "all paper orders retained");
+  PaperOrder* expiring = broker.CreateIntent(
+      "BBB", OrderSide::kBuy, 1, Money::FromRupees(10.0), &error);
+  Check(broker.RiskApprove(expiring->id, &error) &&
+            broker.Submit(expiring->id, &error) &&
+            broker.Acknowledge(expiring->id, &error),
+        "expiry fixture working");
+  Check(broker.Expire(expiring->id, &error), "expiry transition recorded");
+  Check(broker.order_count() == 5, "all paper orders retained");
   Check(std::string(PaperOrderStateName(PaperOrderState::kAmbiguous)) ==
             "AMBIGUOUS",
         "state names are stable");
   journal.Close();
+}
+
+void TestExactIntegerPersistence() {
+  const int64_t values[] = {
+      (1LL << 53) - 1,
+      (1LL << 53),
+      (1LL << 53) + 1,
+      std::numeric_limits<int64_t>::min(),
+      std::numeric_limits<int64_t>::max(),
+  };
+  for (int64_t value : values) {
+    Json encoded = Json::Integer(value);
+    Json parsed;
+    std::string error;
+    Check(Json::Parse(encoded.Dump(), &parsed, &error),
+          "exact integer JSON parses");
+    int64_t decoded = 0;
+    Check(parsed.as_integer(&decoded) && decoded == value,
+          "exact integer survives JSON round trip");
+    Check(parsed.is_exact_integer(), "integer type is explicit, not a double");
+  }
+  const uint64_t unsigned_values[] = {
+      static_cast<uint64_t>(1ULL << 53) - 1,
+      1ULL << 53,
+      (1ULL << 53) + 1,
+      std::numeric_limits<uint64_t>::max(),
+  };
+  for (uint64_t value : unsigned_values) {
+    Json parsed;
+    std::string error;
+    Check(Json::Parse(Json::UInteger(value).Dump(), &parsed, &error),
+          "unsigned integer JSON parses");
+    uint64_t decoded = 0;
+    Check(parsed.as_uinteger(&decoded) && decoded == value,
+          "unsigned integer survives JSON round trip");
+  }
+  const std::string path = TempPath("risk_large.snap");
+  std::remove(path.c_str());
+  RiskSnapshot snapshot;
+  snapshot.account_id = "PRIMARY";
+  snapshot.session_id = "2026-11-26";
+  snapshot.policy_version = "RISK-2026-11-26-v1";
+  snapshot.journal_sequence = (1ULL << 53) + 1;
+  snapshot.starting_equity_paise = std::numeric_limits<int64_t>::max() / 2;
+  snapshot.current_equity_paise = snapshot.starting_equity_paise;
+  snapshot.peak_equity_paise = snapshot.starting_equity_paise;
+  snapshot.low_equity_paise = snapshot.starting_equity_paise;
+  snapshot.halted = true;
+  snapshot.halt_reason = "boundary fixture";
+  snapshot.journal_identity = JournalIdentity({});
+  std::string error;
+  Check(SaveRiskSnapshot(path, snapshot, &error),
+        "large-integer risk snapshot saves");
+  RiskSnapshot loaded;
+  Check(LoadRiskSnapshot(path, &loaded, &error),
+        "large-integer risk snapshot loads");
+  Check(loaded.journal_sequence == snapshot.journal_sequence &&
+            loaded.starting_equity_paise == snapshot.starting_equity_paise,
+        "large integers round trip without precision loss");
+  std::remove(path.c_str());
 }
 
 void TestKdbxCheckpointContract() {
@@ -1359,7 +1461,8 @@ void TestRiskPersistence() {
         "session low survives recovery");
   Check(recovered.journal_sequence == 3, "journal watermark restored");
 
-  Check(SaveRiskSnapshot(snapshot_path, SnapshotFromState(recovered), &error),
+  Check(SaveRiskSnapshot(
+            snapshot_path, SnapshotFromState(recovered, journal_path), &error),
         "checkpoint saved atomically");
   Journal later;
   Check(later.Open(journal_path, &error), "journal reopens for new events");
@@ -1386,7 +1489,7 @@ void TestRiskPersistence() {
   Check(rebuilt.halted && rebuilt.low_equity == Money::FromRupees(470.0),
         "rebuild reproduces authoritative risk state");
 
-  RiskSnapshot inconsistent = SnapshotFromState(rebuilt);
+  RiskSnapshot inconsistent = SnapshotFromState(rebuilt, journal_path);
   inconsistent.low_equity_paise = 999999;  // above current equity.
   Check(SaveRiskSnapshot(snapshot_path, inconsistent, &error),
         "inconsistent checkpoint written for rejection test");
@@ -1395,6 +1498,31 @@ void TestRiskPersistence() {
         "inconsistent reconstructed state is rejected");
   Check(error.find("inconsistent") != std::string::npos,
         "inconsistency is explicit");
+
+  RiskSnapshot foreign = SnapshotFromState(rebuilt, journal_path);
+  Check(SaveRiskSnapshot(snapshot_path, foreign, &error),
+        "foreign-account checkpoint saved");
+  Check(!RecoverRiskState(
+            snapshot_path, journal_path, &rejected, "OTHER", &error),
+        "checkpoint from another account is rejected");
+  Check(error.find("account") != std::string::npos,
+        "account mismatch is explicit");
+
+  RiskSnapshot ahead = SnapshotFromState(rebuilt, journal_path);
+  ahead.journal_sequence = 9999;
+  Check(SaveRiskSnapshot(snapshot_path, ahead, &error),
+        "ahead-watermark checkpoint saved");
+  Check(!RecoverRiskState(snapshot_path, journal_path, &rejected, &error),
+        "watermark beyond journal is rejected");
+  Check(error.find("ahead") != std::string::npos,
+        "watermark rejection is explicit");
+
+  RiskSnapshot forged = SnapshotFromState(rebuilt, journal_path);
+  forged.journal_identity = "not-the-journal";
+  Check(SaveRiskSnapshot(snapshot_path, forged, &error),
+        "forged identity checkpoint saved");
+  Check(!RecoverRiskState(snapshot_path, journal_path, &rejected, &error),
+        "checkpoint that does not belong to the journal is rejected");
   std::remove(snapshot_path.c_str());
 
   DailyRiskState fresh;
@@ -1712,6 +1840,7 @@ int main() {
   TestExecutionSemantics();
   TestKdbxGate();
   TestKdbxCheckpointContract();
+  TestExactIntegerPersistence();
   TestPaperExecution();
   TestMarketDataPipeline();
   std::cout << "checks=" << g_checks << " failures=" << g_failures << "\n";

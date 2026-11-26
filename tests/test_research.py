@@ -215,3 +215,47 @@ def test_point_in_time_universe_ignores_future_status():
     ]
     assert research.point_in_time_universe(records, "2020-06-01") == ["AAA"]
     assert research.point_in_time_universe(records, "2022-06-01") == ["BBB"]
+
+
+def test_validated_dataset_rejects_blocked_input(tmp_path):
+    (tmp_path / "AAA.csv").write_text(
+        "date,open,high,low,close,volume\n"
+        "2026-01-01,100,102,99,101,1000\n"
+        "2026-01-02,101,103,100,102,1000\n"
+    )
+    dataset = research.load_history_validated(tmp_path)
+    assert dataset.status == "COMPLETE"
+    assert dataset.invalid_rows == 0
+    report = research.analyze(dataset.history, ROOT, dataset)
+    assert report["data_contract"]["status"] == "COMPLETE"
+
+
+def test_validated_dataset_flags_malformed_ohlc(tmp_path):
+    (tmp_path / "AAA.csv").write_text(
+        "date,open,high,low,close,volume\n"
+        "2026-01-01,100,102,99,101,1000\n"
+        "2026-01-02,50,103,100,102,1000\n"
+    )
+    dataset = research.load_history_validated(tmp_path)
+    assert dataset.status == "PARTIAL"
+    assert dataset.invalid_rows == 1
+    report = research.analyze(dataset.history, ROOT, dataset)
+    assert report["conclusion"].startswith("PARTIAL")
+
+
+def test_point_in_time_universe_uses_revision_precedence():
+    records = [
+        {
+            "symbol": "AAA",
+            "eligible": True,
+            "effective_from": "2020-01-01",
+            "revision": 1,
+        },
+        {
+            "symbol": "AAA",
+            "eligible": False,
+            "effective_from": "2020-01-01",
+            "revision": 2,
+        },
+    ]
+    assert research.point_in_time_universe(records, "2020-06-01") == []

@@ -61,6 +61,7 @@ App Initialize(std::string* error) {
   if (!RecoverRiskStateFromJournal(app.config.risk_snapshot_path,
                                    &app.journal,
                                    &recovered,
+                                   app.config.account_id,
                                    &risk_error)) {
     app.journal.Close();
     *error = "risk state recovery failed: " + risk_error;
@@ -906,6 +907,15 @@ DailyReport BuildReport(App& app, bool* ok) {
   checkpoint.halted = app.risk_state->halted;
   checkpoint.halt_reason = app.risk_state->halt_reason;
   std::string checkpoint_error;
+  const auto identity_events = app.journal.Replay(&checkpoint_error);
+  if (!checkpoint_error.empty() ||
+      !FillRiskCheckpointIdentity(
+          &checkpoint, identity_events, &checkpoint_error)) {
+    report.rejections.push_back("risk checkpoint identity failed: " +
+                                checkpoint_error);
+    *ok = false;
+    return report;
+  }
   if (!SaveRiskSnapshot(
           app.config.risk_snapshot_path, checkpoint, &checkpoint_error)) {
     report.rejections.push_back("risk checkpoint not committed: " +
