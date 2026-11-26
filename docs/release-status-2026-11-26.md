@@ -57,7 +57,18 @@ Branch protection on `main` was updated to match `git-policy.json`:
 - administrators subject to the same rules; merge commits preserved
   (linear history not required).
 
-The exported setting is `docs/branch-protection-2026-11-26.json`. Historical
+The exported setting is `docs/branch-protection-2026-11-26.json`.
+
+**Bootstrap exception (narrow, one-time, time-bounded).** PR #45 is the change
+that installs the approval requirement. There is only one maintainer account,
+so GitHub cannot supply an independent approving review for that PR itself.
+`git-policy.json` records a single-maintainer exception expiring
+2026-12-31 that authorizes an administrative merge of PR #45 only, after all
+three required checks passed on its exact head. It applies to no financial,
+recovery, data-contract or execution code, and no other PR. After that date no
+exception exists.
+
+Historical
 PRs, including #34 and #37, were merged before this enforcement and show no
 approving review; that gap is recorded, not hidden. CI success is not
 independent acceptance.
