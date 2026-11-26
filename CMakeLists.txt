@@ -71,6 +71,7 @@ endif()
 add_library(quant_core
   src/market_data.cpp
   src/engine.cpp
+  src/dataset.cpp
   src/zerodha.cpp
   src/kdbx.cpp
 )
@@ -95,10 +96,14 @@ add_executable(quant_tests tests/tests.cpp)
 target_link_libraries(quant_tests PRIVATE quant_core)
 target_compile_options(quant_tests PRIVATE -Wall -Wextra -Wpedantic)
 
+add_executable(quant_contract src/contract_tool.cpp)
+target_link_libraries(quant_contract PRIVATE quant_core)
+target_compile_options(quant_contract PRIVATE -Wall -Wextra -Wpedantic)
+
 if(APPLE AND KDBX_ENABLED)
   # PyKX's libe.so carries a bare leaf install name. Rewrite only the
   # executable load commands to @rpath so the CMake rpath resolves it.
-  foreach(target quant quant_tests)
+  foreach(target quant quant_tests quant_contract)
     add_custom_command(TARGET ${target} POST_BUILD
       COMMAND install_name_tool -change libe.so @rpath/libe.so
         $<TARGET_FILE:${target}>)
@@ -115,7 +120,7 @@ add_test(NAME quant_validate COMMAND quant validate
 
 option(QUANT_SANITIZERS "Build with ASan/UBSan" OFF)
 if(QUANT_SANITIZERS)
-  foreach(target quant_core quant quant_tests)
+  foreach(target quant_core quant quant_tests quant_contract)
     target_compile_options(${target} PRIVATE
       -fsanitize=address,undefined -fno-omit-frame-pointer)
     target_link_options(${target} PRIVATE -fsanitize=address,undefined)

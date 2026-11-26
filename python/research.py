@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import importlib.util
 import itertools
 import json
 import math
@@ -231,38 +232,30 @@ def load_session_calendar(path: Path) -> tuple[list[str], list[str]]:
     return (sorted(set(values)) if not errors else []), errors
 
 
+def _dataset_contract_module():
+    """Load the shared v2 dataset contract implementation by file path."""
+    name = "quant_dataset_contract"
+    if name in sys.modules:
+        return sys.modules[name]
+    path = Path(__file__).resolve().with_name("dataset_contract.py")
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def verify_history_manifest(
     directory: Path,
 ) -> tuple[dict[str, dict], list[str]]:
-    """Verify the canonical dataset manifest before any engine reads CSVs."""
-    manifest_path = directory / "manifest.json"
-    if not manifest_path.is_file():
-        return {}, [f"{manifest_path.name}: dataset manifest absent"]
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return {}, [f"manifest invalid: {exc}"]
-    if manifest.get("schema_version") != 1:
-        return {}, ["unsupported dataset manifest schema"]
-    errors: list[str] = []
-    verified: dict[str, dict] = {}
-    for symbol, entry in sorted(manifest.items()):
-        if symbol == "schema_version" or not isinstance(entry, dict):
-            continue
-        path = directory / f"{symbol}.csv"
-        if not path.is_file():
-            errors.append(f"{symbol}: manifest references missing file")
-            continue
-        content = path.read_bytes()
-        digest = hashlib.sha256(content).hexdigest()
-        if digest != entry.get("digest"):
-            errors.append(f"{symbol}: dataset digest mismatch")
-            continue
-        rows = content.decode("utf-8").splitlines()
-        if len(rows) - 1 != entry.get("rows"):
-            errors.append(f"{symbol}: dataset row count mismatch")
-            continue
-        verified[symbol] = entry
+    """Verify the shared, language-neutral v2 dataset contract."""
+    contract = _dataset_contract_module()
+    result = contract.verify_dataset(directory)
+    verified = {symbol: {} for symbol in result.file_digests}
+    errors = list(result.errors)
+    if result.status == "BLOCKED" and not errors:
+        errors.append("dataset contract blocked")
     return verified, errors
 
 

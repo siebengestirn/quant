@@ -185,16 +185,77 @@ def _write_pit_fixtures(tmp_path: Path, dates: list[str]) -> tuple[Path, Path]:
     return status, calendar
 
 
-def _write_manifest(directory: Path) -> None:
-    import hashlib
+def _load_dataset_contract():
+    name = "quant_dataset_contract_test"
+    if name in sys.modules:
+        return sys.modules[name]
+    import importlib.util
 
-    manifest: dict[str, object] = {"schema_version": 1}
-    for path in sorted(directory.glob("*.csv")):
-        content = path.read_bytes()
-        manifest[path.stem] = {
-            "digest": hashlib.sha256(content).hexdigest(),
-            "rows": len(content.decode("utf-8").splitlines()) - 1,
+    path = ROOT / "python" / "dataset_contract.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+DATASET_CONTRACT = _load_dataset_contract()
+
+
+def _write_manifest(directory: Path) -> None:
+    """Write a v2 contract and manifest for every CSV in the directory."""
+    paths = sorted(directory.glob("*.csv"))
+    symbols = [path.stem for path in paths]
+    sessions = sorted(
+        {
+            line.split(",", 1)[0]
+            for path in paths
+            for line in path.read_text(encoding="utf-8").splitlines()[1:]
+            if line
         }
+    )
+    expectations = {
+        "schema_version": 2,
+        "snapshot_id": "SNAP-TEST-FIXTURE",
+        "calendar_id": "NSE_CASH_DAILY_OBSERVED",
+        "generated_at_ms": 1769000000000,
+        "provenance": "PYTEST_FIXTURE",
+        "symbols": symbols,
+        "sessions": sessions,
+        "first_date": sessions[0],
+        "last_date": sessions[-1],
+        "min_rows": 1,
+        "instrument_ids": {symbol: f"ID-{symbol}" for symbol in symbols},
+    }
+    DATASET_CONTRACT.write_contract(directory, expectations)
+    errors = DATASET_CONTRACT.write_manifest(directory, expectations)
+    if not errors:
+        return
+    # Malformed fixtures cannot be published by the strict writer. Build a
+    # structurally valid manifest so the verifier can fail closed on content.
+    files = {}
+    for symbol in symbols:
+        content = (directory / f"{symbol}.csv").read_bytes()
+        rows = len(content.decode("utf-8").splitlines()) - 1
+        files[symbol] = {
+            "digest": DATASET_CONTRACT.sha256_hex(content),
+            "rows": rows,
+            "first_date": sessions[0],
+            "last_date": sessions[-1],
+            "instrument_id": expectations["instrument_ids"][symbol],
+            "raw_digest": "",
+        }
+    manifest = {
+        "schema_version": 2,
+        "digest_algorithm": "sha256",
+        "contract_digest": DATASET_CONTRACT.contract_digest(expectations),
+        "contract_sha256": DATASET_CONTRACT.sha256_hex(
+            (directory / "contract.json").read_bytes()
+        ),
+        "expectations": expectations,
+        "files": files,
+    }
     (directory / "manifest.json").write_text(
         research.json.dumps(manifest, indent=2, sort_keys=True) + "\n"
     )
@@ -324,10 +385,10 @@ def test_validated_dataset_flags_malformed_ohlc(tmp_path):
     dataset = research.load_history_validated(
         tmp_path, records, "TEST", sessions, errors, calendar_errors
     )
-    assert dataset.status == "PARTIAL"
-    assert dataset.invalid_rows == 1
+    assert dataset.status == "BLOCKED"
+    assert not dataset.history
     report = research.analyze(dataset.history, ROOT, dataset)
-    assert report["conclusion"].startswith("PARTIAL")
+    assert report["conclusion"].startswith("BLOCKED")
 
 
 def test_point_in_time_universe_uses_revision_precedence():
@@ -427,8 +488,8 @@ def test_cli_exit_codes_reflect_dataset_status(tmp_path):
     code, report = _run_cli(
         data, out, "--universe-status", str(status), "--sessions", str(calendar)
     )
-    assert code == 3
-    assert report["conclusion"].startswith("PARTIAL")
+    assert code == 2
+    assert report["conclusion"].startswith("BLOCKED")
 
     (data / "AAA.csv").write_text(
         "date,open,high,low,close,volume\n"
