@@ -70,8 +70,10 @@ App Initialize(std::string* error) {
   }
   *app.risk_state = recovered;
   std::string universe_recovery_error;
-  if (!RecoverUniversePublication(
-          app.config.universe_path, &app.journal, &universe_recovery_error)) {
+  if (!RecoverUniversePublication(app.config.universe_path,
+                                  &app.journal,
+                                  nullptr,
+                                  &universe_recovery_error)) {
     app.journal.Close();
     *error = "universe publication recovery failed: " + universe_recovery_error;
     return app;

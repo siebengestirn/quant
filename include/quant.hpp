@@ -1271,8 +1271,15 @@ bool PublishUniverse(const std::string& path,
                      const std::string& transaction_id,
                      PublicationFailurePoint inject,
                      std::string* error);
+struct UniverseRecoveryReport {
+  size_t committed = 0;
+  size_t recovered = 0;
+  std::vector<std::string> unresolved;
+};
+
 bool RecoverUniversePublication(const std::string& path,
                                 Journal* journal,
+                                UniverseRecoveryReport* report,
                                 std::string* error);
 
 class MarketDataService {
