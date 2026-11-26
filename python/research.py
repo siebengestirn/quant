@@ -1559,7 +1559,7 @@ def analyze(
     }
 
     selected_name, _selection_stats = select_on_development(development)
-    best_name, best_stats = max(
+    best_name, _best_stats = max(
         report["walk_forward"].items(),
         key=lambda item: item[1].get("mean_ic", 0),
         default=("none", {}),
