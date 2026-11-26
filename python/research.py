@@ -990,6 +990,44 @@ def hac_standard_error(values: list[float], lags: int = 5) -> float:
     return math.sqrt(max(0.0, variance) / n)
 
 
+def split_development_holdout(
+    history: dict[str, list[dict[str, float]]], holdout_sessions: int = 20
+) -> tuple[
+    dict[str, list[dict[str, float]]],
+    dict[str, list[dict[str, float]]],
+    list[str],
+]:
+    """Seal the final sessions before any strategy selection occurs."""
+    dates = sorted({row["date"] for rows in history.values() for row in rows})
+    holdout_dates = dates[-holdout_sessions:] if holdout_sessions else []
+    cutoff = holdout_dates[0] if holdout_dates else None
+    development: dict[str, list[dict[str, float]]] = {}
+    holdout: dict[str, list[dict[str, float]]] = {}
+    for symbol, rows in history.items():
+        development[symbol] = [
+            row for row in rows if cutoff is None or row["date"] < cutoff
+        ]
+        holdout[symbol] = [
+            row for row in rows if cutoff is not None and row["date"] >= cutoff
+        ]
+    return development, holdout, holdout_dates
+
+
+def select_on_development(
+    development: dict[str, list[dict[str, float]]],
+) -> tuple[str, dict[str, dict]]:
+    """Choose one strategy using development data only."""
+    stats: dict[str, dict] = {}
+    for name, score_fn in STRATEGIES.items():
+        stats[name] = daily_cross_sectional_ic(development, score_fn)
+    best = max(
+        stats.items(),
+        key=lambda item: item[1].get("mean_ic", 0.0),
+        default=("none", {}),
+    )
+    return best[0], stats
+
+
 def purged_walk_forward(
     history: dict[str, list[dict[str, float]]],
     score_fn: Callable[[dict[str, float]], float],
@@ -1320,11 +1358,15 @@ def analyze(
         history = dataset.history
         if dataset.pit_enforced:
             eligibility = dataset.eligible_dates
-    usable = {
-        symbol: rows
-        for symbol, rows in history.items()
-        if len(rows) >= MIN_HISTORY and symbol not in ("NIFTY 50", "INDIA VIX")
-    }
+    development, holdout, holdout_dates = split_development_holdout(
+        {
+            symbol: rows
+            for symbol, rows in history.items()
+            if len(rows) >= MIN_HISTORY
+            and symbol not in ("NIFTY 50", "INDIA VIX")
+        }
+    )
+    usable = development
     report: dict = {
         "labels": {
             "statistics": "ESTIMATED",
@@ -1386,7 +1428,7 @@ def analyze(
 
     for name, score_fn in STRATEGIES.items():
         stats = daily_cross_sectional_ic(usable, score_fn, eligible=eligibility)
-        stats["folds"] = stats["observations"]
+        stats["folds"] = 0
         stats["fold_ics"] = stats["daily_ics"]
         report["walk_forward"][name] = stats
         if stats["observations"]:
@@ -1403,12 +1445,12 @@ def analyze(
             spread = cross_sectional_spread_returns(
                 usable, score_fn, eligible=eligibility
             )
-            net_spread = [value - 0.0010 for value in spread]
-            ratio = deflated_sharpe_ratio(net_spread, TRIALS)
-            report["walk_forward"][name]["net_spread_mean"] = (
-                statistics.fmean(net_spread) if net_spread else 0.0
+            ratio = deflated_sharpe_ratio(spread, TRIALS)
+            report["walk_forward"][name]["gross_spread_mean"] = (
+                statistics.fmean(spread) if spread else 0.0
             )
             report["walk_forward"][name]["dsr"] = ratio
+            report["walk_forward"][name]["cost_model"] = "GROSS_ONLY"
             report["walk_forward"][name]["gross_spread_observations"] = len(
                 spread
             )
@@ -1450,12 +1492,24 @@ def analyze(
         "note": "VERIFIED benchmark; always available",
     }
 
+    selected_name, _selection_stats = select_on_development(development)
     best_name, best_stats = max(
         report["walk_forward"].items(),
         key=lambda item: item[1].get("mean_ic", 0),
         default=("none", {}),
     )
-    if not best_stats or best_stats.get("folds", 0) < 5:
+    if selected_name != best_name:
+        report["rejections"].append(
+            "strategy selection disagrees with development-only selector"
+        )
+    fold_result = purged_walk_forward(
+        development,
+        STRATEGIES.get(best_name, score_momentum),
+        final_holdout=0,
+    )
+    fold_count = len(fold_result.get("folds", []))
+    report["walk_forward"][best_name]["folds"] = fold_count
+    if not best_stats or fold_count < 3:
         report["conclusion"] = "INCONCLUSIVE: insufficient independent folds"
     elif best_stats.get("mean_ic", 0) <= 0:
         report["conclusion"] = "NO TRADE: no positive out-of-sample IC"
@@ -1481,11 +1535,19 @@ def analyze(
             "required before any promotion decision"
         ),
         "selection_tests": selection_test_status(None),
-        "purged_walk_forward": purged_walk_forward(
-            usable, STRATEGIES.get(best_name, score_momentum)
-        ),
+        "purged_walk_forward": fold_result,
+        "fold_count": fold_count,
         "bootstrap": "moving-block, 5-session blocks",
-        "holdout": "sealed final 20 sessions excluded from selection",
+        "cost_model": (
+            "GROSS_ONLY: no turnover, fees, taxes, spread, impact or "
+            "capacity model; fixed-basis haircuts not applied"
+        ),
+        "holdout_dates": holdout_dates,
+        "holdout_sessions": len(holdout_dates),
+        "holdout_used_for_selection": False,
+        "holdout_labels": {
+            symbol: len(rows) for symbol, rows in holdout.items()
+        },
     }
     return report
 
@@ -1498,6 +1560,9 @@ def render_markdown(report: dict) -> str:
         f"- Minimum observations per series: "
         f"{report['observations_per_series']}",
         f"- Conclusion: **{report.get('conclusion', 'INCONCLUSIVE')}**",
+        f"- Selection: development data only; holdout sessions "
+        f"{report.get('methodology', {}).get('holdout_sessions', 0)} sealed",
+        f"- Cost model: {report.get('methodology', {}).get('cost_model', 'UNKNOWN')}",
         "",
         "## Purged walk-forward IC (ESTIMATED)",
         "",
@@ -1551,9 +1616,8 @@ def self_test() -> int:
     assert len(report["walk_forward"]) == len(STRATEGIES), report[
         "walk_forward"
     ]
-    assert all(
-        value["folds"] > 0 for value in report["walk_forward"].values()
-    ), report
+    assert report["walk_forward"][report["best_strategy"]]["folds"] > 0
+    assert report["methodology"]["holdout_used_for_selection"] is False
     ci = bootstrap_ci([0.01, -0.01, 0.02, -0.005])
     assert ci[0] <= ci[1] <= ci[2], ci
     assert deflated(2.0, 8, 100) < 2.0
