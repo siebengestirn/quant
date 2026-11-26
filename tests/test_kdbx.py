@@ -698,3 +698,48 @@ with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
     code, out = run([str(PYKX_PYTHON), "-c", probe])
     assert code == 0, out
     assert json.loads(out.strip().splitlines()[-1])["status"] == "writer_busy"
+
+
+def test_safe_path_grammar(isolated_q):
+    script = """
+import json
+import pykx as kx
+
+with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
+    values = {
+        "valid": bool(q(".quant.safePath", "/tmp/quant-safe").py()),
+        "space": bool(q(".quant.safePath", "/tmp/quant safe").py()),
+        "traversal": bool(q(".quant.safePath", "/tmp/../quant").py()),
+        "semicolon": bool(q(".quant.safePath", "/tmp/a;b").py()),
+    }
+    print(json.dumps(values))
+""".replace("PORT", str(isolated_q.port))
+    code, out = run([str(PYKX_PYTHON), "-c", script])
+    assert code == 0, out
+    result = json.loads(out.strip().splitlines()[-1])
+    assert result == {
+        "valid": True,
+        "space": False,
+        "traversal": False,
+        "semicolon": False,
+    }
+
+
+def test_stale_writer_lock_recovery(isolated_q):
+    hdb = isolated_q.directory / "hdb-stale-lock"
+    lock = hdb / ".writer.lock"
+    lock.mkdir(parents=True)
+    (lock / "pid").write_text("999999")
+    script = """
+import json
+import pykx as kx
+
+with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
+    recovered = q('.quant.staleLockRecovery["' + str(HDB) + '"]').py()
+    print(json.dumps({"recovered": str(recovered).lower()}))
+""".replace("PORT", str(isolated_q.port))
+    script = script.replace("HDB", json.dumps(str(hdb)))
+    code, out = run([str(PYKX_PYTHON), "-c", script])
+    assert code == 0, out
+    assert json.loads(out.strip().splitlines()[-1])["recovered"] == "true"
+    assert not lock.exists()
