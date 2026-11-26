@@ -1516,15 +1516,18 @@ bool IsValidPaperTransition(PaperOrderState from, PaperOrderState to) {
   switch (from) {
     case PaperOrderState::kIntent:
       return to == PaperOrderState::kRiskApproved ||
-             to == PaperOrderState::kRejected;
+             to == PaperOrderState::kRejected ||
+             to == PaperOrderState::kAmbiguous;
     case PaperOrderState::kRiskApproved:
       return to == PaperOrderState::kSubmitted ||
              to == PaperOrderState::kRejected ||
-             to == PaperOrderState::kCancelled;
+             to == PaperOrderState::kCancelled ||
+             to == PaperOrderState::kAmbiguous;
     case PaperOrderState::kSubmitted:
       return to == PaperOrderState::kAcknowledged ||
              to == PaperOrderState::kRejected ||
-             to == PaperOrderState::kCancelled;
+             to == PaperOrderState::kCancelled ||
+             to == PaperOrderState::kAmbiguous;
     case PaperOrderState::kAcknowledged:
     case PaperOrderState::kWorking:
     case PaperOrderState::kPartiallyFilled:

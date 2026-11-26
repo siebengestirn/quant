@@ -1202,9 +1202,16 @@ void TestAmbiguousStateRecovery() {
       TestConfig(),
       &partial,
       std::make_shared<Portfolio>(Money::FromRupees(100000.0)));
-  Check(partial_broker.RehydrateFromJournal(&error),
-        "partially filled ambiguous order rehydrates");
-  Check(partial_broker.Find("O-AMB2")->state == PaperOrderState::kAmbiguous,
+  const bool partial_ok = partial_broker.RehydrateFromJournal(&error);
+  Check(partial_ok, "partially filled ambiguous order rehydrates");
+  const PaperOrder* amb = partial_broker.Find("O-AMB2");
+  Check(amb != nullptr, "ambiguous order exists");
+  if (amb == nullptr) {
+    journal.Close();
+    partial.Close();
+    return;
+  }
+  Check(amb->state == PaperOrderState::kAmbiguous,
         "partial ambiguous state is not upgraded");
   Check(!partial_broker.ApplyQuote("O-AMB2", GoodQuote(100.0), NowMs(), &error),
         "ambiguous order cannot receive fills");
