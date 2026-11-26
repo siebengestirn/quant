@@ -21,6 +21,7 @@ import hashlib
 import itertools
 import json
 import math
+import os
 import random
 import re
 import statistics
@@ -926,9 +927,181 @@ def register_experiment(root: Path, record: dict) -> str:
     entry = dict(record)
     entry["id"] = identifier
     entry["registered_at_utc"] = datetime.now(UTC).isoformat()
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(entry, sort_keys=True) + "\n")
+    entry["random_seed"] = SEED
+    entry["trial_count"] = TRIALS
+    try:
+        entry["code_commit"] = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parent.parent,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        entry["code_commit"] = "UNKNOWN"
+    line = json.dumps(entry, sort_keys=True) + "\n"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.write(fd, line.encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
     return identifier
+
+
+def block_bootstrap_ci(
+    values: list[float], block_length: int = 5, draws: int = 2000
+) -> list[float]:
+    """Moving-block bootstrap CI for serially dependent daily statistics."""
+    n = len(values)
+    if n < 4 or block_length < 1 or block_length >= n or draws < 100:
+        return [0.0, 0.0, 0.0]
+    rng = random.Random(SEED)
+    blocks = n // block_length
+    means: list[float] = []
+    for _ in range(draws):
+        sample: list[float] = []
+        for _ in range(blocks):
+            start = rng.randrange(0, n - block_length + 1)
+            sample.extend(values[start : start + block_length])
+        means.append(statistics.fmean(sample))
+    means.sort()
+    return [
+        means[int(0.025 * draws)],
+        means[draws // 2],
+        means[int(0.975 * draws) - 1],
+    ]
+
+
+def hac_standard_error(values: list[float], lags: int = 5) -> float:
+    """Newey-West HAC standard error of the mean."""
+    n = len(values)
+    if n < 4 or lags < 0 or lags >= n:
+        return 0.0
+    mean = statistics.fmean(values)
+    centered = [value - mean for value in values]
+    variance = sum(value * value for value in centered) / n
+    for lag in range(1, lags + 1):
+        weight = 1.0 - lag / (lags + 1.0)
+        autocov = (
+            sum(centered[i] * centered[i - lag] for i in range(lag, n)) / n
+        )
+        variance += 2.0 * weight * autocov
+    return math.sqrt(max(0.0, variance) / n)
+
+
+def purged_walk_forward(
+    history: dict[str, list[dict[str, float]]],
+    score_fn: Callable[[dict[str, float]], float],
+    train_window: int = 130,
+    test_window: int = 20,
+    purge_sessions: int = HOLDING_SESSIONS,
+    embargo_sessions: int = HOLDING_SESSIONS,
+    final_holdout: int = 20,
+) -> dict:
+    """Chronological train/select/test with purge, embargo and sealed holdout."""
+    dates = sorted({row["date"] for rows in history.values() for row in rows})
+    usable_dates = (
+        dates[: len(dates) - final_holdout] if final_holdout else dates
+    )
+    scores: dict[str, dict[str, float]] = {}
+    labels: dict[str, dict[str, float]] = {}
+    for symbol, rows in history.items():
+        if symbol in ("NIFTY 50", "INDIA VIX"):
+            continue
+        scores[symbol] = {}
+        labels[symbol] = {}
+        for index, row in enumerate(rows):
+            label = forward_label(rows, index, HOLDING_SESSIONS)
+            if index >= MIN_HISTORY and label is not None:
+                value = score_fn(features(rows, index))
+                if math.isfinite(value):
+                    scores[symbol][row["date"]] = value
+                    labels[symbol][row["date"]] = label
+    folds: list[dict] = []
+    start = train_window
+    fold_number = 0
+    while start + test_window <= len(usable_dates):
+        test_dates = usable_dates[start : start + test_window]
+        train_end = max(0, start - purge_sessions)
+        train_dates = usable_dates[:train_end]
+        selected = [
+            symbol
+            for symbol in scores
+            if len(set(train_dates) & set(scores[symbol])) >= 5
+        ]
+        fold_ics: list[float] = []
+        fold_scores: list[float] = []
+        fold_labels: list[float] = []
+        for session_date in test_dates:
+            xs = [
+                scores[s][session_date]
+                for s in selected
+                if session_date in scores[s]
+            ]
+            ys = [
+                labels[s][session_date]
+                for s in selected
+                if session_date in labels[s]
+            ]
+            if len(xs) >= 5:
+                ic = spearman_strict(xs, ys)
+                if ic is not None:
+                    fold_ics.append(ic)
+            for symbol in selected:
+                if (
+                    session_date in scores[symbol]
+                    and session_date in labels[symbol]
+                ):
+                    fold_scores.append(scores[symbol][session_date])
+                    fold_labels.append(labels[symbol][session_date])
+        fold_ics_global = spearman_strict(fold_scores, fold_labels)
+        folds.append(
+            {
+                "fold": fold_number,
+                "train_dates": len(train_dates),
+                "test_dates": len(test_dates),
+                "purged": purge_sessions,
+                "embargoed": embargo_sessions,
+                "selected_instruments": len(selected),
+                "daily_ic": statistics.fmean(fold_ics) if fold_ics else 0.0,
+                "pooled_ic": (
+                    fold_ics_global if fold_ics_global is not None else 0.0
+                ),
+            }
+        )
+        fold_number += 1
+        start += test_window + embargo_sessions
+    if not folds:
+        return {
+            "status": "UNDEFINED",
+            "folds": [],
+            "holdout_sessions": final_holdout,
+        }
+    return {
+        "status": "CALCULATED",
+        "folds": folds,
+        "mean_ic": statistics.fmean(f["daily_ic"] for f in folds),
+        "holdout_sessions": final_holdout,
+        "holdout_used_for_selection": False,
+        "protocol": "chronological purged walk-forward with embargo",
+    }
+
+
+def selection_test_status(trial_matrix: list[list[float]] | None) -> dict:
+    """White Reality Check / Hansen SPA status for a complete trial universe."""
+    if not trial_matrix or len(trial_matrix) < 8 or len(trial_matrix[0]) < 8:
+        return {
+            "status": "UNAVAILABLE",
+            "reason": "complete trial performance matrix not registered",
+        }
+    return {
+        "status": "UNAVAILABLE",
+        "reason": (
+            "dependence-aware White Reality Check and Hansen SPA "
+            "implementation pending; bounded diagnostics only"
+        ),
+    }
 
 
 def bootstrap_ci(
@@ -1218,7 +1391,10 @@ def analyze(
         report["walk_forward"][name] = stats
         if stats["observations"]:
             values = stats["daily_ics"]
-            report["walk_forward"][name]["ic_bootstrap_95ci"] = bootstrap_ci(
+            report["walk_forward"][name]["ic_bootstrap_95ci"] = (
+                block_bootstrap_ci(values)
+            )
+            report["walk_forward"][name]["ic_hac_se"] = hac_standard_error(
                 values
             )
             report["walk_forward"][name]["deflated_mean_ic"] = deflated(
@@ -1227,7 +1403,11 @@ def analyze(
             spread = cross_sectional_spread_returns(
                 usable, score_fn, eligible=eligibility
             )
-            ratio = deflated_sharpe_ratio(spread, TRIALS)
+            net_spread = [value - 0.0010 for value in spread]
+            ratio = deflated_sharpe_ratio(net_spread, TRIALS)
+            report["walk_forward"][name]["net_spread_mean"] = (
+                statistics.fmean(net_spread) if net_spread else 0.0
+            )
             report["walk_forward"][name]["dsr"] = ratio
             report["walk_forward"][name]["gross_spread_observations"] = len(
                 spread
@@ -1290,6 +1470,23 @@ def analyze(
             "independently verified"
         )
     report["best_strategy"] = best_name
+    report["methodology"] = {
+        "signal_diagnostics_scope": (
+            "DESCRIPTIVE: daily cross-sectional IC and bounded CSCV on "
+            "four strategy families; not strategy-selection evidence"
+        ),
+        "formal_selection_scope": (
+            "NOT ESTABLISHED: full trial universe, net portfolio returns, "
+            "block bootstrap/HAC, White Reality Check and Hansen SPA "
+            "required before any promotion decision"
+        ),
+        "selection_tests": selection_test_status(None),
+        "purged_walk_forward": purged_walk_forward(
+            usable, STRATEGIES.get(best_name, score_momentum)
+        ),
+        "bootstrap": "moving-block, 5-session blocks",
+        "holdout": "sealed final 20 sessions excluded from selection",
+    }
     return report
 
 
