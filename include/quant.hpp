@@ -1133,7 +1133,9 @@ class PaperBroker {
                            int quantity,
                            Money limit_price,
                            std::string* error);
-  bool RiskApprove(const std::string& id, std::string* error);
+  bool RiskApprove(const std::string& id,
+                   const RiskDecision& decision,
+                   std::string* error);
   bool Reject(const std::string& id,
               const std::string& reason,
               std::string* error);
