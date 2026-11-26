@@ -38,7 +38,7 @@ The expectations object has exactly these fields:
 The canonical byte string for hashing is built in this exact order, with a
 single trailing newline after every line and no spaces around `=` or `,`:
 
-```
+```text
 QUANT-DATASET-CONTRACT-V2
 schema_version=2
 digest_algorithm=sha256
