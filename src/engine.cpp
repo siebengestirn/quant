@@ -1635,15 +1635,117 @@ bool ReadCostObject(const Json& object, CostBreakdown* costs) {
 }
 }  // namespace
 
+std::string AccountingPayloadDigest(const AccountingPosting& posting) {
+  std::ostringstream canonical;
+  canonical << posting.schema_version << '|' << posting.posting_id << '|'
+            << posting.order_id << '|' << posting.action << '|'
+            << posting.symbol << '|' << posting.quantity << '|'
+            << posting.price_paise << '|' << posting.notional_paise << '|'
+            << posting.amount_paise << '|' << posting.costs.brokerage.paise()
+            << '|' << posting.costs.stt.paise() << '|'
+            << posting.costs.exchange_fee.paise() << '|'
+            << posting.costs.gst.paise() << '|' << posting.costs.sebi.paise()
+            << '|' << posting.costs.stamp.paise() << '|'
+            << posting.costs.dp.paise() << '|' << posting.costs.slippage.paise()
+            << '|' << posting.costs.total.paise();
+  return ChecksumHex(canonical.str());
+}
+
+bool ValidateAccountingPosting(const AccountingPosting& posting,
+                               std::string* error) {
+  auto reject = [error](const char* message) {
+    if (error)
+      *error = message;
+    return false;
+  };
+  if (posting.schema_version != 1 || posting.posting_id.empty() ||
+      posting.symbol.empty())
+    return reject("accounting posting identity invalid");
+  if (posting.action != "BUY" && posting.action != "SELL" &&
+      posting.action != "EXPENSE" && posting.action != "FLOW")
+    return reject("accounting posting action invalid");
+  const bool trade = posting.action == "BUY" || posting.action == "SELL";
+  if (trade) {
+    if (posting.quantity <= 0 || posting.price_paise <= 0 ||
+        posting.notional_paise <= 0)
+      return reject("accounting posting trade amounts invalid");
+    int64_t expected = 0;
+    if (!money_detail::CheckedMultiply(posting.price_paise,
+                                       static_cast<int64_t>(posting.quantity),
+                                       &expected) ||
+        expected != posting.notional_paise)
+      return reject("accounting posting notional mismatch");
+    if (!posting.costs.usable())
+      return reject("accounting posting costs unavailable");
+    int64_t sum = 0;
+    if (!money_detail::CheckedAdd(sum, posting.costs.brokerage.paise(), &sum) ||
+        !money_detail::CheckedAdd(sum, posting.costs.stt.paise(), &sum) ||
+        !money_detail::CheckedAdd(
+            sum, posting.costs.exchange_fee.paise(), &sum) ||
+        !money_detail::CheckedAdd(sum, posting.costs.gst.paise(), &sum) ||
+        !money_detail::CheckedAdd(sum, posting.costs.sebi.paise(), &sum) ||
+        !money_detail::CheckedAdd(sum, posting.costs.stamp.paise(), &sum) ||
+        !money_detail::CheckedAdd(sum, posting.costs.dp.paise(), &sum) ||
+        !money_detail::CheckedAdd(sum, posting.costs.slippage.paise(), &sum) ||
+        sum != posting.costs.total.paise())
+      return reject("accounting posting cost total mismatch");
+  } else {
+    if (posting.amount_paise < 0)
+      return reject("accounting posting amount invalid");
+  }
+  return true;
+}
+
+bool RebuildPortfolioFromJournal(Journal* journal,
+                                 Money initial_capital,
+                                 Portfolio* out,
+                                 std::string* error) {
+  if (journal == nullptr || out == nullptr) {
+    if (error)
+      *error = "replay requires a journal and portfolio";
+    return false;
+  }
+  Portfolio portfolio(initial_capital);
+  const std::vector<Event> events = journal->Replay(error);
+  if (!error->empty())
+    return false;
+  std::map<std::string, std::string> seen;
+  for (const Event& event : events) {
+    if (event.type != EventType::kAccounting)
+      continue;
+    AccountingPosting posting;
+    if (!ParseAccountingPosting(event, &posting, error))
+      return false;
+    const std::string digest = AccountingPayloadDigest(posting);
+    const auto prior = seen.find(posting.posting_id);
+    if (prior != seen.end()) {
+      if (prior->second != digest) {
+        if (error)
+          *error = "conflicting accounting posting ID at sequence " +
+                   std::to_string(event.sequence);
+        return false;
+      }
+      continue;  // Exact duplicate is an idempotent retry.
+    }
+    seen[posting.posting_id] = digest;
+    if (!ApplyAccountingPosting(posting, &portfolio, error)) {
+      if (error)
+        *error = "accounting replay failed at sequence " +
+                 std::to_string(event.sequence) + ": " + *error;
+      return false;
+    }
+  }
+  *out = portfolio;
+  if (error)
+    error->clear();
+  return true;
+}
+
 bool AppendAccountingPosting(Journal* journal,
                              const AccountingPosting& posting,
                              std::string* error) {
-  if (journal == nullptr || posting.posting_id.empty() ||
-      posting.action.empty() || posting.schema_version != 1) {
-    if (error)
-      *error = "invalid accounting posting identity";
+  if (journal == nullptr || !ValidateAccountingPosting(posting, error))
     return false;
-  }
   Json::Object payload;
   payload["schema_version"] = Json::UInteger(posting.schema_version);
   payload["posting_id"] = Json::String(posting.posting_id);
@@ -1714,6 +1816,8 @@ bool ParseAccountingPosting(const Event& event,
       *error = "accounting posting has invalid trade amounts";
     return false;
   }
+  if (!ValidateAccountingPosting(parsed, error))
+    return false;
   *posting = parsed;
   return true;
 }

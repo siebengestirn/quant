@@ -826,6 +826,13 @@ struct AccountingPosting {
   int64_t amount_paise = 0;
   CostBreakdown costs;
 };
+bool RebuildPortfolioFromJournal(Journal* journal,
+                                 Money initial_capital,
+                                 Portfolio* out,
+                                 std::string* error);
+std::string AccountingPayloadDigest(const AccountingPosting& posting);
+bool ValidateAccountingPosting(const AccountingPosting& posting,
+                               std::string* error);
 bool AppendAccountingPosting(Journal* journal,
                              const AccountingPosting& posting,
                              std::string* error);
