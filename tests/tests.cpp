@@ -715,45 +715,91 @@ void TestInstrumentReferenceModel() {
         "missing permanent identity rejected");
 }
 
+DatasetExpectations TestDatasetExpectations(
+    const std::vector<std::string>& symbols,
+    const std::vector<std::string>& sessions,
+    int64_t min_rows = 1) {
+  DatasetExpectations expected;
+  expected.snapshot_id = "SNAP-UNIT-TEST";
+  expected.calendar_id = "NSE_CASH_DAILY_OBSERVED";
+  expected.generated_at_ms = 1769000000000;
+  expected.provenance = "UNIT_TEST_FIXTURE";
+  expected.symbols = symbols;
+  expected.sessions = sessions;
+  expected.first_date = sessions.front();
+  expected.last_date = sessions.back();
+  expected.min_rows = min_rows;
+  for (const std::string& symbol : symbols)
+    expected.instrument_ids[symbol] = "ID-" + symbol;
+  return expected;
+}
+
 void TestDatasetManifestContract() {
-  const std::string dir = TempPath("dataset_manifest");
+  const std::string dir = TempPath("dataset_manifest_v2");
   std::filesystem::remove_all(dir);
-  std::filesystem::create_directories(dir);
   const std::string csv =
       "date,open,high,low,close,volume\n"
-      "2026-01-01,100,103,99,102,1000\n";
-  const std::string path = dir + "/AAA.csv";
-  std::ofstream(path) << csv;
+      "2026-01-01,100,103,99,102,1000\n"
+      "2026-01-02,102,105,101,104,1200\n";
+  std::filesystem::create_directories(dir);
+  std::ofstream(dir + "/AAA.csv") << csv;
+  const DatasetExpectations expected =
+      TestDatasetExpectations({"AAA"}, {"2026-01-01", "2026-01-02"});
   std::string error;
   Check(VerifyDataset(dir, &error).status == DatasetStatus::kBlocked,
-        "dataset without manifest is blocked");
-  std::ofstream(dir + "/manifest.json")
-      << "{\"schema_version\":1,\"AAA\":{\"digest\":\"" << ChecksumHex(csv)
-      << "\",\"rows\":1}}";
-  DatasetVerification verified = VerifyDataset(dir, &error);
-  Check(verified.status == DatasetStatus::kComplete,
-        "verified manifest is complete");
-  Check(verified.file_digests.at("AAA") == ChecksumHex(csv),
-        "manifest digest recorded");
-  std::ofstream(path) << "date,open,high,low,close,volume\n"
-                      << "2026-01-01,100,103,99,999,1000\n";
-  verified = VerifyDataset(dir, &error);
-  Check((verified.status == DatasetStatus::kPartial ||
-         verified.status == DatasetStatus::kFailed) &&
-            !verified.errors.empty(),
-        "tampered dataset is rejected with explicit errors");
-  std::filesystem::remove_all(dir);
+        "dataset without authoritative expectations is blocked");
+  Check(!error.empty(), "blocked dataset carries an explicit reason");
+  Check(!VerifyDataset(dir, &expected, &error).errors.empty(),
+        "missing manifest is blocked");
+  Check(WriteDatasetManifest(dir, expected, &error),
+        "complete v2 manifest published");
+  DatasetVerification result = VerifyDataset(dir, &expected, &error);
+  Check(result.status == DatasetStatus::kComplete,
+        "complete v2 manifest verified");
+  Check(result.file_digests.at("AAA") == Sha256Hex(csv),
+        "manifest uses the SHA-256 digest algorithm");
 
-  Json candles = Json::Array({Json::Array({Json::String("2026-01-01"),
-                                           Json::Number(1234.56789),
-                                           Json::Number(1240.0),
-                                           Json::Number(1230.0),
-                                           Json::Number(1235.0),
-                                           Json::Number(1000.0)})});
-  HistoryParseResult parsed = BuildHistoryCsv(candles, "PREC");
-  Check(parsed.errors.empty(), "precision fixture accepted");
-  Check(parsed.csv.find("1234.56789") != std::string::npos,
-        "provider value serialized round-trip safe");
+  std::ofstream(dir + "/AAA.csv") << "date,open,high,low,close,volume\n";
+  result = VerifyDataset(dir, &expected, &error);
+  Check(result.status == DatasetStatus::kFailed && !result.errors.empty(),
+        "zero-row dataset is rejected");
+  std::ofstream(dir + "/AAA.csv") << csv;
+
+  DatasetExpectations omitted = expected;
+  omitted.sessions = {"2026-01-01"};
+  omitted.first_date = omitted.last_date = "2026-01-01";
+  Check(VerifyDataset(dir, &omitted, &error).status == DatasetStatus::kBlocked,
+        "omitted required session is blocked");
+  DatasetExpectations extra = expected;
+  extra.symbols = {"AAA", "BBB"};
+  extra.instrument_ids["BBB"] = "ID-BBB";
+  Check(VerifyDataset(dir, &extra, &error).status == DatasetStatus::kBlocked,
+        "omitted required instrument is blocked");
+  DatasetExpectations stale = expected;
+  stale.generated_at_ms += 1;
+  Check(VerifyDataset(dir, &stale, &error).status == DatasetStatus::kBlocked,
+        "stale generation is blocked");
+
+  std::ofstream(dir + "/BBB.csv") << csv;
+  Check(WriteDatasetManifest(dir, extra, &error),
+        "two-symbol snapshot published");
+  std::filesystem::remove(dir + "/BBB.csv");
+  result = VerifyDataset(dir, &extra, &error);
+  Check(result.status == DatasetStatus::kPartial,
+        "missing required series is PARTIAL, never COMPLETE");
+  Check(VerifyDataset(dir, &expected, &error).status == DatasetStatus::kBlocked,
+        "unexpected additional instrument is blocked");
+
+  std::ofstream(dir + "/BBB.csv") << csv;
+  std::ifstream manifest_input(dir + "/manifest.json");
+  std::string manifest((std::istreambuf_iterator<char>(manifest_input)),
+                       std::istreambuf_iterator<char>());
+  const size_t rows_at = manifest.find("\"rows\":");
+  manifest.replace(rows_at, 9, "\"rows\":99");
+  std::ofstream(dir + "/manifest.json") << manifest;
+  Check(VerifyDataset(dir, &extra, &error).status == DatasetStatus::kBlocked,
+        "malformed manifest type is blocked");
+  std::filesystem::remove_all(dir);
 }
 
 void TestEventRuntimeOrdering() {

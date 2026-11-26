@@ -37,7 +37,9 @@ CPP_FILES = (
     + [ROOT / "tests" / "tests.cpp"]
 )
 PY_FILES = [
+    ROOT / "python" / "dataset_contract.py",
     ROOT / "python" / "research.py",
+    ROOT / "tests" / "test_dataset_contract.py",
     ROOT / "tests" / "test_research.py",
     ROOT / "tests" / "test_kdbx.py",
     ROOT / "scripts" / "assurance.py",
@@ -632,6 +634,7 @@ def run_checks(gate: Gate, allow_dirty: bool) -> None:
                 "python3",
                 "-m",
                 "pytest",
+                "tests/test_dataset_contract.py",
                 "tests/test_research.py",
                 "tests/test_kdbx.py",
                 "-q",

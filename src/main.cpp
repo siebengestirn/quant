@@ -691,20 +691,20 @@ std::vector<Instrument> LoadUniverse(App& app, std::string* error) {
 std::map<std::string, std::vector<Candle>> LoadHistory(App& app) {
   std::map<std::string, std::vector<Candle>> history;
   std::string verification_error;
-  const DatasetVerification verification =
-      VerifyDataset(app.config.history_dir, &verification_error);
-  app.dataset_status = verification;
-  if (verification.status != DatasetStatus::kComplete &&
-      verification.status != DatasetStatus::kPartial)
+  DatasetExpectations expected;
+  if (!ReadDatasetExpectations(
+          app.config.history_dir, &expected, &verification_error)) {
+    app.dataset_status =
+        VerifyDataset(app.config.history_dir, &verification_error);
     return history;
-  std::set<std::string> symbols(app.config.seed_symbols.begin(),
-                                app.config.seed_symbols.end());
-  symbols.insert(app.config.index_symbols.begin(),
-                 app.config.index_symbols.end());
-  for (const std::string& symbol : symbols) {
-    if (verification.file_digests.find(symbol) ==
-        verification.file_digests.end())
-      continue;
+  }
+  const DatasetVerification verification =
+      VerifyDataset(app.config.history_dir, &expected, &verification_error);
+  app.dataset_status = verification;
+  // Decision-support paths never accept PARTIAL data as if it were complete.
+  if (verification.status != DatasetStatus::kComplete)
+    return history;
+  for (const std::string& symbol : expected.symbols) {
     std::string error;
     std::vector<Candle> candles;
     if (ReadCsvCandles(
@@ -817,8 +817,10 @@ DailyReport BuildReport(App& app, bool* ok) {
 
   const auto history = LoadHistory(app);
   report.dataset_status = StatusName(app.dataset_status.status);
-  report.data_provenance = "dataset_digest=" + app.dataset_status.digest;
-  if (!app.dataset_status.errors.empty()) {
+  report.data_provenance =
+      "dataset_contract_sha256=" + app.dataset_status.contract_digest;
+  if (app.dataset_status.status != DatasetStatus::kComplete ||
+      !app.dataset_status.errors.empty()) {
     report.decision = "NO TRADE";
     report.decision_reason =
         "dataset contract failed: " + app.dataset_status.errors.front();

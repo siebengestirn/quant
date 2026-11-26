@@ -1497,14 +1497,54 @@ std::string RenderReport(const DailyReport& report);
 std::string WriteTextFile(const std::string& path, const std::string& content);
 enum class DatasetStatus { kComplete, kPartial, kBlocked, kFailed };
 
+std::string Sha256Hex(std::string_view bytes);
+
 struct DatasetVerification {
   DatasetStatus status = DatasetStatus::kFailed;
-  std::string digest;
+  std::string contract_digest;
   std::vector<std::string> errors;
   std::map<std::string, std::string> file_digests;
 };
 
+// Frozen snapshot expectations. The C++ and Python implementations both
+// consume the language-neutral v2 contract described in
+// docs/dataset-contract-v2.md.
+struct DatasetExpectations {
+  std::string snapshot_id;
+  std::string calendar_id;
+  int64_t generated_at_ms = 0;
+  std::string provenance;
+  std::vector<std::string> symbols;
+  std::vector<std::string> sessions;
+  std::string first_date;
+  std::string last_date;
+  int64_t min_rows = 1;
+  std::map<std::string, std::string> instrument_ids;
+};
+
+Json::Object DatasetExpectationsJson(const DatasetExpectations& expected);
+std::string CanonicalDatasetExpectations(const DatasetExpectations& expected);
+std::string DatasetContractDigest(const DatasetExpectations& expected);
+bool ValidateDatasetExpectations(const DatasetExpectations& expected,
+                                 std::string* error);
+bool ParseDatasetExpectations(const Json& value,
+                              DatasetExpectations* expected,
+                              std::string* error);
+bool ReadDatasetExpectations(const std::string& history_dir,
+                             DatasetExpectations* expected,
+                             std::string* error);
+bool WriteDatasetContract(const std::string& history_dir,
+                          const DatasetExpectations& expected,
+                          std::string* error);
+bool WriteDatasetManifest(const std::string& history_dir,
+                          const DatasetExpectations& expected,
+                          std::string* error);
+
+// Verification without authoritative expectations is never COMPLETE.
 DatasetVerification VerifyDataset(const std::string& history_dir,
+                                  std::string* error);
+DatasetVerification VerifyDataset(const std::string& history_dir,
+                                  const DatasetExpectations* expected,
                                   std::string* error);
 
 bool ReadCsvCandles(const std::string& path,

@@ -51,7 +51,7 @@ jobs:
       - name: Python tests
         run: |
           python3 -m pip install --quiet pytest
-          python3 -m pytest tests/test_research.py tests/test_kdbx.py -q
+          python3 -m pytest tests/test_dataset_contract.py tests/test_research.py tests/test_kdbx.py -q
 
       - name: Single-file assurance gate
         env:

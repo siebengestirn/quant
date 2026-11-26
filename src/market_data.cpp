@@ -827,12 +827,38 @@ HistorySyncResult MarketDataService::SyncHistory(
     }
   }
 
-  Json::Object manifest;
-  manifest["schema_version"] = Json::UInteger(1);
-  manifest["generated_at_ms"] =
-      Json::Integer(std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::system_clock::now().time_since_epoch())
-                        .count());
+  DatasetExpectations contract;
+  contract.snapshot_id =
+      "SNAP-" +
+      std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count());
+  contract.calendar_id = "NSE_CASH_DAILY_OBSERVED";
+  contract.generated_at_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count();
+  contract.provenance = "UPSTOX_BOD_DAILY";
+  contract.min_rows = 1;
+  auto safe_identity = [](std::string value) {
+    for (char& c : value) {
+      const unsigned char byte = static_cast<unsigned char>(c);
+      if (!(std::isalnum(byte) || c == '.' || c == '_' || c == ':' || c == '-'))
+        c = '_';
+    }
+    return value.empty() ? std::string("UNKNOWN_ID") : value;
+  };
+  for (const Instrument& instrument : targets)
+    contract.instrument_ids[instrument.symbol] = safe_identity(
+        instrument.isin.empty() ? instrument.provider_key : instrument.isin);
+  for (const std::string& symbol : config_.index_symbols)
+    contract.instrument_ids[symbol] = safe_identity(IndexKey(symbol));
+  for (const auto& [symbol, ignored] : contract.instrument_ids) {
+    (void)ignored;
+    contract.symbols.push_back(symbol);
+  }
+  std::set<std::string> observed_sessions;
+  std::map<std::string, std::string> raw_digests;
   auto processSeries = [&](const std::string& symbol,
                            const std::string& key) -> bool {
     const std::string url = std::string(kUpstoxBase) + "/historical-candle/" +
@@ -849,7 +875,7 @@ HistorySyncResult MarketDataService::SyncHistory(
     std::filesystem::create_directories(config_.history_raw_dir);
     std::filesystem::create_directories(config_.history_dir);
     const std::string raw_path = config_.history_raw_dir + "/" + symbol + "_" +
-                                 ChecksumHex(response.body) + ".json";
+                                 Sha256Hex(response.body) + ".json";
     std::string raw_error;
     if (!WriteAndSyncFile(raw_path, response.body, &raw_error)) {
       failures.push_back(symbol + ": raw capture failed");
@@ -873,16 +899,18 @@ HistorySyncResult MarketDataService::SyncHistory(
         failures.push_back(issue);
       return false;  // Never publish a partial or coerced series.
     }
+    std::set<std::string> sessions;
+    for (const Json& row : candles->array())
+      if (row.type() == Json::Type::kArray && !row.array().empty())
+        sessions.insert(row.array()[0].as_string().substr(0, 10));
     const std::string path = config_.history_dir + "/" + symbol + ".csv";
     std::string publish_error;
     if (!PublishHistoryFile(path, parsed.csv, &publish_error)) {
       failures.push_back(symbol + ": " + publish_error);
       return false;
     }
-    manifest[symbol] = Json::ObjectValue(
-        {{"rows", Json::UInteger(static_cast<uint64_t>(parsed.accepted))},
-         {"digest", Json::String(ChecksumHex(parsed.csv))},
-         {"raw_digest", Json::String(ChecksumHex(response.body))}});
+    observed_sessions.insert(sessions.begin(), sessions.end());
+    raw_digests[symbol] = Sha256Hex(response.body);
     return true;
   };
 
@@ -890,7 +918,6 @@ HistorySyncResult MarketDataService::SyncHistory(
     if (processSeries(instrument.symbol, instrument.provider_key))
       ++fetched;
   }
-
   for (const std::string& symbol : config_.index_symbols) {
     const std::string key = IndexKey(symbol);
     if (key.empty())
@@ -898,6 +925,60 @@ HistorySyncResult MarketDataService::SyncHistory(
     if (processSeries(symbol, key))
       ++fetched;
   }
+  contract.sessions.assign(observed_sessions.begin(), observed_sessions.end());
+  contract.first_date =
+      contract.sessions.empty() ? "" : contract.sessions.front();
+  contract.last_date =
+      contract.sessions.empty() ? "" : contract.sessions.back();
+  if (contract.sessions.empty()) {
+    if (error)
+      *error = "no sessions observed; snapshot contract not publishable";
+    sync.status = HistorySyncStatus::kFailed;
+    return sync;
+  }
+  std::string contract_error;
+  if (!WriteDatasetContract(config_.history_dir, contract, &contract_error)) {
+    if (error)
+      *error = "dataset contract not published: " + contract_error;
+    sync.status = HistorySyncStatus::kFailed;
+    return sync;
+  }
+  Json::Object files;
+  for (const std::string& symbol : contract.symbols) {
+    const std::string path = config_.history_dir + "/" + symbol + ".csv";
+    std::ifstream input(path, std::ios::binary);
+    if (!input.is_open())
+      continue;  // Missing required instruments leave the dataset PARTIAL.
+    const std::string bytes((std::istreambuf_iterator<char>(input)),
+                            std::istreambuf_iterator<char>());
+    std::vector<Candle> candles;
+    std::string csv_error;
+    if (!ReadCsvCandles(path, &candles, &csv_error))
+      continue;
+    Json::Object entry;
+    entry["digest"] = Json::String(Sha256Hex(bytes));
+    entry["rows"] = Json::UInteger(static_cast<uint64_t>(candles.size()));
+    entry["first_date"] =
+        Json::String(candles.empty() ? "" : candles.front().date);
+    entry["last_date"] =
+        Json::String(candles.empty() ? "" : candles.back().date);
+    entry["instrument_id"] = Json::String(contract.instrument_ids.at(symbol));
+    entry["raw_digest"] = Json::String(raw_digests[symbol]);
+    files[symbol] = Json::ObjectValue(entry);
+  }
+  Json::Object manifest;
+  manifest["schema_version"] = Json::UInteger(2);
+  manifest["digest_algorithm"] = Json::String("sha256");
+  manifest["contract_digest"] = Json::String(DatasetContractDigest(contract));
+  std::ifstream contract_input(config_.history_dir + "/contract.json",
+                               std::ios::binary);
+  const std::string contract_bytes(
+      (std::istreambuf_iterator<char>(contract_input)),
+      std::istreambuf_iterator<char>());
+  manifest["contract_sha256"] = Json::String(Sha256Hex(contract_bytes));
+  manifest["expectations"] =
+      Json::ObjectValue(DatasetExpectationsJson(contract));
+  manifest["files"] = Json::ObjectValue(files);
   std::string manifest_error;
   if (!PublishHistoryFile(config_.history_dir + "/manifest.json",
                           Json::ObjectValue(manifest).Dump(),
@@ -908,18 +989,11 @@ HistorySyncResult MarketDataService::SyncHistory(
     return sync;
   }
 
-  sync.expected = targets.size() + config_.index_symbols.size();
+  sync.expected = contract.symbols.size();
   sync.fetched = fetched;
   sync.failures = failures;
   sync.failed = sync.expected > fetched ? sync.expected - fetched : 0;
-  const std::string manifest_json = Json::ObjectValue(manifest).Dump();
-  sync.manifest_digest = ChecksumHex(manifest_json);
-  if (fetched == 0)
-    sync.status = HistorySyncStatus::kFailed;
-  else if (!failures.empty() || sync.failed != 0)
-    sync.status = HistorySyncStatus::kPartial;
-  else
-    sync.status = HistorySyncStatus::kComplete;
+  sync.manifest_digest = DatasetContractDigest(contract);
   if (error) {
     if (sync.status == HistorySyncStatus::kComplete)
       error->clear();
