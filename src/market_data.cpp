@@ -34,7 +34,8 @@ std::string UrlEncode(std::string_view value) {
 }
 
 std::string CsvEscape(std::string value) {
-  if (value.find_first_of(",\"\n") == std::string::npos) return value;
+  if (value.find_first_of(",\"\n") == std::string::npos)
+    return value;
   std::string out = "\"";
   for (char c : value) {
     if (c == '"')
@@ -63,24 +64,29 @@ bool WriteUniverseCsv(const std::string& path,
   }
   const std::string error_text = WriteTextFile(path, oss.str());
   if (!error_text.empty()) {
-    if (error) *error = error_text;
+    if (error)
+      *error = error_text;
     return false;
   }
   return true;
 }
 
 std::string IndexKey(const std::string& symbol) {
-  if (symbol == "NIFTY 50") return "NSE_INDEX|Nifty 50";
+  if (symbol == "NIFTY 50")
+    return "NSE_INDEX|Nifty 50";
   if (symbol == "NIFTY BANK" || symbol == "BANKNIFTY")
     return "NSE_INDEX|Nifty Bank";
-  if (symbol == "INDIA VIX") return "NSE_INDEX|India VIX";
-  if (symbol == "GIFT NIFTY") return "GLOBAL_INDEX|SGX NIFTY";
+  if (symbol == "INDIA VIX")
+    return "NSE_INDEX|India VIX";
+  if (symbol == "GIFT NIFTY")
+    return "GLOBAL_INDEX|SGX NIFTY";
   return "";
 }
 
 std::vector<Instrument> ParseInstruments(const Json& root) {
   std::vector<Instrument> instruments;
-  if (root.type() != Json::Type::kArray) return instruments;
+  if (root.type() != Json::Type::kArray)
+    return instruments;
   for (const Json& item : root.array()) {
     if (item.Find("segment") == nullptr ||
         item.Find("segment")->as_string() != "NSE_EQ") {
@@ -92,7 +98,8 @@ std::vector<Instrument> ParseInstruments(const Json& root) {
     }
     const Json* symbol = item.Find("trading_symbol");
     const Json* key = item.Find("instrument_key");
-    if (symbol == nullptr || key == nullptr) continue;
+    if (symbol == nullptr || key == nullptr)
+      continue;
     Instrument instrument;
     instrument.symbol = symbol->as_string();
     instrument.provider_key = key->as_string();
@@ -124,31 +131,38 @@ std::vector<Instrument> ParseInstruments(const Json& root) {
                               item.Find("cas_eligible")->as_bool(false);
     instruments.push_back(instrument);
   }
-  std::sort(instruments.begin(), instruments.end(),
+  std::sort(instruments.begin(),
+            instruments.end(),
             [](const Instrument& a, const Instrument& b) {
               return a.symbol < b.symbol;
             });
   return instruments;
 }
 
-bool DownloadGzipJson(const HttpClient& http, const std::string& url, Json* out,
+bool DownloadGzipJson(const HttpClient& http,
+                      const std::string& url,
+                      Json* out,
                       std::string* error) {
   const HttpResponse response = http.Get(url, {});
   if (!response.error.empty()) {
-    if (error) *error = "HTTP error (" + response.error + ")";
+    if (error)
+      *error = "HTTP error (" + response.error + ")";
     return false;
   }
   if (response.status != 200) {
-    if (error) *error = "HTTP status " + std::to_string(response.status);
+    if (error)
+      *error = "HTTP status " + std::to_string(response.status);
     return false;
   }
   const std::vector<uint8_t> bytes(response.body.begin(), response.body.end());
   const std::vector<uint8_t> decoded = Gunzip(bytes, error);
-  if (decoded.empty()) return false;
+  if (decoded.empty())
+    return false;
   return Json::Parse(
       std::string_view(reinterpret_cast<const char*>(decoded.data()),
                        decoded.size()),
-      out, error);
+      out,
+      error);
 }
 
 }  // namespace
@@ -156,7 +170,8 @@ bool DownloadGzipJson(const HttpClient& http, const std::string& url, Json* out,
 // ---------------------------------------------------------------------------
 // Normalisation helpers.
 // ---------------------------------------------------------------------------
-Quote NormalizeUpstoxQuote(const Json& item, const std::string& symbol,
+Quote NormalizeUpstoxQuote(const Json& item,
+                           const std::string& symbol,
                            const std::string& provider_key) {
   Quote quote;
   quote.symbol = symbol;
@@ -233,16 +248,19 @@ bool TradeFreshnessUnknown(const Quote& quote) {
   return quote.last_trade_timestamp_ms <= 0;
 }
 
-bool IsStaleProviderUpdate(const Quote& quote, int64_t now_ms,
+bool IsStaleProviderUpdate(const Quote& quote,
+                           int64_t now_ms,
                            int max_age_seconds) {
   // Missing provider time is UNKNOWN, never silently inferred from last trade.
-  if (ProviderFreshnessUnknown(quote)) return false;
+  if (ProviderFreshnessUnknown(quote))
+    return false;
   return now_ms - quote.provider_timestamp_ms >
          static_cast<int64_t>(max_age_seconds) * 1000;
 }
 
 bool IsStaleTrade(const Quote& quote, int64_t now_ms, int max_age_seconds) {
-  if (TradeFreshnessUnknown(quote)) return false;
+  if (TradeFreshnessUnknown(quote))
+    return false;
   return now_ms - quote.last_trade_timestamp_ms >
          static_cast<int64_t>(max_age_seconds) * 1000;
 }
@@ -253,11 +271,13 @@ bool IsStale(const Quote& quote, int64_t now_ms, int max_age_seconds) {
 
 std::vector<Instrument> ApplyEligibility(
     std::vector<Instrument> instruments,
-    const std::vector<Instrument>& suspended, bool status_data_available,
+    const std::vector<Instrument>& suspended,
+    bool status_data_available,
     const Config& config) {
   std::set<std::string> suspended_isins;
   for (const Instrument& instrument : suspended) {
-    if (!instrument.isin.empty()) suspended_isins.insert(instrument.isin);
+    if (!instrument.isin.empty())
+      suspended_isins.insert(instrument.isin);
   }
   for (Instrument& instrument : instruments) {
     std::string reason = "eligible";
@@ -294,7 +314,8 @@ std::vector<Instrument> ApplyEligibility(
 // MarketDataService.
 // ---------------------------------------------------------------------------
 MarketDataService::MarketDataService(Config config, Journal* journal)
-    : config_(std::move(config)), journal_(journal) {}
+    : config_(std::move(config)), journal_(journal) {
+}
 
 std::vector<FeedStatus> MarketDataService::CheckFeeds() const {
   std::vector<FeedStatus> statuses;
@@ -373,16 +394,20 @@ UniverseResult MarketDataService::SyncUniverse() const {
   UniverseResult result;
   const HttpClient http(config_.http_timeout_seconds);
   Json instruments_json;
-  if (!DownloadGzipJson(http, std::string(kAssetsBase) + "/NSE.json.gz",
-                        &instruments_json, &result.error)) {
+  if (!DownloadGzipJson(http,
+                        std::string(kAssetsBase) + "/NSE.json.gz",
+                        &instruments_json,
+                        &result.error)) {
     return result;
   }
   Json suspended_json;
   std::string suspended_error;
   bool status_data_available = true;
   if (!DownloadGzipJson(
-          http, std::string(kAssetsBase) + "/suspended-instrument.json.gz",
-          &suspended_json, &suspended_error)) {
+          http,
+          std::string(kAssetsBase) + "/suspended-instrument.json.gz",
+          &suspended_json,
+          &suspended_error)) {
     suspended_json = Json::Array({});
     status_data_available = false;
   }
@@ -391,12 +416,13 @@ UniverseResult MarketDataService::SyncUniverse() const {
                              ? instruments_json.array().size()
                              : 0;
   result.suspended = ParseInstruments(suspended_json);
-  result.instruments =
-      ApplyEligibility(std::move(result.instruments), result.suspended,
-                       status_data_available, config_);
+  result.instruments = ApplyEligibility(std::move(result.instruments),
+                                        result.suspended,
+                                        status_data_available,
+                                        config_);
   result.source = "Upstox BOD NSE.json.gz (public, refreshed daily ~06:00 IST)";
-  if (!WriteUniverseCsv(config_.universe_path, result.instruments,
-                        &result.error)) {
+  if (!WriteUniverseCsv(
+          config_.universe_path, result.instruments, &result.error)) {
     return result;
   }
 
@@ -406,7 +432,8 @@ UniverseResult MarketDataService::SyncUniverse() const {
         Json::Number(static_cast<double>(result.total_fetched));
     size_t eligible_count = 0;
     for (const Instrument& instrument : result.instruments) {
-      if (instrument.eligible) ++eligible_count;
+      if (instrument.eligible)
+        ++eligible_count;
     }
     payload["eligible"] = Json::Number(static_cast<double>(eligible_count));
     payload["normalised"] =
@@ -425,7 +452,8 @@ bool MarketDataService::SyncHistory(const std::vector<Instrument>& instruments,
                                     std::string* error) const {
   const Secret token = ResolveSecret(config_, "UPSTOX_ANALYTICS_TOKEN");
   if (token.value.empty()) {
-    if (error) *error = "Upstox analytics token absent";
+    if (error)
+      *error = "Upstox analytics token absent";
     return false;
   }
   const HttpClient http(config_.http_timeout_seconds);
@@ -454,8 +482,10 @@ bool MarketDataService::SyncHistory(const std::vector<Instrument>& instruments,
   }
   if (targets.empty()) {
     for (const Instrument& instrument : instruments) {
-      if (instrument.eligible) targets.push_back(instrument);
-      if (targets.size() >= config_.universe_limit) break;
+      if (instrument.eligible)
+        targets.push_back(instrument);
+      if (targets.size() >= config_.universe_limit)
+        break;
     }
   }
 
@@ -464,8 +494,9 @@ bool MarketDataService::SyncHistory(const std::vector<Instrument>& instruments,
                             UrlEncode(instrument.provider_key) + "/day/" +
                             to_date + "/" + from_date;
     const HttpResponse response =
-        http.Get(url, {{"Authorization", "Bearer " + token.value},
-                       {"Accept", "application/json"}});
+        http.Get(url,
+                 {{"Authorization", "Bearer " + token.value},
+                  {"Accept", "application/json"}});
     Json root;
     std::string parse_error;
     if (!response.error.empty() || response.status != 200 ||
@@ -482,7 +513,8 @@ bool MarketDataService::SyncHistory(const std::vector<Instrument>& instruments,
     std::ostringstream csv;
     csv << "date,open,high,low,close,volume\n";
     for (const Json& row : candles->array()) {
-      if (row.type() != Json::Type::kArray || row.array().size() < 6) continue;
+      if (row.type() != Json::Type::kArray || row.array().size() < 6)
+        continue;
       const std::string iso = row.array()[0].as_string();
       csv << (iso.size() >= 10 ? iso.substr(0, 10) : iso) << ','
           << row.array()[1].as_double(0.0) << ','
@@ -493,28 +525,33 @@ bool MarketDataService::SyncHistory(const std::vector<Instrument>& instruments,
     }
     const std::string path =
         config_.history_dir + "/" + instrument.symbol + ".csv";
-    if (WriteTextFile(path, csv.str()).empty()) ++fetched;
+    if (WriteTextFile(path, csv.str()).empty())
+      ++fetched;
   }
 
   for (const std::string& symbol : config_.index_symbols) {
     const std::string key = IndexKey(symbol);
-    if (key.empty()) continue;
+    if (key.empty())
+      continue;
     const std::string url = std::string(kUpstoxBase) + "/historical-candle/" +
                             UrlEncode(key) + "/day/" + to_date + "/" +
                             from_date;
     const HttpResponse response =
-        http.Get(url, {{"Authorization", "Bearer " + token.value},
-                       {"Accept", "application/json"}});
+        http.Get(url,
+                 {{"Authorization", "Bearer " + token.value},
+                  {"Accept", "application/json"}});
     Json root;
     if (!Json::Parse(response.body, &root, nullptr) || response.status != 200)
       continue;
     const Json* data = root.Find("data");
     const Json* candles = data == nullptr ? nullptr : data->Find("candles");
-    if (candles == nullptr) continue;
+    if (candles == nullptr)
+      continue;
     std::ostringstream csv;
     csv << "date,open,high,low,close,volume\n";
     for (const Json& row : candles->array()) {
-      if (row.type() != Json::Type::kArray || row.array().size() < 6) continue;
+      if (row.type() != Json::Type::kArray || row.array().size() < 6)
+        continue;
       const std::string iso = row.array()[0].as_string();
       csv << (iso.size() >= 10 ? iso.substr(0, 10) : iso) << ','
           << row.array()[1].as_double(0.0) << ','
@@ -545,7 +582,8 @@ bool MarketDataService::FetchQuotes(const std::vector<Instrument>& instruments,
   quotes->clear();
   const Secret token = ResolveSecret(config_, "UPSTOX_ANALYTICS_TOKEN");
   if (token.value.empty()) {
-    if (error) *error = "Upstox analytics token absent";
+    if (error)
+      *error = "Upstox analytics token absent";
     return false;
   }
   const HttpClient http(config_.http_timeout_seconds);
@@ -553,7 +591,8 @@ bool MarketDataService::FetchQuotes(const std::vector<Instrument>& instruments,
     std::string keys;
     for (size_t i = offset; i < std::min(offset + 400, instruments.size());
          ++i) {
-      if (!keys.empty()) keys += ",";
+      if (!keys.empty())
+        keys += ",";
       keys += UrlEncode(instruments[i].provider_key);
     }
     const HttpResponse response =
@@ -564,15 +603,18 @@ bool MarketDataService::FetchQuotes(const std::vector<Instrument>& instruments,
     Json root;
     if (!response.error.empty() || response.status != 200 ||
         !Json::Parse(response.body, &root, error)) {
-      if (error) *error = "quote request failed: " + response.error;
+      if (error)
+        *error = "quote request failed: " + response.error;
       return false;
     }
     const Json* data = root.Find("data");
-    if (data == nullptr || data->type() != Json::Type::kObject) continue;
+    if (data == nullptr || data->type() != Json::Type::kObject)
+      continue;
     for (const auto& [key, item] : data->object()) {
       std::string symbol = key;
       const size_t colon = symbol.find(':');
-      if (colon != std::string::npos) symbol = symbol.substr(colon + 1);
+      if (colon != std::string::npos)
+        symbol = symbol.substr(colon + 1);
       quotes->push_back(NormalizeUpstoxQuote(item, symbol, key));
     }
   }
@@ -584,7 +626,8 @@ bool MarketDataService::MarketStatus(std::string* status,
   const Secret token = ResolveSecret(config_, "UPSTOX_ANALYTICS_TOKEN");
   if (token.value.empty()) {
     *status = "UNKNOWN";
-    if (error) *error = "Upstox analytics token absent";
+    if (error)
+      *error = "Upstox analytics token absent";
     return false;
   }
   const HttpClient http(config_.http_timeout_seconds);
@@ -608,20 +651,22 @@ bool MarketDataService::GlobalIndices(std::vector<Quote>* quotes,
   quotes->clear();
   const Secret token = ResolveSecret(config_, "UPSTOX_ANALYTICS_TOKEN");
   if (token.value.empty()) {
-    if (error) *error = "Upstox analytics token absent";
+    if (error)
+      *error = "Upstox analytics token absent";
     return false;
   }
   const HttpClient http(config_.http_timeout_seconds);
   Json global;
-  if (!DownloadGzipJson(http, std::string(kAssetsBase) + "/global.json.gz",
-                        &global, error)) {
+  if (!DownloadGzipJson(
+          http, std::string(kAssetsBase) + "/global.json.gz", &global, error)) {
     return false;
   }
   std::vector<std::string> keys;
   if (global.type() == Json::Type::kArray) {
     for (const Json& item : global.array()) {
       const Json* key = item.Find("instrument_key");
-      if (key == nullptr) continue;
+      if (key == nullptr)
+        continue;
       const std::string value = key->as_string();
       if (value.find("GIFT") != std::string::npos ||
           value.find("SGX") != std::string::npos) {
@@ -629,10 +674,12 @@ bool MarketDataService::GlobalIndices(std::vector<Quote>* quotes,
       }
     }
   }
-  if (keys.empty()) return true;
+  if (keys.empty())
+    return true;
   std::string joined;
   for (const std::string& key : keys) {
-    if (!joined.empty()) joined += ",";
+    if (!joined.empty())
+      joined += ",";
     joined += UrlEncode(key);
   }
   const HttpResponse response =
@@ -641,9 +688,11 @@ bool MarketDataService::GlobalIndices(std::vector<Quote>* quotes,
                {{"Authorization", "Bearer " + token.value},
                 {"Accept", "application/json"}});
   Json root;
-  if (!Json::Parse(response.body, &root, error)) return false;
+  if (!Json::Parse(response.body, &root, error))
+    return false;
   const Json* data = root.Find("data");
-  if (data == nullptr) return false;
+  if (data == nullptr)
+    return false;
   for (const auto& [key, item] : data->object()) {
     quotes->push_back(NormalizeUpstoxQuote(item, "GIFT NIFTY", key));
   }

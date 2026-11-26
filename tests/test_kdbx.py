@@ -199,7 +199,80 @@ with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
     assert code == 0, out
     values = json.loads(out.strip().splitlines()[-1])
     assert abs(values["ret20"] - 0.2) < 1e-9
-    assert 0.0 <= values["vwapDev"] < 1.0
+    assert -1.0 < values["vwapDev"] < 1.0
+
+
+def test_q_daily_vwap_proxy_uses_typical_price(isolated_q):
+    script = """
+import json
+import pykx as kx
+
+with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
+    q(".quant.reset[]")
+    for i in range(21):
+        close = 100.0 + i
+        q(".quant.ingestBar", [9845 + i, kx.SymbolAtom("VW"),
+                               close + 6.0, close, close - 3.0,
+                               close, 1000.0 + 10.0 * i])
+    rows = q(".quant.featureTable[]").py()
+    print(json.dumps({"vwapDev": rows["vwapDev"][0]}))
+""".replace("PORT", str(isolated_q.port))
+    code, out = run([str(PYKX_PYTHON), "-c", script])
+    assert code == 0, out
+    q_value = json.loads(out.strip().splitlines()[-1])["vwapDev"]
+    weighted = 0.0
+    volume = 0.0
+    for i in range(1, 21):
+        close = 100.0 + i
+        size = 1000.0 + 10.0 * i
+        typical = (close + (close - 3.0) + close) / 3.0
+        weighted += typical * size
+        volume += size
+    expected = 120.0 / (weighted / volume) - 1.0
+    assert abs(q_value - expected) < 1e-9
+
+
+def test_python_and_q_vwap_proxy_agree(isolated_q):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "research", ROOT / "python" / "research.py"
+    )
+    research = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(research)
+    rows = []
+    for i in range(21):
+        close = 100.0 + i
+        rows.append(
+            {
+                "date": f"D{i:03d}",
+                "open": close,
+                "high": close + 3.0,
+                "low": close - 2.0,
+                "close": close,
+                "volume": 1000.0 + 37.0 * i,
+            }
+        )
+    python_value = research.features(rows, 20)["vwap_dev"]
+
+    script = """
+import json
+import pykx as kx
+
+with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
+    q(".quant.reset[]")
+    for i in range(21):
+        close = 100.0 + i
+        q(".quant.ingestBar", [9845 + i, kx.SymbolAtom("VP"),
+                               close, close + 3.0, close - 2.0,
+                               close, 1000.0 + 37.0 * i])
+    rows = q(".quant.featureTable[]").py()
+    print(json.dumps({"vwapDev": rows["vwapDev"][0]}))
+""".replace("PORT", str(isolated_q.port))
+    code, out = run([str(PYKX_PYTHON), "-c", script])
+    assert code == 0, out
+    q_value = json.loads(out.strip().splitlines()[-1])["vwapDev"]
+    assert abs(q_value - python_value) < 1e-9
 
 
 def test_point_in_time_features_and_recovery(isolated_q):

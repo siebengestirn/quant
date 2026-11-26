@@ -17,8 +17,8 @@
     "temporary": true,
     "pull_request_required": true,
     "no_permanent_develop_or_release_branches": true,
-    "active_topic_branches": ["correctness/gate0"],
-    "active_topic_rationale": "One bounded correctness epic under independent review; PR #1 remains open."
+    "active_topic_branches": [],
+    "active_topic_rationale": "PR #1 merged into main; current remediation branch uses the allowed fix/ prefix."
   },
   "history": {
     "merge_strategy": "merge_commit",
@@ -57,9 +57,15 @@
     "no_stash_at_finish": true
   },
   "inventory": {
-    "target_local_branches": ["main"],
-    "target_remote_names": ["origin"],
-    "target_remote_tracking_branches": ["origin/main"],
+    "target_local_branches": [
+      "main"
+    ],
+    "target_remote_names": [
+      "origin"
+    ],
+    "target_remote_tracking_branches": [
+      "origin/main"
+    ],
     "target_worktree_count": 1,
     "target_stash_count": 0,
     "target_tracked_generated_count": 0
@@ -81,8 +87,13 @@
       "dist",
       "data"
     ],
-    "forbidden_component_prefixes": ["build-"],
-    "forbidden_suffixes": [".pyc", ".pyo"]
+    "forbidden_component_prefixes": [
+      "build-"
+    ],
+    "forbidden_suffixes": [
+      ".pyc",
+      ".pyo"
+    ]
   },
   "automation": {
     "remote_tracking_prune": "git fetch --prune origin",
@@ -96,7 +107,13 @@
     "pattern": "^(feat|fix|docs|test|refactor|perf|build|ci|chore|correctness)(\\([a-z0-9][a-z0-9._/-]*\\))?: .{1,64}$",
     "required_author_email": "22kartikjangid@gmail.com",
     "maximum_length": 72,
-    "forbidden_exact_subjects": ["fix", "update", "cleanup", "final", "final fix"],
+    "forbidden_exact_subjects": [
+      "fix",
+      "update",
+      "cleanup",
+      "final",
+      "final fix"
+    ],
     "grandfathered_through_commit": "f321d0c",
     "grandfather_reason": "Published correctness commits predate adoption of this policy and are not rewritten.",
     "validate_unmerged_topic_commits_against": "main"
@@ -109,13 +126,19 @@
   },
   "milestone_tags": {
     "after_verified_main_merge_only": true,
-    "examples": ["correctness-gate0", "paper-readiness"]
+    "examples": [
+      "correctness-gate0",
+      "paper-readiness"
+    ]
   },
   "github_protection_audit": {
     "restrict_direct_main_pushes": true,
     "require_pull_request": true,
     "require_status_checks": true,
-    "required_status_checks": ["core build and tests", "ASan/UBSan"],
+    "required_status_checks": [
+      "core build and tests",
+      "ASan/UBSan"
+    ],
     "require_latest_checks": true,
     "prevent_force_pushes": true,
     "prevent_main_deletion": true,

@@ -23,8 +23,8 @@ import random
 import statistics
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 # Research constants (ESTIMATED). They are not trading parameters.
 KDBX_WHITELIST = (
@@ -96,8 +96,13 @@ def features(rows: list[dict[str, float]], index: int) -> dict[str, float]:
     ]
     vols = volume[-20:]
     avg_volume = statistics.fmean(vols) if vols else 0.0
-    vwap_window = list(zip(close[-20:], volume[-20:]))
-    weighted = sum(price * size for price, size in vwap_window)
+    vwap_window = window[-20:]
+    typical = [
+        (row["high"] + row["low"] + row["close"]) / 3.0 for row in vwap_window
+    ]
+    weighted = sum(
+        price * size for price, size in zip(typical, volume[-20:], strict=False)
+    )
     daily_vwap = weighted / sum(vols) if sum(vols) > 0 else close[-1]
     sma20 = statistics.fmean(recent) if recent else 0.0
     sma60 = statistics.fmean(close[-60:]) if len(close) >= 60 else 0.0
@@ -113,10 +118,21 @@ def features(rows: list[dict[str, float]], index: int) -> dict[str, float]:
     low = min(row["low"] for row in last20)
     span = high - low
     breakout = (close[-1] - low) / span * 2 - 1 if span > 0 else 0.0
-    typical = statistics.fmean(
-        (row["high"] + row["low"] + row["close"]) / 3 for row in last20
-    )
+    # Canonical feature contract (version 2):
+    #   returns: P_t/P_(t-n)-1 from sessions available at time t;
+    #   vol20:   population standard deviation (divide by n) of the last 20
+    #            daily simple returns, matching C++ StdDev and q dev/mdev;
+    #   vwap_dev: deviation from the daily volume-weighted typical-price
+    #            proxy, not intraday VWAP;
+    #   valid:   false until the 21-session warm-up is complete. Unavailable
+    #            features are reported through validity metadata, never as a
+    #            silently valid zero.
+    warmup_complete = len(close) >= 21
     return {
+        "valid": warmup_complete,
+        "validity_reason": (
+            "READY" if warmup_complete else "INSUFFICIENT_HISTORY"
+        ),
         "ret5": ret(5),
         "ret20": ret(20),
         "ret60": ret(60),
@@ -127,7 +143,7 @@ def features(rows: list[dict[str, float]], index: int) -> dict[str, float]:
         ),
         "trend": bullish / checks,
         "breakout": max(-1.0, min(1.0, breakout)),
-        "vwap_dev": (close[-1] / typical - 1) if typical > 0 else 0.0,
+        "vwap_dev": (close[-1] / daily_vwap - 1) if daily_vwap > 0 else 0.0,
     }
 
 
@@ -137,7 +153,12 @@ def feature_history(rows: list[dict[str, float]]) -> list[dict[str, float]]:
     for index in range(len(rows)):
         item = features(rows, index)
         item["index"] = index
-        item["availability_index"] = min(index + 1, len(rows) - 1)
+        # The final observed session has no known subsequent exchange
+        # boundary in this dataset, so its availability is explicitly
+        # unavailable rather than silently pointing at itself.
+        item["availability_index"] = (
+            index + 1 if index + 1 < len(rows) else None
+        )
         item["date"] = rows[index]["date"]
         result.append(item)
     return result
@@ -209,7 +230,7 @@ def spearman(xs: list[float], ys: list[float]) -> float:
 
     rx, ry = ranks(xs), ranks(ys)
     mx, my = statistics.fmean(rx), statistics.fmean(ry)
-    numerator = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
+    numerator = sum((a - mx) * (b - my) for a, b in zip(rx, ry, strict=False))
     dx = math.sqrt(sum((a - mx) ** 2 for a in rx))
     dy = math.sqrt(sum((b - my) ** 2 for b in ry))
     return numerator / (dx * dy) if dx > 0 and dy > 0 else 0.0

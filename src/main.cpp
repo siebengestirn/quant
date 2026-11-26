@@ -43,7 +43,8 @@ App Initialize(std::string* error) {
   const ConfigResult loaded = LoadConfig(kConfigPath);
   if (!loaded.ok()) {
     *error = "config invalid: ";
-    for (const std::string& item : loaded.errors) *error += item + "; ";
+    for (const std::string& item : loaded.errors)
+      *error += item + "; ";
     return app;
   }
   app.config = loaded.config;
@@ -90,7 +91,8 @@ std::string CaptureCommand(const std::string& command) {
   std::array<char, 1024> buffer{};
   std::string output;
   FILE* pipe = popen(command.c_str(), "r");
-  if (pipe == nullptr) return "";
+  if (pipe == nullptr)
+    return "";
   while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) !=
          nullptr) {
     output += buffer.data();
@@ -113,11 +115,14 @@ std::string QBinary() {
 bool QProcessAlive(const std::string& pid_path) {
   std::ifstream input(pid_path);
   std::string text;
-  if (!input.is_open() || !std::getline(input, text)) return false;
+  if (!input.is_open() || !std::getline(input, text))
+    return false;
   for (char c : text) {
-    if (!std::isdigit(static_cast<unsigned char>(c))) return false;
+    if (!std::isdigit(static_cast<unsigned char>(c)))
+      return false;
   }
-  if (text.empty()) return false;
+  if (text.empty())
+    return false;
   return std::system(("kill -0 " + text + " 2>/dev/null").c_str()) == 0;
 }
 
@@ -131,7 +136,8 @@ struct IsolatedQ {
 
 int FreeLoopbackPort() {
   const int fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (fd < 0) return -1;
+  if (fd < 0)
+    return -1;
   sockaddr_in address{};
   address.sin_family = AF_INET;
   address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
@@ -221,15 +227,19 @@ bool StartIsolatedQ(const Config& config, IsolatedQ* out, std::string* error) {
 
   KdbxClient probe(out->config);
   for (int attempt = 0; attempt < 100; ++attempt) {
-    if (probe.Connect(error)) break;
+    if (probe.Connect(error))
+      break;
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
-  if (!probe.connected()) return false;
+  if (!probe.connected())
+    return false;
 
   std::string handshake;
-  if (!probe.QueryJson(".quant.instanceJson", &handshake, error)) return false;
+  if (!probe.QueryJson(".quant.instanceJson", &handshake, error))
+    return false;
   Json parsed;
-  if (!Json::Parse(handshake, &parsed, error)) return false;
+  if (!Json::Parse(handshake, &parsed, error))
+    return false;
   const Json* actual = parsed.Find("instanceId");
   if (actual == nullptr || actual->as_string() != out->instance_id) {
     *error = "isolated q instance id mismatch";
@@ -294,8 +304,8 @@ int CommandDb(App& app, const std::string& action) {
         std::filesystem::path(app.config.kdbx.pid_path).parent_path());
     std::filesystem::create_directories(app.config.kdbx.hdb_dir);
 
-    const int log_fd = open(app.config.kdbx.log_path.c_str(),
-                            O_WRONLY | O_CREAT | O_APPEND, 0644);
+    const int log_fd = open(
+        app.config.kdbx.log_path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (log_fd < 0) {
       std::cout << "cannot open q log\n";
       return 1;
@@ -310,8 +320,10 @@ int CommandDb(App& app, const std::string& action) {
     std::string program = qbin;
     std::string script = app.config.kdbx.script;
     char* argv[] = {const_cast<char*>(program.data()),
-                    const_cast<char*>(script.data()), const_cast<char*>("-p"),
-                    const_cast<char*>(endpoint.data()), nullptr};
+                    const_cast<char*>(script.data()),
+                    const_cast<char*>("-p"),
+                    const_cast<char*>(endpoint.data()),
+                    nullptr};
     pid_t pid = 0;
     const int spawn_error =
         posix_spawn(&pid, program.c_str(), &actions, nullptr, argv, environ);
@@ -327,7 +339,8 @@ int CommandDb(App& app, const std::string& action) {
     KdbxClient client(app.config.kdbx);
     std::string error;
     for (int attempt = 0; attempt < 100; ++attempt) {
-      if (client.Connect(&error)) break;
+      if (client.Connect(&error))
+        break;
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     std::cout << "q pid=" << pid << " connected="
@@ -463,9 +476,12 @@ int CommandValidate(App& app) {
             << " bps\n";
   Portfolio portfolio(app.config.initial_capital);
   std::string error;
-  const bool ok = portfolio.Buy(
-      "TEST", 1, Money::FromRupees(100.0),
-      EstimateCosts(Money::FromRupees(100.0), true, true, 0.0), &error);
+  const bool ok =
+      portfolio.Buy("TEST",
+                    1,
+                    Money::FromRupees(100.0),
+                    EstimateCosts(Money::FromRupees(100.0), true, true, 0.0),
+                    &error);
   std::cout << "  accounting smoke test: " << (ok ? "PASS" : error) << "\n";
   return errors.empty() ? 0 : 1;
 }
@@ -503,7 +519,8 @@ int CommandDataSync(App& app) {
   }
   size_t eligible_count = 0;
   for (const Instrument& instrument : result.instruments) {
-    if (instrument.eligible) ++eligible_count;
+    if (instrument.eligible)
+      ++eligible_count;
   }
   std::cout << "  fetched=" << result.total_fetched
             << " normalised=" << result.instruments.size()
@@ -513,25 +530,35 @@ int CommandDataSync(App& app) {
   std::cout << "syncing daily history for seed symbols...\n";
   std::string history_error;
   const bool ok = service.SyncHistory(result.instruments, &history_error);
-  std::cout << "  " << (ok ? "done" : "partial") << ": " << history_error
-            << "\n";
-  return result.instruments.empty() ? 1 : 0;
+  const char* status =
+      result.instruments.empty()
+          ? "BLOCKED"
+          : (!ok || !history_error.empty() ? "PARTIAL" : "COMPLETE");
+  std::cout << "  " << status << ": " << history_error << "\n";
+  return (ok && !result.instruments.empty()) ? 0 : 1;
 }
 
 std::string IndexProviderName(const std::string& symbol) {
-  if (symbol == "NIFTY 50") return "Nifty 50";
-  if (symbol == "NIFTY BANK" || symbol == "BANKNIFTY") return "Nifty Bank";
-  if (symbol == "INDIA VIX") return "India VIX";
-  if (symbol == "GIFT NIFTY") return "SGX NIFTY";
+  if (symbol == "NIFTY 50")
+    return "Nifty 50";
+  if (symbol == "NIFTY BANK" || symbol == "BANKNIFTY")
+    return "Nifty Bank";
+  if (symbol == "INDIA VIX")
+    return "India VIX";
+  if (symbol == "GIFT NIFTY")
+    return "SGX NIFTY";
   return symbol;
 }
 
 std::string IndexKey(const std::string& symbol) {
-  if (symbol == "NIFTY 50") return "NSE_INDEX|Nifty 50";
+  if (symbol == "NIFTY 50")
+    return "NSE_INDEX|Nifty 50";
   if (symbol == "NIFTY BANK" || symbol == "BANKNIFTY")
     return "NSE_INDEX|Nifty Bank";
-  if (symbol == "INDIA VIX") return "NSE_INDEX|India VIX";
-  if (symbol == "GIFT NIFTY") return "GLOBAL_INDEX|SGX NIFTY";
+  if (symbol == "INDIA VIX")
+    return "NSE_INDEX|India VIX";
+  if (symbol == "GIFT NIFTY")
+    return "GLOBAL_INDEX|SGX NIFTY";
   return "";
 }
 
@@ -570,7 +597,8 @@ std::vector<Instrument> LoadUniverse(App& app, std::string* error) {
   std::getline(input, line);
   while (std::getline(input, line)) {
     const std::vector<std::string> fields = SplitCsv(line);
-    if (fields.size() < 9) continue;
+    if (fields.size() < 9)
+      continue;
     Instrument instrument;
     instrument.symbol = fields[0];
     instrument.exchange = fields[1];
@@ -598,16 +626,16 @@ std::map<std::string, std::vector<Candle>> LoadHistory(App& app) {
   for (const std::string& symbol : app.config.seed_symbols) {
     std::string error;
     std::vector<Candle> candles;
-    if (ReadCsvCandles(app.config.history_dir + "/" + symbol + ".csv", &candles,
-                       &error)) {
+    if (ReadCsvCandles(
+            app.config.history_dir + "/" + symbol + ".csv", &candles, &error)) {
       history[symbol] = candles;
     }
   }
   for (const std::string& symbol : app.config.index_symbols) {
     std::string error;
     std::vector<Candle> candles;
-    if (ReadCsvCandles(app.config.history_dir + "/" + symbol + ".csv", &candles,
-                       &error)) {
+    if (ReadCsvCandles(
+            app.config.history_dir + "/" + symbol + ".csv", &candles, &error)) {
       history[symbol] = candles;
     }
   }
@@ -625,16 +653,19 @@ int CommandUniverse(App& app) {
   size_t eligible = 0;
   std::vector<std::string> names;
   for (const Instrument& instrument : instruments) {
-    if (!instrument.eligible) continue;
+    if (!instrument.eligible)
+      continue;
     ++eligible;
-    if (names.size() < 25) names.push_back(instrument.symbol);
+    if (names.size() < 25)
+      names.push_back(instrument.symbol);
   }
   std::cout << "== VERIFIED: dynamic NSE universe from Upstox BOD file ==\n";
   std::cout << "total=" << instruments.size() << " eligible=" << eligible
             << " source=" << app.config.universe_path << "\n";
   std::cout << "sample: ";
   for (size_t i = 0; i < names.size(); ++i) {
-    if (i > 0) std::cout << ", ";
+    if (i > 0)
+      std::cout << ", ";
     std::cout << names[i];
   }
   std::cout << "\n";
@@ -665,7 +696,8 @@ DailyReport BuildReport(App& app, bool* ok) {
   }
   for (const std::string& symbol : app.config.index_symbols) {
     const std::string key = IndexKey(symbol);
-    if (key.empty()) continue;
+    if (key.empty())
+      continue;
     Instrument index;
     index.symbol = symbol;
     index.provider_key = key;
@@ -687,20 +719,24 @@ DailyReport BuildReport(App& app, bool* ok) {
       "daily candles cached from Upstox historical API; FYERS token unusable";
 
   std::map<std::string, Quote> by_symbol;
-  for (const Quote& quote : quotes) by_symbol[quote.symbol] = quote;
-  for (const std::string& line : report.index_summary) (void)line;
+  for (const Quote& quote : quotes)
+    by_symbol[quote.symbol] = quote;
+  for (const std::string& line : report.index_summary)
+    (void)line;
   report.index_summary.clear();
   std::vector<Quote> global_quotes;
   std::string global_error;
   if (service.GlobalIndices(&global_quotes, &global_error)) {
-    for (const Quote& quote : global_quotes) by_symbol[quote.symbol] = quote;
+    for (const Quote& quote : global_quotes)
+      by_symbol[quote.symbol] = quote;
   }
   for (const std::string& symbol : app.config.index_symbols) {
     auto it = by_symbol.find(IndexProviderName(symbol));
     if (it == by_symbol.end()) {
       it = by_symbol.find(symbol);
     }
-    if (it == by_symbol.end()) continue;
+    if (it == by_symbol.end())
+      continue;
     std::ostringstream oss;
     oss << it->first << ": last=" << std::fixed << std::setprecision(2)
         << it->second.last
@@ -780,12 +816,19 @@ DailyReport BuildReport(App& app, bool* ok) {
     candidate.strategy = signal.strategy;
     candidate.quantity = decision.quantity;
     candidate.notional = decision.notional;
-    const CostBreakdown entry =
-        EstimateCosts(decision.notional, app.config.backtest_delivery, true,
-                      app.config.slippage_bps);
-    const CostBreakdown exit_costs =
-        EstimateCosts(decision.notional, app.config.backtest_delivery, false,
-                      app.config.slippage_bps);
+    const CostBreakdown entry = EstimateCosts(decision.notional,
+                                              app.config.backtest_delivery,
+                                              true,
+                                              app.config.slippage_bps);
+    const CostBreakdown exit_costs = EstimateCosts(decision.notional,
+                                                   app.config.backtest_delivery,
+                                                   false,
+                                                   app.config.slippage_bps);
+    if (!entry.usable() || !exit_costs.usable()) {
+      report.rejections.push_back(instrument.symbol +
+                                  ": cost calculation unavailable; NO TRADE");
+      continue;
+    }
     candidate.total_cost = entry.total + exit_costs.total;
     candidate.break_even_bps =
         BreakEvenMoveBps(decision.notional, entry, exit_costs);
@@ -802,7 +845,8 @@ DailyReport BuildReport(App& app, bool* ok) {
         "available)";
     report.candidates.push_back(candidate);
   }
-  std::sort(report.candidates.begin(), report.candidates.end(),
+  std::sort(report.candidates.begin(),
+            report.candidates.end(),
             [](const CandidateReport& a, const CandidateReport& b) {
               return a.score > b.score;
             });
@@ -864,8 +908,18 @@ int CommandResearch(App& app) {
       << "max_drawdown_inr=" << metrics.max_drawdown.rupees() << "\n"
       << "final_equity_inr=" << metrics.final_equity << "\n"
       << "sharpe=" << metrics.sharpe << " sortino=" << metrics.sortino << "\n"
-      << "profit_factor_estimate=" << metrics.profit_factor << "\n"
-      << "cost_to_gross=" << metrics.cost_to_gross << "\n"
+      << "gross_profit_factor=" << metrics.profit_factor << " ("
+      << metrics.profit_factor_status << ")\n"
+      << "cost_to_gross=" << metrics.cost_to_gross << " ("
+      << metrics.cost_to_gross_status << ")\n"
+      << "halted=" << (metrics.halted ? "true" : "false") << "\n"
+      << "terminal_liquidation_requested="
+      << (metrics.terminal_liquidation_requested ? "true" : "false") << "\n"
+      << "terminal_liquidation_completed="
+      << (metrics.terminal_liquidation_completed ? "true" : "false") << "\n"
+      << "terminal_liquidation_failed="
+      << (metrics.terminal_liquidation_failed ? "true" : "false") << "\n"
+      << "terminal_open_positions=" << metrics.terminal_open_positions << "\n"
       << "labels: SIMULATED fills at next-day open, conservative 10 bps "
          "slippage, "
          "no order-book history, no survivorship-bias correction.\n";
@@ -892,7 +946,8 @@ int CommandVerify(App& app) {
   std::vector<double> returns;
   for (size_t i = 1; i < it->second.size(); ++i) {
     const double previous = it->second[i - 1].close;
-    if (previous > 0.0) returns.push_back(it->second[i].close / previous - 1.0);
+    if (previous > 0.0)
+      returns.push_back(it->second[i].close / previous - 1.0);
   }
   const auto ci = BootstrapSharpeCI(returns, 20261125, 2000);
   std::ostringstream oss;
@@ -933,40 +988,110 @@ int CommandReplay(App& app) {
   return 0;
 }
 
-Portfolio RebuildPortfolio(App& app) {
+// Accounting events carry the amounts that were actually posted at the time
+// of the transaction. Replay must never reconstruct old charges from today's
+// cost configuration.
+bool ParseRecordedCosts(const Json& payload,
+                        CostBreakdown* out,
+                        std::string* error) {
+  const Json* recorded = payload.Find("recorded_costs_paise");
+  if (recorded == nullptr || recorded->type() != Json::Type::kObject) {
+    *error = "accounting event has no recorded cost amounts; replay refused";
+    return false;
+  }
+  static const char* fields[] = {"brokerage",
+                                 "stt",
+                                 "exchange_fee",
+                                 "gst",
+                                 "sebi",
+                                 "stamp",
+                                 "dp",
+                                 "slippage",
+                                 "total"};
+  int64_t values[9] = {};
+  for (size_t i = 0; i < 9; ++i) {
+    const Json* field = recorded->Find(fields[i]);
+    if (field == nullptr || field->type() != Json::Type::kNumber) {
+      *error = std::string("recorded cost field missing: ") + fields[i];
+      return false;
+    }
+    values[i] = field->as_int(0);
+  }
+  out->brokerage = Money::FromPaise(values[0]);
+  out->stt = Money::FromPaise(values[1]);
+  out->exchange_fee = Money::FromPaise(values[2]);
+  out->gst = Money::FromPaise(values[3]);
+  out->sebi = Money::FromPaise(values[4]);
+  out->stamp = Money::FromPaise(values[5]);
+  out->dp = Money::FromPaise(values[6]);
+  out->slippage = Money::FromPaise(values[7]);
+  out->total = Money::FromPaise(values[8]);
+  out->status = CalculationStatus::kCalculated;
+  if (!out->usable()) {
+    *error = "recorded cost amounts are invalid";
+    return false;
+  }
+  return true;
+}
+
+bool RebuildPortfolio(App& app, Portfolio* out, std::string* error) {
   Portfolio portfolio(app.config.initial_capital);
-  std::string error;
-  for (const Event& event : app.journal.Replay(&error)) {
-    if (event.type != EventType::kAccounting) continue;
+  const std::vector<Event> events = app.journal.Replay(error);
+  if (!error->empty())
+    return false;
+  for (const Event& event : events) {
+    if (event.type != EventType::kAccounting)
+      continue;
     Json payload;
-    if (!Json::Parse(event.payload, &payload, nullptr)) continue;
+    if (!Json::Parse(event.payload, &payload, error))
+      return false;
     const Json* action = payload.Find("action");
     const Json* symbol = payload.Find("symbol");
     const Json* qty = payload.Find("qty");
     const Json* price = payload.Find("price_paise");
     if (action == nullptr || symbol == nullptr || qty == nullptr ||
         price == nullptr) {
-      continue;
+      *error = "accounting event " + std::to_string(event.sequence) +
+               " is missing required fields";
+      return false;
     }
     const Money value = Money::FromPaise(price->as_int(0));
-    const int quantity = static_cast<int>(qty->as_int(0));
-    if (action->as_string() == "BUY") {
-      portfolio.Buy(symbol->as_string(), quantity, value,
-                    EstimateCosts(Money::FromPaise(value.paise() * quantity),
-                                  false, true, app.config.slippage_bps),
-                    nullptr);
-    } else if (action->as_string() == "SELL") {
-      portfolio.Sell(symbol->as_string(), quantity, value,
-                     EstimateCosts(Money::FromPaise(value.paise() * quantity),
-                                   false, false, app.config.slippage_bps),
-                     nullptr);
+    const int64_t quantity_value = qty->as_int(0);
+    if (quantity_value <= 0 ||
+        quantity_value > std::numeric_limits<int>::max() || !value.valid()) {
+      *error = "accounting event has invalid quantity or price";
+      return false;
+    }
+    const int quantity = static_cast<int>(quantity_value);
+    bool posted = false;
+    if (action->as_string() == "BUY" || action->as_string() == "SELL") {
+      CostBreakdown costs;
+      if (!ParseRecordedCosts(payload, &costs, error))
+        return false;
+      posted = action->as_string() == "BUY"
+                   ? portfolio.Buy(
+                         symbol->as_string(), quantity, value, costs, error)
+                   : portfolio.Sell(
+                         symbol->as_string(), quantity, value, costs, error);
     } else if (action->as_string() == "EXPENSE") {
-      portfolio.RecordOperatingExpense(value);
+      posted = portfolio.RecordOperatingExpense(value, error);
     } else if (action->as_string() == "FLOW") {
-      portfolio.RecordExternalFlow(value, "external flow observed");
+      posted =
+          portfolio.RecordExternalFlow(value, "external flow observed", error);
+    } else {
+      *error = "unknown accounting action at sequence " +
+               std::to_string(event.sequence);
+      return false;
+    }
+    if (!posted) {
+      *error = "accounting replay failed at sequence " +
+               std::to_string(event.sequence) + ": " + *error;
+      return false;
     }
   }
-  return portfolio;
+  *out = portfolio;
+  error->clear();
+  return true;
 }
 
 int CommandPaper(App& app) {
@@ -976,7 +1101,12 @@ int CommandPaper(App& app) {
     std::cout << "PAPER: no action — " << report.decision_reason << "\n";
     return 2;
   }
-  Portfolio portfolio = RebuildPortfolio(app);
+  Portfolio portfolio;
+  std::string replay_error;
+  if (!RebuildPortfolio(app, &portfolio, &replay_error)) {
+    std::cout << "FAILED: portfolio replay — " << replay_error << "\n";
+    return 1;
+  }
   std::cout << "== SIMULATED: paper pass, no broker orders ==\n";
   std::cout << "market_status=" << report.market_status << "\n";
   if (report.candidates.empty()) {
@@ -998,10 +1128,13 @@ int CommandPaper(App& app) {
       payload["price_paise"] = Json::Number(
           static_cast<double>(Money::FromRupees(candidate.last).paise()));
       Event event;
-      event.type = EventType::kFill;
+      event.type = EventType::kPaperIntent;
       event.payload = Json::ObjectValue(payload).Dump();
       std::string error;
-      app.journal.Append(&event, &error);
+      if (!app.journal.Append(&event, &error)) {
+        std::cout << "FAILED: paper intent journal append — " << error << "\n";
+        return 1;
+      }
       std::cout << "journal: conditional paper intent recorded\n";
     }
   }
@@ -1013,7 +1146,12 @@ int CommandPaper(App& app) {
 }
 
 int CommandPortfolio(App& app) {
-  const Portfolio portfolio = RebuildPortfolio(app);
+  Portfolio portfolio;
+  std::string replay_error;
+  if (!RebuildPortfolio(app, &portfolio, &replay_error)) {
+    std::cout << "FAILED: portfolio replay — " << replay_error << "\n";
+    return 1;
+  }
   const Ledger ledger = portfolio.ledger();
   std::cout << "== VERIFIED: event-sourced ledger (SIMULATED unless paper "
                "fills) ==\n";
@@ -1067,9 +1205,12 @@ int RunCli(int argc, char** argv) {
     std::cout << "INITIALISATION FAILED: " << error << "\n";
     return 1;
   }
-  if (command == "doctor") return CommandDoctor(app);
-  if (command == "validate") return CommandValidate(app);
-  if (command == "db" && argc >= 3) return CommandDb(app, argv[2]);
+  if (command == "doctor")
+    return CommandDoctor(app);
+  if (command == "validate")
+    return CommandValidate(app);
+  if (command == "db" && argc >= 3)
+    return CommandDb(app, argv[2]);
   if (command == "brokers" && argc >= 3 && std::string(argv[2]) == "status") {
     return CommandBrokers(app);
   }
@@ -1085,19 +1226,27 @@ int RunCli(int argc, char** argv) {
   if (command == "research" && argc >= 3 && std::string(argv[2]) == "verify") {
     return CommandVerify(app);
   }
-  if (command == "research") return CommandResearch(app);
-  if (command == "backtest") return CommandResearch(app);
-  if (command == "verify") return CommandVerify(app);
-  if (command == "replay") return CommandReplay(app);
+  if (command == "research")
+    return CommandResearch(app);
+  if (command == "backtest")
+    return CommandResearch(app);
+  if (command == "verify")
+    return CommandVerify(app);
+  if (command == "replay")
+    return CommandReplay(app);
   if (command == "paper" && argc >= 3 && std::string(argv[2]) == "start") {
     return CommandPaper(app);
   }
-  if (command == "portfolio") return CommandPortfolio(app);
-  if (command == "report") return CommandReport(app);
+  if (command == "portfolio")
+    return CommandPortfolio(app);
+  if (command == "report")
+    return CommandReport(app);
   PrintHelp();
   return 1;
 }
 
 }  // namespace quant
 
-int main(int argc, char** argv) { return quant::RunCli(argc, argv); }
+int main(int argc, char** argv) {
+  return quant::RunCli(argc, argv);
+}

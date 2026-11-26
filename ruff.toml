@@ -1,0 +1,15 @@
+line-length = 80
+target-version = "py312"
+extend-exclude = ["data", "build", "build-san", "references"]
+
+[lint]
+select = ["E4", "E7", "E9", "F", "I", "B", "UP"]
+ignore = []
+
+[lint.isort]
+known-first-party = ["research"]
+
+[format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"

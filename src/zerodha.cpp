@@ -10,7 +10,8 @@ namespace quant {
 namespace {
 
 bool SafeServiceName(std::string_view service) {
-  if (service.empty()) return false;
+  if (service.empty())
+    return false;
   for (char c : service) {
     if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_'))
       return false;
@@ -21,14 +22,17 @@ bool SafeServiceName(std::string_view service) {
 // Reads a single Keychain generic password. The value never enters logs,
 // exceptions, configuration, journal events or report files.
 std::string ReadKeychainValue(const std::string& service, bool include_value) {
-  if (!SafeServiceName(service)) return "";
+  if (!SafeServiceName(service))
+    return "";
   std::string command = "security find-generic-password -s '" + service + "'";
-  if (include_value) command += " -w";
+  if (include_value)
+    command += " -w";
   command += " 2>/dev/null";
   std::array<char, 4096> buffer{};
   std::string output;
   FILE* pipe = popen(command.c_str(), "r");
-  if (pipe == nullptr) return "";
+  if (pipe == nullptr)
+    return "";
   while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) !=
          nullptr) {
     output += buffer.data();
@@ -49,10 +53,13 @@ Secret ResolveSecret(const Config& config, const std::string& suffix) {
 }
 
 std::vector<CredentialStatus> InspectCredentials(const Config& config) {
-  const std::vector<std::string> services = {
-      "FYERS_APP_ID",           "FYERS_APP_SECRET", "FYERS_ACCESS_TOKEN",
-      "UPSTOX_ANALYTICS_TOKEN", "KITE_API_KEY",     "KITE_API_SECRET",
-      "KITE_ACCESS_TOKEN"};
+  const std::vector<std::string> services = {"FYERS_APP_ID",
+                                             "FYERS_APP_SECRET",
+                                             "FYERS_ACCESS_TOKEN",
+                                             "UPSTOX_ANALYTICS_TOKEN",
+                                             "KITE_API_KEY",
+                                             "KITE_API_SECRET",
+                                             "KITE_ACCESS_TOKEN"};
   std::vector<CredentialStatus> statuses;
   for (const std::string& suffix : services) {
     CredentialStatus status;
@@ -101,7 +108,8 @@ bool OrderStateMachine::IsValidTransition(OrderState from, OrderState to) {
 }
 
 bool OrderStateMachine::Transition(OrderState to) {
-  if (!IsValidTransition(state_, to)) return false;
+  if (!IsValidTransition(state_, to))
+    return false;
   state_ = to;
   history_.push_back(to);
   return true;
@@ -111,15 +119,18 @@ bool OrderStateMachine::Transition(OrderState to) {
 // Zerodha gateway.
 // ---------------------------------------------------------------------------
 ZerodhaGateway::ZerodhaGateway(Config config, Journal* journal)
-    : config_(std::move(config)), journal_(journal) {}
+    : config_(std::move(config)), journal_(journal) {
+}
 
 bool ZerodhaGateway::ReadOnlyConnectivity(std::string* detail,
                                           std::string* error) const {
   const Secret api_key = ResolveSecret(config_, "KITE_API_KEY");
   const Secret session = ResolveSecret(config_, "KITE_ACCESS_TOKEN");
   if (api_key.value.empty()) {
-    if (detail) *detail = "Kite api_key absent";
-    if (error) *error = "Kite api_key absent";
+    if (detail)
+      *detail = "Kite api_key absent";
+    if (error)
+      *error = "Kite api_key absent";
     return false;
   }
   if (session.value.empty()) {
@@ -129,7 +140,8 @@ bool ZerodhaGateway::ReadOnlyConnectivity(std::string* detail,
           "interactive login/request-token handshake required. "
           "No authenticated call attempted.";
     }
-    if (error) *error = "Kite session access token absent";
+    if (error)
+      *error = "Kite session access token absent";
     return false;
   }
   const HttpClient http(config_.http_timeout_seconds);
@@ -144,7 +156,8 @@ bool ZerodhaGateway::ReadOnlyConnectivity(std::string* detail,
     if (detail)
       *detail = "Kite rejected the session (status " +
                 std::to_string(response.status) + ")";
-    if (error) *error = parse_error.empty() ? "Kite API error" : parse_error;
+    if (error)
+      *error = parse_error.empty() ? "Kite API error" : parse_error;
     return false;
   }
   if (detail) {

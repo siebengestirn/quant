@@ -1,0 +1,16 @@
+schema_version = 1
+comment_prefix = "/"
+max_line_length = 80
+required_namespace = ".quant"
+required_tables = ["quotes", "trades", "depth", "bars", "instruments"]
+required_functions = [
+  ".quant.ingest",
+  ".quant.ingestBar",
+  ".quant.featureHistory",
+  ".quant.asofFeatures",
+  ".quant.persist",
+  ".quant.recover"
+]
+forbidden_tokens = ["eval", "system \"sh", "system \"bash"]
+keyed_tables = ["bars"]
+feature_aliases = ["vwapDev", "dailyVwapProxyDev"]

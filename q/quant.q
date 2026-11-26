@@ -126,7 +126,7 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
 
 / ---------------------------------------------------------------------------
 / Auditable query surface. Only these functions are exposed over IPC; no
-/ arbitrary q expression evaluation is permitted by the C++/Python clients.
+/ arbitrary q source execution is permitted by the C++/Python clients.
 / ---------------------------------------------------------------------------
 .quant.counts:{[]
   `quotes`trades`depth`bars`instruments`marketStatus`signals`features!
@@ -143,7 +143,9 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
 
 / Point-in-time feature contract (version 2).
 / Returns are P_t/P_(t-n)-1 using sessions available at the decision time.
-/ vol20 is a 20-observation rolling sample deviation of daily simple returns.
+/ vol20 is a 20-observation rolling population deviation
+/ of daily simple returns.
+/ Both sides of the as-of join are sorted by symbol then feature timestamp.
 / vwapDev is a daily OHLCV volume-weighted typical-price proxy,
 / not intraday VWAP.
 / A feature computed from session D is available only at the next exchange
@@ -154,15 +156,18 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
   if[base<=0; :0f];
   :((c[n-1])%base)-1}
 
-.quant.featureAt:{[c;v;dates;i;sym]
+.quant.featureAt:{[c;v;tp;dates;i;sym]
   cp:c[til i+1]; vp:v[til i+1]; n:i+1;
   r:1_((cp%prev cp)-1);
   avgv:$[n>=20; last mavg[20;vp]; 0f];
-  vwv:$[n>=20; last mavg[20;cp*vp]; 0f];
+  tpv:tp[til i+1];
+  vwv:$[n>=20; last mavg[20;tpv*vp]; 0f];
   vw:$[avgv>0; vwv%avgv; cp[n-1]];
   avail:$[n<count dates; dates[n]; dates[n-1]+1];
   featureTs:`timestamp$((`long$avail)*86400000000000);
-  (`date`symbol`featureTs`ret20`ret60`ret120`vol20`volSurprise`vwapDev`dailyVwapProxyDev)!
+  keys1:`date`symbol`featureTs`ret20`ret60`ret120;
+  keys2:`vol20`volSurprise`vwapDev`dailyVwapProxyDev;
+  (keys1,keys2)!
     (dates[n-1]; sym; featureTs; .quant.safeRet[cp;n;20];
      .quant.safeRet[cp;n;60]; .quant.safeRet[cp;n;120];
      $[n>=21; last mdev[20;r]; $[count r>0; dev r; 0f]];
@@ -176,6 +181,7 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
   if[n<2; :()];
   rows:(); i:0;
   do[n; rows:rows,enlist .quant.featureAt[exec close from b;exec volume from b;
+        ((exec high from b)+(exec low from b)+(exec close from b))%3;
         exec date from b;i;sym];
       i:i+1];
   :rows}
@@ -201,7 +207,8 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
   :raze .quant.latestForSymbol[h;] each distinct h`symbol}
 
 .quant.asofFeatures:{[]
-  quotes2:select seq,symbol,featureTs:`timestamp$exchangeNs,lastPx from quotes;
+  quotes2:`symbol`featureTs xasc
+    select seq,symbol,featureTs:`timestamp$exchangeNs,lastPx from quotes;
   h:.quant.featureHistory[];
   if[0=count quotes2; :`no_data];
   if[0=count h; :`no_data];

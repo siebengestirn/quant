@@ -46,7 +46,8 @@ remain open. No later gate is claimed.
 
 ## Independent-review remediation (QG-001 and P0 follow-up)
 
-The independent review did not accept PR #1. Implementing-agent status is
+The independent review did not accept the correctness gates. Implementing-agent
+status is
 TESTED throughout this section. Only an independent reviewer may mark an item
 INDEPENDENTLY_VERIFIED or ACCEPTED.
 
@@ -65,7 +66,8 @@ INDEPENDENTLY_VERIFIED or ACCEPTED.
 | QG-011 | Historical bars not uniquely keyed; recovery returned data without restoring state | `bars` keyed by `(date,symbol)`; duplicate bar ingestion verified; `.quant.recover` restores tables, seen keys and committed state and publishes a watermark. | TESTED (review pending) |
 | QG-012..016 | Real pipeline, q security, point-in-time universe, statistics, audit lifecycle | NOT IMPLEMENTED. | BLOCKED |
 
-No gate is accepted. PR #1 remains open and unmerged.
+No gate is accepted. PR #1 was later merged into `main`; acceptance is a
+separate independent decision.
 
 ## QG addendum — 2026-11-25
 

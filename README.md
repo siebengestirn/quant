@@ -67,6 +67,13 @@ python3 -m pytest tests/test_research.py tests/test_kdbx.py -q
 python3 scripts/assurance.py check
 ```
 
+Tooling contracts are pinned in `.clang-format`, `.clang-tidy`, `.pylintrc`,
+`.pylint.rc`, `pyproject.toml`, `ruff.toml`, `requirements.txt`,
+`CMakePresets.json`, `.gitattributes` and `.pre-commit-config.yaml`. q style is
+defined in `q/qstyle.toml` and enforced by the assurance gate. `clang-tidy`,
+`pylint` and `pre-commit` are not installed in the current environment; their
+checks are BLOCKED until the pinned tools are available.
+
 The single-file assurance tool provides `check`, `polish`, `audit` and
 `status`. It is fail-closed, records PASS/FAIL/SKIP per step and verifies that
 a gate does not mutate the tree.
