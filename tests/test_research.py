@@ -536,3 +536,42 @@ def test_experiment_registry_records_reproducibility_inputs(tmp_path):
     assert entry["random_seed"] == research.SEED
     assert entry["trial_count"] == research.TRIALS
     assert entry["code_commit"]
+
+
+def test_holdout_mutation_cannot_change_selection():
+    history = research.synthetic_history()
+    baseline = research.analyze(history, ROOT)
+    mutated = {
+        symbol: [
+            (
+                dict(row)
+                if i < len(rows) - 20
+                else {**row, "close": row["close"] * 100.0}
+            )
+            for i, row in enumerate(rows)
+        ]
+        for symbol, rows in history.items()
+    }
+    changed = research.analyze(mutated, ROOT)
+    assert changed["best_strategy"] == baseline["best_strategy"]
+    assert changed["methodology"]["holdout_dates"] == (
+        baseline["methodology"]["holdout_dates"]
+    )
+    for name in research.STRATEGIES:
+        assert changed["walk_forward"][name]["mean_ic"] == (
+            baseline["walk_forward"][name]["mean_ic"]
+        )
+        assert changed["walk_forward"][name]["dates"] == (
+            baseline["walk_forward"][name]["dates"]
+        )
+
+
+def test_fold_count_is_not_observation_count():
+    report = research.analyze(research.synthetic_history(), ROOT)
+    best = report["best_strategy"]
+    stats = report["walk_forward"][best]
+    assert stats["folds"] == len(
+        report["methodology"]["purged_walk_forward"]["folds"]
+    )
+    assert stats["folds"] != stats["observations"]
+    assert stats["cost_model"] == "GROSS_ONLY"
