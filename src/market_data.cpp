@@ -678,6 +678,92 @@ UniverseResult MarketDataService::SyncUniverse() const {
   return result;
 }
 
+namespace {
+
+bool StrictNumber(const Json& value, double* out) {
+  if (!value.is_exact_integer() && value.type() != Json::Type::kNumber)
+    return false;
+  const double number = value.as_double(0.0);
+  if (!std::isfinite(number))
+    return false;
+  *out = number;
+  return true;
+}
+
+}  // namespace
+
+HistoryParseResult BuildHistoryCsv(const Json& candles,
+                                   const std::string& symbol) {
+  HistoryParseResult result;
+  result.csv = "date,open,high,low,close,volume\n";
+  std::set<std::string> dates;
+  if (candles.type() != Json::Type::kArray || candles.array().empty()) {
+    result.errors.push_back(symbol + ": no candles");
+    return result;
+  }
+  for (const Json& row : candles.array()) {
+    if (row.type() != Json::Type::kArray || row.array().size() != 6) {
+      result.errors.push_back(symbol + ": row width mismatch");
+      return result;
+    }
+    const Json& date_field = row.array()[0];
+    if (date_field.type() != Json::Type::kString) {
+      result.errors.push_back(symbol + ": non-string date");
+      return result;
+    }
+    const std::string raw_date = date_field.as_string();
+    const std::string date =
+        raw_date.size() >= 10 ? raw_date.substr(0, 10) : raw_date;
+    if (!IsCanonicalExchangeDate(date)) {
+      result.errors.push_back(symbol + ": invalid calendar date " + date);
+      return result;
+    }
+    if (!dates.insert(date).second) {
+      result.errors.push_back(symbol + ": duplicate date " + date);
+      return result;
+    }
+    double values[5] = {};
+    for (size_t i = 0; i < 5; ++i) {
+      if (!StrictNumber(row.array()[i + 1], &values[i])) {
+        result.errors.push_back(symbol + ": non-numeric field");
+        return result;
+      }
+    }
+    const double open = values[0];
+    const double high = values[1];
+    const double low = values[2];
+    const double close = values[3];
+    const double volume = values[4];
+    if (low <= 0.0 || close <= 0.0 || low > std::min(open, close) ||
+        std::max(open, close) > high || volume < 0.0) {
+      result.errors.push_back(symbol + ": invalid OHLCV relationship");
+      return result;
+    }
+    std::ostringstream line;
+    line << date << ',' << open << ',' << high << ',' << low << ',' << close
+         << ',' << volume << '\n';
+    result.csv += line.str();
+    ++result.accepted;
+  }
+  return result;
+}
+
+bool PublishHistoryFile(const std::string& path,
+                        const std::string& content,
+                        std::string* error) {
+  const std::string staged = path + ".staging";
+  if (!WriteAndSyncFile(staged, content, error))
+    return false;
+  if (!SyncDirectory(staged, error))
+    return false;
+  if (rename(staged.c_str(), path.c_str()) != 0) {
+    if (error)
+      *error = "history publication rename failed";
+    return false;
+  }
+  return SyncDirectory(path, error);
+}
+
 bool MarketDataService::SyncHistory(const std::vector<Instrument>& instruments,
                                     std::string* error) const {
   const Secret token = ResolveSecret(config_, "UPSTOX_ANALYTICS_TOKEN");
@@ -719,50 +805,14 @@ bool MarketDataService::SyncHistory(const std::vector<Instrument>& instruments,
     }
   }
 
-  for (const Instrument& instrument : targets) {
-    const std::string url = std::string(kUpstoxBase) + "/historical-candle/" +
-                            UrlEncode(instrument.provider_key) + "/day/" +
-                            to_date + "/" + from_date;
-    const HttpResponse response =
-        http.Get(url,
-                 {{"Authorization", "Bearer " + token.value},
-                  {"Accept", "application/json"}});
-    Json root;
-    std::string parse_error;
-    if (!response.error.empty() || response.status != 200 ||
-        !Json::Parse(response.body, &root, &parse_error)) {
-      failures.push_back(instrument.symbol);
-      continue;
-    }
-    const Json* data = root.Find("data");
-    const Json* candles = data == nullptr ? nullptr : data->Find("candles");
-    if (candles == nullptr || candles->array().empty()) {
-      failures.push_back(instrument.symbol);
-      continue;
-    }
-    std::ostringstream csv;
-    csv << "date,open,high,low,close,volume\n";
-    for (const Json& row : candles->array()) {
-      if (row.type() != Json::Type::kArray || row.array().size() < 6)
-        continue;
-      const std::string iso = row.array()[0].as_string();
-      csv << (iso.size() >= 10 ? iso.substr(0, 10) : iso) << ','
-          << row.array()[1].as_double(0.0) << ','
-          << row.array()[2].as_double(0.0) << ','
-          << row.array()[3].as_double(0.0) << ','
-          << row.array()[4].as_double(0.0) << ','
-          << row.array()[5].as_double(0.0) << '\n';
-    }
-    const std::string path =
-        config_.history_dir + "/" + instrument.symbol + ".csv";
-    if (WriteTextFile(path, csv.str()).empty())
-      ++fetched;
-  }
-
-  for (const std::string& symbol : config_.index_symbols) {
-    const std::string key = IndexKey(symbol);
-    if (key.empty())
-      continue;
+  Json::Object manifest;
+  manifest["schema_version"] = Json::UInteger(1);
+  manifest["generated_at_ms"] =
+      Json::Integer(std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch())
+                        .count());
+  auto processSeries = [&](const std::string& symbol,
+                           const std::string& key) -> bool {
     const std::string url = std::string(kUpstoxBase) + "/historical-candle/" +
                             UrlEncode(key) + "/day/" + to_date + "/" +
                             from_date;
@@ -770,27 +820,69 @@ bool MarketDataService::SyncHistory(const std::vector<Instrument>& instruments,
         http.Get(url,
                  {{"Authorization", "Bearer " + token.value},
                   {"Accept", "application/json"}});
+    if (!response.error.empty() || response.status != 200) {
+      failures.push_back(symbol + ": http");
+      return false;
+    }
+    std::filesystem::create_directories(config_.history_raw_dir);
+    std::filesystem::create_directories(config_.history_dir);
+    const std::string raw_path = config_.history_raw_dir + "/" + symbol + "_" +
+                                 ChecksumHex(response.body) + ".json";
+    std::string raw_error;
+    if (!WriteAndSyncFile(raw_path, response.body, &raw_error)) {
+      failures.push_back(symbol + ": raw capture failed");
+      return false;
+    }
     Json root;
-    if (!Json::Parse(response.body, &root, nullptr) || response.status != 200)
-      continue;
+    std::string parse_error;
+    if (!Json::Parse(response.body, &root, &parse_error)) {
+      failures.push_back(symbol + ": response parse failed");
+      return false;
+    }
     const Json* data = root.Find("data");
     const Json* candles = data == nullptr ? nullptr : data->Find("candles");
-    if (candles == nullptr)
-      continue;
-    std::ostringstream csv;
-    csv << "date,open,high,low,close,volume\n";
-    for (const Json& row : candles->array()) {
-      if (row.type() != Json::Type::kArray || row.array().size() < 6)
-        continue;
-      const std::string iso = row.array()[0].as_string();
-      csv << (iso.size() >= 10 ? iso.substr(0, 10) : iso) << ','
-          << row.array()[1].as_double(0.0) << ','
-          << row.array()[2].as_double(0.0) << ','
-          << row.array()[3].as_double(0.0) << ','
-          << row.array()[4].as_double(0.0) << ','
-          << row.array()[5].as_double(0.0) << '\n';
+    if (candles == nullptr) {
+      failures.push_back(symbol + ": no candles");
+      return false;
     }
-    WriteTextFile(config_.history_dir + "/" + symbol + ".csv", csv.str());
+    HistoryParseResult parsed = BuildHistoryCsv(*candles, symbol);
+    if (!parsed.errors.empty()) {
+      for (const std::string& issue : parsed.errors)
+        failures.push_back(issue);
+      return false;  // Never publish a partial or coerced series.
+    }
+    const std::string path = config_.history_dir + "/" + symbol + ".csv";
+    std::string publish_error;
+    if (!PublishHistoryFile(path, parsed.csv, &publish_error)) {
+      failures.push_back(symbol + ": " + publish_error);
+      return false;
+    }
+    manifest[symbol] = Json::ObjectValue(
+        {{"rows", Json::UInteger(static_cast<uint64_t>(parsed.accepted))},
+         {"digest", Json::String(ChecksumHex(parsed.csv))},
+         {"raw_digest", Json::String(ChecksumHex(response.body))}});
+    return true;
+  };
+
+  for (const Instrument& instrument : targets) {
+    if (processSeries(instrument.symbol, instrument.provider_key))
+      ++fetched;
+  }
+
+  for (const std::string& symbol : config_.index_symbols) {
+    const std::string key = IndexKey(symbol);
+    if (key.empty())
+      continue;
+    if (processSeries(symbol, key))
+      ++fetched;
+  }
+  std::string manifest_error;
+  if (!PublishHistoryFile(config_.history_dir + "/manifest.json",
+                          Json::ObjectValue(manifest).Dump(),
+                          &manifest_error)) {
+    if (error)
+      *error = "history manifest not published: " + manifest_error;
+    return false;
   }
 
   if (fetched == 0) {

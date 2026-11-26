@@ -1477,6 +1477,7 @@ bool PaperBroker::ApplyQuote(const std::string& id,
                              const Quote& quote,
                              int64_t now_ms,
                              std::string* error) {
+  (void)now_ms;
   auto it = orders_.find(id);
   if (it == orders_.end() ||
       (it->second.state != PaperOrderState::kAcknowledged &&

@@ -23,6 +23,7 @@ JOURNAL_PATH = "data/journal/events.jnl"
 RISK_SNAPSHOT_PATH = "data/journal/risk.snap"
 UNIVERSE_PATH = "data/cache/universe.csv"
 HISTORY_DIR = "data/cache/history"
+HISTORY_RAW_DIR = "data/cache/raw"
 REPORT_DIR = "data/reports"
 HISTORY_DAYS = 260
 UNIVERSE_LIMIT = 60

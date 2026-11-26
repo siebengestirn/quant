@@ -586,6 +586,75 @@ void TestPaperOrderReducer() {
   journal.Close();
 }
 
+Json ValidCandleRow(const std::string& date) {
+  return Json::Array({Json::String(date),
+                      Json::Number(100.0),
+                      Json::Number(103.0),
+                      Json::Number(99.0),
+                      Json::Number(102.0),
+                      Json::Number(1000.0)});
+}
+
+void TestProviderHistoryValidation() {
+  std::string error;
+  Json valid =
+      Json::Array({ValidCandleRow("2026-01-01"), ValidCandleRow("2026-01-02")});
+  HistoryParseResult result = BuildHistoryCsv(valid, "AAA");
+  Check(result.errors.empty() && result.accepted == 2,
+        "valid provider candles accepted");
+  Check(result.csv.find("2026-01-01,100") != std::string::npos,
+        "valid calendar normalized to CSV");
+
+  HistoryParseResult width =
+      BuildHistoryCsv(Json::Array({Json::Array({Json::String("2026-01-01"),
+                                                Json::Number(100.0),
+                                                Json::Number(103.0),
+                                                Json::Number(99.0),
+                                                Json::Number(102.0),
+                                                Json::Number(1000.0),
+                                                Json::Number(7.0)})}),
+                      "AAA");
+  Check(!width.errors.empty() && width.accepted == 0,
+        "extra provider column rejected");
+
+  HistoryParseResult missing =
+      BuildHistoryCsv(Json::Array({Json::Array({Json::String("2026-01-01"),
+                                                Json::Number(100.0),
+                                                Json::Number(103.0),
+                                                Json::Number(99.0),
+                                                Json::Number(102.0)})}),
+                      "AAA");
+  Check(!missing.errors.empty(), "short provider row rejected");
+
+  HistoryParseResult non_numeric =
+      BuildHistoryCsv(Json::Array({Json::Array({Json::String("2026-01-01"),
+                                                Json::Number(100.0),
+                                                Json::Number(103.0),
+                                                Json::Number(99.0),
+                                                Json::String("invalid"),
+                                                Json::Number(1000.0)})}),
+                      "AAA");
+  Check(!non_numeric.errors.empty(), "non-numeric price rejected");
+
+  HistoryParseResult impossible =
+      BuildHistoryCsv(Json::Array({ValidCandleRow("2026-02-31")}), "AAA");
+  Check(!impossible.errors.empty(), "impossible provider date rejected");
+
+  HistoryParseResult duplicate = BuildHistoryCsv(
+      Json::Array({ValidCandleRow("2026-01-01"), ValidCandleRow("2026-01-01")}),
+      "AAA");
+  Check(!duplicate.errors.empty(), "duplicate provider date rejected");
+
+  Json zero_close = Json::Array({Json::String("2026-01-01"),
+                                 Json::Number(100.0),
+                                 Json::Number(103.0),
+                                 Json::Number(99.0),
+                                 Json::Number(0.0),
+                                 Json::Number(1000.0)});
+  HistoryParseResult zero = BuildHistoryCsv(Json::Array({zero_close}), "AAA");
+  Check(!zero.errors.empty(), "zero close never coerced to valid data");
+}
+
 void TestMoney() {
   Check(Money::FromRupees(500.0).paise() == 50000,
         "money 500 INR -> 50000 paise");
@@ -2384,6 +2453,7 @@ void TestTerminalAccounting() {
 int main() {
   using namespace quant;
   TestMoney();
+  TestProviderHistoryValidation();
   TestPaperOrderReducer();
   TestAssetAndComplianceContracts();
   TestPaperRehydration();
