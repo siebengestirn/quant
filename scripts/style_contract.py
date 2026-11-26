@@ -18,8 +18,8 @@ import json
 import pathlib
 import re
 import subprocess
-import tomllib
 import sys
+import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MAX_LINE = 80
