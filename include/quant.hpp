@@ -1092,6 +1092,17 @@ enum class PaperOrderState {
 };
 const char* PaperOrderStateName(PaperOrderState state);
 
+// One versioned fill identity, used by live application and by replay. The
+// reducer below is the only place that mutates order fill accumulators.
+struct FillRecord {
+  int version = 2;
+  std::string id;
+  std::string order_id;
+  std::string symbol;
+  int quantity = 0;
+  int64_t price_paise = 0;
+  int64_t notional_paise = 0;
+};
 struct PaperOrder {
   std::string id;
   std::string symbol;
@@ -1156,6 +1167,9 @@ class PaperBroker {
   }
 
  private:
+  bool ApplyFillRecord(PaperOrder* order,
+                       const FillRecord& fill,
+                       std::string* error);
   bool Transition(PaperOrder* order,
                   PaperOrderState state,
                   const std::string& reason,
@@ -1231,6 +1245,12 @@ class Json {
   std::vector<Json> array_;
   Object object_;
 };
+
+bool ParseFillRecord(const Json& payload, FillRecord* out, std::string* error);
+Json::Object FillRecordJson(const FillRecord& record);
+bool ValidateFillRecord(const FillRecord& record,
+                        const PaperOrder& order,
+                        std::string* error);
 
 // ---------------------------------------------------------------------------
 // HTTP client (libcurl). Credentials are injected by the caller and never
