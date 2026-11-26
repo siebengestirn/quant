@@ -555,3 +555,81 @@ with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
     assert json.loads(out.strip().splitlines()[-1])["status"] == (
         "invalid_checkpoint"
     )
+
+
+def test_generation_directory_cannot_be_reused(isolated_q):
+    if not q_runtime_available():
+        pytest.skip("native q runtime unavailable; generation test SKIPPED")
+    hdb = isolated_q.directory / "hdb-conflict"
+    hdb.mkdir(parents=True)
+    (hdb / "gen-1").mkdir()
+    script = """
+import json
+import pykx as kx
+
+with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
+    status = q(".quant.persist", str(HDB)).py()
+    if isinstance(status, bytes):
+        status = status.decode()
+    print(json.dumps({"status": status}))
+""".replace("PORT", str(isolated_q.port))
+    script = script.replace("HDB", json.dumps(str(hdb)))
+    code, out = run([str(PYKX_PYTHON), "-c", script])
+    assert code == 0, out
+    assert json.loads(out.strip().splitlines()[-1])["status"] == (
+        "generation_conflict"
+    )
+
+
+def test_ordinary_historical_load_verifies_manifest(isolated_q):
+    if not q_runtime_available():
+        pytest.skip("native q runtime unavailable; verified load SKIPPED")
+    hdb = isolated_q.directory / "hdb-loadverify"
+    script = """
+import pykx as kx
+
+with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
+    q(".quant.persist", str(HDB))
+""".replace("PORT", str(isolated_q.port))
+    script = script.replace("HDB", json.dumps(str(hdb)))
+    code, out = run([str(PYKX_PYTHON), "-c", script])
+    assert code == 0, out
+    generation = sorted(hdb.glob("gen-*"))[0]
+    (generation / "bars").write_bytes(b"corrupted")
+    probe = """
+import json
+import pykx as kx
+
+with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
+    status = q(".quant.historicalJson", str(HDB)).py()
+    if isinstance(status, bytes):
+        status = status.decode()
+    print(json.dumps({"status": status}))
+""".replace("PORT", str(isolated_q.port))
+    probe = probe.replace("HDB", json.dumps(str(hdb)))
+    code, out = run([str(PYKX_PYTHON), "-c", probe])
+    assert code == 0, out
+    assert json.loads(out.strip().splitlines()[-1])["status"].strip('"') == (
+        "invalid_checkpoint"
+    )
+
+
+def test_generation_survives_reset_and_advances(isolated_q):
+    if not q_runtime_available():
+        pytest.skip("native q runtime unavailable; generation test SKIPPED")
+    hdb = isolated_q.directory / "hdb-reset"
+    script = """
+import json
+import pykx as kx
+
+with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
+    q(".quant.persist", str(HDB))
+    q(".quant.reset[]")
+    q(".quant.persist", str(HDB))
+    print(json.dumps(q(".quant.currentGeneration", str(HDB)).py()))
+""".replace("PORT", str(isolated_q.port))
+    script = script.replace("HDB", json.dumps(str(hdb)))
+    code, out = run([str(PYKX_PYTHON), "-c", script])
+    assert code == 0, out
+    assert json.loads(out.strip().splitlines()[-1]) == 2
+    assert len(sorted(hdb.glob("gen-*"))) == 2

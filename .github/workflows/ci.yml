@@ -84,3 +84,27 @@ jobs:
 
       - name: Run sanitizer unit tests
         run: ASAN_OPTIONS=detect_leaks=0 ./build-san/quant_tests
+
+  native-q:
+    name: Native KDB-X recovery (gated tier)
+    # This tier is NOT a required status check: it needs a licensed q runtime.
+    # Enable only on a governed runner with the license in protected secrets.
+    if: vars.QUANT_NATIVE_Q_ENABLED == 'true'
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Verify licensed q runtime
+        env:
+          QHOME: ${{ secrets.QUANT_QHOME }}
+        run: |
+          test -x "$QHOME/bin/q"
+          printf 'q runtime verified; license material not printed\n'
+
+      - name: Install Python test dependencies
+        run: python3 -m pip install --quiet pykx pytest
+
+      - name: Run native q persistence and recovery tests
+        env:
+          QHOME: ${{ secrets.QUANT_QHOME }}
+        run: python3 -m pytest tests/test_kdbx.py -q
