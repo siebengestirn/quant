@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cctype>
 #include <ctime>
