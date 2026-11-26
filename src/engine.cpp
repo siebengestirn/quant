@@ -1605,7 +1605,8 @@ PaperOrder* PaperBroker::CreateIntent(const std::string& symbol,
 }
 
 bool PaperBroker::RiskApprove(const std::string& id,
-                              const RiskDecision& decision,
+                              const RiskAuthorization& authorization,
+                              int64_t now_ms,
                               std::string* error) {
   auto it = orders_.find(id);
   if (it == orders_.end() || it->second.state != PaperOrderState::kIntent) {
@@ -1613,19 +1614,17 @@ bool PaperBroker::RiskApprove(const std::string& id,
       *error = "order is not in INTENT state";
     return false;
   }
-  if (!decision.approved || decision.quantity < it->second.quantity ||
-      !decision.notional.valid() ||
-      decision.notional <
-          Money::FromPaise(it->second.limit_price.paise() *
-                           static_cast<int64_t>(it->second.quantity))) {
+  if (!authorization.Verify(it->second, config_, now_ms, error))
+    return false;
+  if (!consumed_authorizations_.insert(authorization.signature()).second) {
     if (error)
-      *error = "authoritative risk decision does not approve this order";
+      *error = "risk authorization already consumed";
     return false;
   }
-  it->second.risk_policy_id = decision.reason;
+  it->second.risk_policy_id = authorization.policy_version();
   return Transition(&it->second,
                     PaperOrderState::kRiskApproved,
-                    "approved by " + decision.reason,
+                    "approved by authoritative risk capability",
                     error);
 }
 
@@ -3578,6 +3577,97 @@ RiskDecision RiskEngine::Evaluate(const Signal& signal,
   decision.notional = sized.notional;
   decision.reason = sized.reason;
   return decision;
+}
+
+// Secret salt for authorization binding. Kept in the implementation unit so
+// a caller cannot construct a matching signature from public headers.
+namespace {
+constexpr const char* kAuthorizationSalt =
+    "QUANT-RISK-AUTH-V2-2026-11-26-CAPABILITY-9f2c71ad";
+
+}  // namespace
+
+std::string RiskAuthorization::ComputeSignature() const {
+  std::string canonical;
+  auto add = [&canonical](const std::string& field) {
+    canonical += field;
+    canonical.push_back('\n');
+  };
+  add("QUANT-RISK-AUTHORIZATION-V2");
+  add(kAuthorizationSalt);
+  add(order_id_);
+  add(account_id_);
+  add(instrument_id_);
+  add(symbol_);
+  add(side_ == OrderSide::kBuy ? "BUY" : "SELL");
+  add(std::to_string(quantity_));
+  add(std::to_string(limit_price_paise_));
+  add(std::to_string(max_notional_paise_));
+  add(policy_version_);
+  add(std::to_string(state_revision_));
+  add(std::to_string(expiry_ms_));
+  return Sha256Hex(canonical);
+}
+
+bool RiskAuthorization::Verify(const PaperOrder& order,
+                               const Config& config,
+                               int64_t now_ms,
+                               std::string* error) const {
+  auto fail = [error](const char* reason) {
+    if (error)
+      *error = reason;
+    return false;
+  };
+  if (!valid_ || signature_.empty())
+    return fail("risk authorization is not valid");
+  if (order.id != order_id_ || order.symbol != symbol_ || order.side != side_ ||
+      order.quantity != quantity_ ||
+      order.limit_price.paise() != limit_price_paise_ ||
+      order.instrument_key != instrument_id_)
+    return fail("risk authorization is not bound to this order");
+  if (config.account_id != account_id_)
+    return fail("risk authorization account mismatch");
+  if (now_ms > expiry_ms_ || now_ms <= 0)
+    return fail("risk authorization expired or has invalid time");
+  int64_t expected = 0;
+  if (!money_detail::CheckedMultiply(
+          limit_price_paise_, static_cast<int64_t>(quantity_), &expected) ||
+      expected > max_notional_paise_)
+    return fail("risk authorization notional does not cover the order");
+  if (ComputeSignature() != signature_)
+    return fail("risk authorization signature mismatch");
+  return true;
+}
+
+RiskAuthorization RiskEngine::Authorize(const Signal& signal,
+                                        const Quote& quote,
+                                        const Portfolio& portfolio,
+                                        const PaperOrder& order,
+                                        int64_t now_ms) {
+  RiskAuthorization auth;
+  const RiskDecision decision = Evaluate(signal, quote, portfolio, now_ms);
+  if (!decision.approved || decision.quantity < order.quantity ||
+      !decision.notional.valid())
+    return auth;  // Invalid capability: no authority granted.
+  auth.order_id_ = order.id;
+  auth.account_id_ = config_.account_id;
+  auth.instrument_id_ = order.instrument_key;
+  auth.symbol_ = order.symbol;
+  auth.side_ = order.side;
+  auth.quantity_ = order.quantity;
+  auth.limit_price_paise_ = order.limit_price.paise();
+  int64_t notional = 0;
+  if (!decision.notional.TryPaise(&notional) || notional <= 0)
+    return auth;
+  auth.max_notional_paise_ = notional;
+  auth.policy_version_ = state_->policy_version;
+  auth.state_revision_ = state_->journal_sequence;
+  constexpr int64_t kAuthorizationTtlMs = 5 * 60 * 1000;
+  if (!money_detail::CheckedAdd(now_ms, kAuthorizationTtlMs, &auth.expiry_ms_))
+    return auth;
+  auth.signature_ = auth.ComputeSignature();
+  auth.valid_ = true;
+  return auth;
 }
 
 // ---------------------------------------------------------------------------

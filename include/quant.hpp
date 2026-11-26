@@ -28,6 +28,7 @@ namespace quant {
 
 class Journal;
 struct Event;
+struct PaperOrder;
 
 // ---------------------------------------------------------------------------
 // Money: integer paise. Conversions are explicit to prevent unit confusion.
@@ -739,11 +740,53 @@ class EventRuntime {
 // ---------------------------------------------------------------------------
 // Central risk engine. All strategies must pass through it.
 // ---------------------------------------------------------------------------
+// A read-only decision record used for reporting. It carries no authority:
+// only RiskEngine can produce the order-bound RiskAuthorization below.
 struct RiskDecision {
   bool approved = false;
   int quantity = 0;
   Money notional;
   std::string reason;
+};
+
+// Opaque authorization capability. Its constructor is private and only the
+// risk authority (RiskEngine) can create one. Every field is bound to the
+// exact order snapshot and verified at approval time, so a client cannot
+// fabricate or reuse an approval by assembling a public struct.
+class RiskAuthorization {
+ public:
+  RiskAuthorization(const RiskAuthorization&) = default;
+  bool valid() const {
+    return valid_;
+  }
+  const std::string& policy_version() const {
+    return policy_version_;
+  }
+  const std::string& signature() const {
+    return signature_;
+  }
+  bool Verify(const PaperOrder& order,
+              const Config& config,
+              int64_t now_ms,
+              std::string* error) const;
+
+ private:
+  friend class RiskEngine;
+  RiskAuthorization() = default;
+  std::string ComputeSignature() const;
+  std::string order_id_;
+  std::string account_id_;
+  std::string instrument_id_;
+  std::string symbol_;
+  OrderSide side_ = OrderSide::kBuy;
+  int quantity_ = 0;
+  int64_t limit_price_paise_ = 0;
+  int64_t max_notional_paise_ = 0;
+  std::string policy_version_;
+  uint64_t state_revision_ = 0;
+  int64_t expiry_ms_ = 0;
+  std::string signature_;
+  bool valid_ = false;
 };
 
 struct DailyRiskState {
@@ -860,6 +903,13 @@ class RiskEngine {
                         const Quote& quote,
                         const Portfolio& portfolio,
                         int64_t now_ms);
+  // The only way to create a RiskAuthorization. Re-evaluates the decision
+  // from authoritative inputs, then binds it to the exact order snapshot.
+  RiskAuthorization Authorize(const Signal& signal,
+                              const Quote& quote,
+                              const Portfolio& portfolio,
+                              const PaperOrder& order,
+                              int64_t now_ms);
   const DailyRiskState& daily_state() const {
     return *state_;
   }
@@ -1145,7 +1195,8 @@ class PaperBroker {
                            Money limit_price,
                            std::string* error);
   bool RiskApprove(const std::string& id,
-                   const RiskDecision& decision,
+                   const RiskAuthorization& authorization,
+                   int64_t now_ms,
                    std::string* error);
   bool Reject(const std::string& id,
               const std::string& reason,
@@ -1180,6 +1231,7 @@ class PaperBroker {
   std::shared_ptr<Portfolio> portfolio_;
   std::map<std::string, PaperOrder> orders_;
   std::set<std::string> posted_ids_;
+  std::set<std::string> consumed_authorizations_;
   uint64_t next_id_ = 1;
 };
 
