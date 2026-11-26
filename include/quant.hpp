@@ -939,7 +939,8 @@ class RiskEngine {
   Config config_;
   std::shared_ptr<DailyRiskState> state_;
   Journal* journal_ = nullptr;
-  std::shared_ptr<std::recursive_mutex> authority_lock_ = std::make_shared<std::recursive_mutex>();
+  std::shared_ptr<std::recursive_mutex> authority_lock_ =
+      std::make_shared<std::recursive_mutex>();
 };
 
 // ---------------------------------------------------------------------------
@@ -1262,7 +1263,8 @@ class PaperBroker {
   std::map<std::string, PaperOrder> orders_;
   std::set<std::string> posted_ids_;
   std::set<std::string> consumed_authorizations_;
-  std::shared_ptr<std::recursive_mutex> authority_lock_ = std::make_shared<std::recursive_mutex>();
+  std::shared_ptr<std::recursive_mutex> authority_lock_ =
+      std::make_shared<std::recursive_mutex>();
   uint64_t next_id_ = 1;
 };
 
