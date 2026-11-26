@@ -682,9 +682,11 @@ def test_fold_count_is_not_observation_count():
     report = research.analyze(research.synthetic_history(), ROOT)
     best = report["best_strategy"]
     stats = report["walk_forward"][best]
-    assert stats["folds"] == len(
-        report["methodology"]["purged_walk_forward"]["folds"]
+    nested = report["methodology"]["nested_validation"]
+    assert stats["folds"] == sum(
+        1 for fold in nested["folds"] if fold["selected_strategy"] == best
     )
+    assert stats["folds"] <= len(nested["folds"])
     assert stats["folds"] != stats["observations"]
     assert stats["cost_model"] == "GROSS_ONLY"
 
@@ -693,12 +695,12 @@ def test_oos_fold_metrics_drive_report():
     report = research.analyze(research.synthetic_history(), ROOT)
     best = report["best_strategy"]
     stats = report["walk_forward"][best]
-    folds = report["methodology"]["purged_walk_forward"]["folds"]
-    expected = (
-        research.statistics.fmean(fold["daily_ic"] for fold in folds)
-        if folds
-        else None
-    )
+    nested = report["methodology"]["nested_validation"]
+    folds = [
+        fold for fold in nested["folds"] if fold["selected_strategy"] == best
+    ]
+    values = [value for fold in folds for value in fold["test_ic"]]
+    expected = research.statistics.fmean(values) if values else None
     assert stats["scope"] == "OUT_OF_SAMPLE_FOLDS"
     assert stats["mean_ic"] == expected
     assert stats["folds"] == len(folds)
@@ -727,3 +729,45 @@ def test_future_fold_mutation_does_not_alter_earlier_folds():
         mutated, research.score_momentum, final_holdout=0
     )
     assert baseline["folds"][0] == changed["folds"][0]
+
+
+def test_nested_selection_ignores_outer_test_data():
+    history = research.synthetic_history()
+    dates = sorted({row["date"] for rows in history.values() for row in rows})
+    baseline = research.nested_walk_forward(history)
+    mutated = {
+        symbol: [
+            (
+                {**row, "close": row["close"] * 20.0}
+                if row["date"] in dates[-25:]
+                else dict(row)
+            )
+            for row in rows
+        ]
+        for symbol, rows in history.items()
+    }
+    changed = research.nested_walk_forward(mutated)
+    assert baseline["folds"][0]["selected_strategy"] == (
+        changed["folds"][0]["selected_strategy"]
+    )
+    assert baseline["folds"][0]["train_mean_ic"] == (
+        changed["folds"][0]["train_mean_ic"]
+    )
+
+
+def test_nested_registers_full_trial_universe():
+    history = research.synthetic_history()
+    nested = research.nested_walk_forward(history)
+    strategies = len(research.STRATEGIES)
+    folds = len(nested["folds"])
+    assert len(nested["full_trial_matrix"]) == strategies * folds
+    assert all(
+        0 <= count <= folds for count in nested["selection_counts"].values()
+    )
+    assert nested["outer_test_observations"] > 0
+    report = research.analyze(history, ROOT)
+    analysis_nested = report["methodology"]["nested_validation"]
+    assert report["multiple_testing"]["registered_trials"] == (
+        strategies * len(analysis_nested["folds"])
+    )
+    assert report["methodology"]["holdout_status"] == "SEALED_NOT_EVALUATED"
