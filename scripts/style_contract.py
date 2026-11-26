@@ -18,6 +18,7 @@ import json
 import pathlib
 import re
 import subprocess
+import tomllib
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -116,6 +117,26 @@ def check_json() -> list[str]:
     return errors
 
 
+def check_q_guide() -> list[str]:
+    """Enforce mechanically checkable qbists/style rules on q/quant.q."""
+    rules = tomllib.loads((ROOT / "q" / "qstyle.toml").read_text())
+    step = int(rules["indent_step"])
+    errors: list[str] = []
+    for number, line in enumerate(
+        (ROOT / "q" / "quant.q").read_text(encoding="utf-8").splitlines(), 1
+    ):
+        if "\t" in line:
+            errors.append(f"q/quant.q:{number}: tab character")
+        indent = len(line) - len(line.lstrip(" "))
+        if indent % step:
+            errors.append(
+                f"q/quant.q:{number}: indent is not a multiple of {step}"
+            )
+        if len(line) > int(rules["max_line_length"]):
+            errors.append(f"q/quant.q:{number}: exceeds q line limit")
+    return errors
+
+
 def check_tool_configs() -> list[str]:
     """Enforce the QUANT style contract."""
     errors: list[str] = []
@@ -184,6 +205,7 @@ def main() -> int:
         "json": check_json,
         "tool-configs": check_tool_configs,
         "shell": check_shell,
+        "q-guide": check_q_guide,
     }
     report: dict[str, list[str]] = {}
     failures = 0

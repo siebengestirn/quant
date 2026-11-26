@@ -1,6 +1,8 @@
 schema_version = 1
 comment_prefix = "/"
 max_line_length = 80
+indent_step = 2
+forbid_tabs = true
 required_namespace = ".quant"
 required_tables = ["quotes", "trades", "depth", "bars", "instruments"]
 required_functions = [
