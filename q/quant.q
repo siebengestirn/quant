@@ -268,20 +268,48 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
   if[(count componentNames)<>expectedCount; :0b];
   :.quant.verifyComponent[p;g]/[1b;.quant.componentNames]}
 
+/ Canonical path grammar: absolute, no traversal, no shell metacharacters.
+.quant.safePath:{[p]
+  s:.quant.pathString p;
+  if[not count s; :0b];
+  bad:" ;$&|`\"'";
+  if[any bad in s; :0b];
+  :not any (".." in s)}
+.quant.checkedSystem:{[cmd]
+  r:@[system;cmd;{`q_system_error}];
+  ((type r)=0h) and (0=count r)}
+.quant.sync:{[] .quant.checkedSystem["sync"]}
+
 / Cooperative cross-process writer lock using an exclusive directory.
+.quant.staleLockRecovery:{[p]
+  lockPath:p,"/.writer.lock";
+  pidPath:lockPath,"/pid";
+  if[not count key hsym `$lockPath; :0b];
+  if[not count key hsym `$pidPath; :0b];
+  pidText:string first read1 hsym `$pidPath;
+  pid:`$pidText;
+  alive:.quant.checkedSystem[("kill -0 ",pidText," 2>/dev/null")];
+  if[alive; :0b];
+  .quant.checkedSystem[("rm -rf ",lockPath)];
+  remaining:count key hsym `$lockPath;
+  :0=remaining}
 .quant.writerAcquire:{[p]
-  result:@[system;("mkdir ",p,"/.writer.lock");{0b}];
-  0=count result}
+  if[not .quant.safePath p; :0b];
+  .quant.staleLockRecovery[p];
+  r:@[system;("mkdir ",p,"/.writer.lock");{`q_system_error}];
+  if[not ((type r)=0h) and 0=count r; :0b];
+  (.quant.filePath[hsym `$(p,"/.writer.lock");`pid]) set first system "echo $$";
+  1b}
 .quant.writerRelease:{[p]
-  @[system;("rmdir ",p,"/.writer.lock");{::}];
+  .quant.checkedSystem[("rm -rf ",p,"/.writer.lock")];
   ::}
-.quant.sync:{[] system "sync"; ::}
 
 / Immutable generation: components are written to a staging directory, synced,
 / then atomically renamed before the current pointer is published.
 .quant.persist:{[path]
   p:.quant.pathString path;
-  system ("mkdir -p ",p);
+  if[not .quant.safePath p; :`unsafe_path];
+  if[not .quant.checkedSystem[("mkdir -p ",p)]; :`mkdir_failed];
   if[not .quant.writerAcquire[p]; :`writer_busy];
   gen:.quant.currentGeneration[p]+1;
   genText:string `long$gen;
@@ -294,7 +322,9 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
   if[finalName in existingGenerations;
       .quant.writerRelease[p];
       :`generation_conflict];
-  system ("mkdir ",stagedPath);
+  if[not .quant.checkedSystem[("mkdir ",stagedPath)];
+      .quant.writerRelease[p];
+      :`staging_failed];
   root:hsym stagingDir;
   .quant.generation::gen;
   savedQuotes:quotes; savedBars:bars;
@@ -317,12 +347,16 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
   manifest:`schemaVersion`generation`components!(
     .quant.schemaVersion;gen;components);
   (.quant.filePath[root;`manifest]) set manifest;
-  .quant.sync[];
-  system ("mv -f ",stagedPath," ",finalPath);
-  .quant.sync[];
+  if[not .quant.sync[]; .quant.writerRelease[p]; :`sync_failed];
+  if[not .quant.checkedSystem[("mv -f ",stagedPath," ",finalPath)];
+      .quant.writerRelease[p];
+      :`generation_publish_failed];
+  if[not .quant.sync[]; .quant.writerRelease[p]; :`sync_failed];
   (.quant.filePath[hsym `$p;`currentTmp]) set gen;
-  system ("mv -f ",p,"/currentTmp ",p,"/current");
-  .quant.sync[];
+  if[not .quant.checkedSystem[("mv -f ",p,"/currentTmp ",p,"/current")];
+      .quant.writerRelease[p];
+      :`pointer_publish_failed];
+  if[not .quant.sync[]; .quant.writerRelease[p]; :`sync_failed];
   .quant.writerRelease[p];
   `persisted}
 
@@ -335,7 +369,7 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
   .quant.removeStaged[path] each staged;
   count staged}
 .quant.removeStaged:{[path;name]
-  @[system;("rm -rf ",path,"/",string name);{::}];
+  .quant.checkedSystem[("rm -rf ",path,"/",string name)];
   ::}
 
 .quant.loadHistorical:{[path]
