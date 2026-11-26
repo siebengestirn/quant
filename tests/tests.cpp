@@ -205,6 +205,99 @@ void TestAccountingReplayIntegrity() {
   journal.Close();
 }
 
+void TestUniversePublishRecovery() {
+  const std::string path = TempPath("universe_publish.csv");
+  const std::string journal_path = TempPath("universe_publish.jnl");
+  std::remove(path.c_str());
+  std::remove((path + ".staging").c_str());
+  std::remove(journal_path.c_str());
+  std::string error;
+  Journal journal;
+  Check(journal.Open(journal_path, &error), "publication journal opens");
+  std::ofstream initial(path);
+  initial << "old\n";
+  initial.close();
+
+  Check(!PublishUniverse(path,
+                         "new\n",
+                         &journal,
+                         "TX-1",
+                         PublicationFailurePoint::kAfterAuditBeforeRename,
+                         &error),
+        "injected audit/rename failure reported");
+  std::ifstream after_failure(path);
+  std::string published((std::istreambuf_iterator<char>(after_failure)),
+                        std::istreambuf_iterator<char>());
+  after_failure.close();
+  Check(published == "old\n", "failed publication leaves prior file intact");
+  Check(std::filesystem::exists(path + ".staging"),
+        "audited staging artifact retained for recovery");
+
+  Check(RecoverUniversePublication(path, &journal, &error),
+        "startup reconciliation completes pending publication");
+  std::ifstream recovered(path);
+  published.assign(std::istreambuf_iterator<char>(recovered),
+                   std::istreambuf_iterator<char>());
+  recovered.close();
+  Check(published == "new\n", "recovered publication has audited content");
+  Check(!std::filesystem::exists(path + ".staging"),
+        "staging artifact consumed by recovery");
+  Check(RecoverUniversePublication(path, &journal, &error),
+        "second reconciliation is idempotent");
+
+  Check(!PublishUniverse(path,
+                         "newer\n",
+                         &journal,
+                         "TX-2",
+                         PublicationFailurePoint::kAfterRenameBeforeCommit,
+                         &error),
+        "injected rename/commit failure reported");
+  Check(RecoverUniversePublication(path, &journal, &error),
+        "post-rename failure reconciles");
+  std::ifstream final_input(path);
+  published.assign(std::istreambuf_iterator<char>(final_input),
+                   std::istreambuf_iterator<char>());
+  final_input.close();
+  Check(published == "newer\n", "committed content is authoritative");
+
+  Check(PublishUniverse(path,
+                        "normal\n",
+                        &journal,
+                        "TX-3",
+                        PublicationFailurePoint::kNone,
+                        &error),
+        "normal publication succeeds");
+  Check(!PublishUniverse(path,
+                         "no-tx\n",
+                         &journal,
+                         "",
+                         PublicationFailurePoint::kNone,
+                         &error),
+        "publication without transaction id rejected");
+
+  std::ofstream tampered(path + ".staging");
+  tampered << "tampered\n";
+  tampered.close();
+  Check(!PublishUniverse(path,
+                         "tx4\n",
+                         &journal,
+                         "TX-4",
+                         PublicationFailurePoint::kAfterAuditBeforeRename,
+                         &error),
+        "mismatch fixture audited but not published");
+  std::ofstream wrong(path + ".staging");
+  wrong << "tampered\n";
+  wrong.close();
+  Check(RecoverUniversePublication(path, &journal, &error),
+        "recovery skips digest mismatch without failing");
+  std::ifstream after_tamper(path);
+  published.assign(std::istreambuf_iterator<char>(after_tamper),
+                   std::istreambuf_iterator<char>());
+  after_tamper.close();
+  Check(published == "normal\n", "tampered staging never published");
+  journal.Close();
+}
+
 void TestMoney() {
   Check(Money::FromRupees(500.0).paise() == 50000,
         "money 500 INR -> 50000 paise");
@@ -2003,6 +2096,7 @@ void TestTerminalAccounting() {
 int main() {
   using namespace quant;
   TestMoney();
+  TestUniversePublishRecovery();
   TestAccountingReplayIntegrity();
   TestCanonicalDateFixture();
   TestMoneyAdversarial();
