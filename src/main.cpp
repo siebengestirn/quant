@@ -35,6 +35,8 @@ const char* kConfigPath = "config.toml";
 struct App {
   Config config;
   Journal journal;
+  std::shared_ptr<DailyRiskState> risk_state =
+      std::make_shared<DailyRiskState>();
   bool ready = false;
 };
 
@@ -54,6 +56,17 @@ App Initialize(std::string* error) {
     *error = journal_error;
     return app;
   }
+  std::string risk_error;
+  DailyRiskState recovered;
+  if (!RecoverRiskStateFromJournal(app.config.risk_snapshot_path,
+                                   &app.journal,
+                                   &recovered,
+                                   &risk_error)) {
+    app.journal.Close();
+    *error = "risk state recovery failed: " + risk_error;
+    return app;
+  }
+  *app.risk_state = recovered;
   app.ready = true;
   return app;
 }
@@ -751,7 +764,7 @@ DailyReport BuildReport(App& app, bool* ok) {
       index_it == history.end() ? 0.0 : RegimeScore(index_it->second);
 
   Portfolio paper(app.config.initial_capital);
-  RiskEngine risk(app.config);
+  RiskEngine risk(app.config, app.risk_state, &app.journal);
   const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
                           std::chrono::system_clock::now().time_since_epoch())
                           .count();
@@ -865,6 +878,40 @@ DailyReport BuildReport(App& app, bool* ok) {
     report.decision_reason =
         "conditional research candidates; live execution remains locked and "
         "order-book confirmation is required before paper entry";
+  }
+  RiskSnapshot checkpoint;
+  checkpoint.account_id = "PRIMARY";
+  checkpoint.session_id = app.risk_state->date;
+  checkpoint.policy_version = app.risk_state->policy_version;
+  checkpoint.journal_sequence = app.risk_state->journal_sequence;
+  checkpoint.starting_equity_paise =
+      app.risk_state->starting_equity.valid()
+          ? app.risk_state->starting_equity.paise()
+          : 0;
+  checkpoint.current_equity_paise = app.risk_state->current_equity.valid()
+                                        ? app.risk_state->current_equity.paise()
+                                        : 0;
+  checkpoint.peak_equity_paise = app.risk_state->peak_equity.valid()
+                                     ? app.risk_state->peak_equity.paise()
+                                     : 0;
+  checkpoint.low_equity_paise = app.risk_state->low_equity.valid()
+                                    ? app.risk_state->low_equity.paise()
+                                    : 0;
+  checkpoint.realized_pnl_paise = app.risk_state->realized_pnl.valid()
+                                      ? app.risk_state->realized_pnl.paise()
+                                      : 0;
+  checkpoint.unrealized_pnl_paise = app.risk_state->unrealized_pnl.valid()
+                                        ? app.risk_state->unrealized_pnl.paise()
+                                        : 0;
+  checkpoint.halted = app.risk_state->halted;
+  checkpoint.halt_reason = app.risk_state->halt_reason;
+  std::string checkpoint_error;
+  if (!SaveRiskSnapshot(
+          app.config.risk_snapshot_path, checkpoint, &checkpoint_error)) {
+    report.rejections.push_back("risk checkpoint not committed: " +
+                                checkpoint_error);
+    *ok = false;
+    return report;
   }
   *ok = true;
   return report;
