@@ -42,7 +42,7 @@ reconciliation. Open PRs after PR #46: 0. Branches: `main` only.
 | #42 | run `45863382305`, all required jobs pass | — |
 | #43 | run `45867909983`, all required jobs pass | — |
 | #44 | run `45869637951`, all required jobs pass | — |
-| final `main` | run `45869954361`, success on `8a45da3` | post-merge verification on the exact final commit |
+| final `main` | see bundle `MANIFEST.md` | post-merge success on the exact final commit |
 
 It is therefore **not** true that every PR head was green: PR #34 was merged
 with a red style check and was repaired by PR #35. The final `main` is green.
@@ -62,7 +62,8 @@ Branch protection on `main` was updated to match `git-policy.json`:
 The exported setting is `docs/branch-protection-2026-11-26.json`.
 
 **Bootstrap exception (narrow, one-time, time-bounded).** PR #45 installs the
-approval requirement and PR #46 reconciles final evidence. Only one maintainer account exists,
+approval requirement and PR #46 reconciles final evidence.
+Only one maintainer account exists,
 so GitHub cannot supply an independent approving review for those PRs.
 `git-policy.json` records a single-maintainer exception expiring
 2026-12-31 that authorizes administrative merges of PR #45 and #46 only,
