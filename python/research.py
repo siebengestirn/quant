@@ -1494,6 +1494,8 @@ def analyze(
         stats = daily_cross_sectional_ic(usable, score_fn, eligible=eligibility)
         stats["folds"] = 0
         stats["fold_ics"] = stats["daily_ics"]
+        stats["scope"] = "DEVELOPMENT_DESCRIPTIVE"
+        stats["oos_status"] = "NOT_EVALUATED"
         report["walk_forward"][name] = stats
         if stats["observations"]:
             values = stats["daily_ics"]
@@ -1566,21 +1568,34 @@ def analyze(
         report["rejections"].append(
             "strategy selection disagrees with development-only selector"
         )
-    fold_result = purged_walk_forward(
-        development,
-        STRATEGIES.get(best_name, score_momentum),
-        final_holdout=0,
-    )
-    fold_count = len(fold_result.get("folds", []))
-    report["walk_forward"][best_name]["folds"] = fold_count
-    if not best_stats or fold_count < 3:
-        report["conclusion"] = "INCONCLUSIVE: insufficient independent folds"
-    elif best_stats.get("mean_ic", 0) <= 0:
-        report["conclusion"] = "NO TRADE: no positive out-of-sample IC"
-    elif best_stats.get("deflated_mean_ic", 0) <= 0:
-        report["conclusion"] = (
-            "INCONCLUSIVE: multiple-testing haircut removes signal"
+    fold_results: dict[str, dict] = {}
+    for name, score_fn in STRATEGIES.items():
+        result = purged_walk_forward(development, score_fn, final_holdout=0)
+        fold_results[name] = result
+        target = report["walk_forward"][name]
+        count = len(result.get("folds", []))
+        target["folds"] = count
+        target["scope"] = "OUT_OF_SAMPLE_FOLDS"
+        target["oos_status"] = (
+            "CALCULATED" if count >= 3 else "INSUFFICIENT_FOLDS"
         )
+        oos_ics = [fold["daily_ic"] for fold in result.get("folds", [])]
+        target["fold_ics"] = oos_ics
+        target["mean_ic"] = statistics.fmean(oos_ics) if oos_ics else None
+        target["ic_bootstrap_95ci"] = block_bootstrap_ci(oos_ics)
+        target["ic_hac_se"] = hac_standard_error(oos_ics)
+        target["deflated_mean_ic"] = (
+            deflated(target["mean_ic"], TRIALS, max(1, len(oos_ics)))
+            if target["mean_ic"] is not None
+            else None
+        )
+    fold_result = fold_results[best_name]
+    fold_count = len(fold_result.get("folds", []))
+    oos_ic = report["walk_forward"][best_name]["mean_ic"]
+    if fold_count < 3 or oos_ic is None:
+        report["conclusion"] = "INCONCLUSIVE: insufficient independent folds"
+    elif oos_ic <= 0:
+        report["conclusion"] = "NO TRADE: no positive out-of-sample IC"
     else:
         report["conclusion"] = (
             f"ESTIMATED: {best_name} shows positive purged out-of-sample IC; "
@@ -1600,6 +1615,10 @@ def analyze(
         ),
         "selection_tests": selection_test_status(None),
         "purged_walk_forward": fold_result,
+        "all_strategy_folds": {
+            name: len(value.get("folds", []))
+            for name, value in fold_results.items()
+        },
         "fold_count": fold_count,
         "bootstrap": "moving-block, 5-session blocks",
         "cost_model": (
@@ -1609,6 +1628,8 @@ def analyze(
         "holdout_dates": holdout_dates,
         "holdout_sessions": len(holdout_dates),
         "holdout_used_for_selection": False,
+        "holdout_status": "SEALED_NOT_EVALUATED",
+        "oos_metric": "mean of purged fold daily IC",
         "holdout_labels": {
             symbol: len(rows) for symbol, rows in holdout.items()
         },
