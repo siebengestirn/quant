@@ -71,6 +71,12 @@ std::vector<Candle> SyntheticCandles(int count,
   return candles;
 }
 
+int64_t NowMs() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::system_clock::now().time_since_epoch())
+      .count();
+}
+
 Quote GoodQuote(double price = 100.0) {
   Quote quote;
   quote.symbol = "TEST";
@@ -110,6 +116,16 @@ Config TestConfig() {
   config.cash_reserve_fraction = 0.1;
   config.max_gross_exposure_fraction = 0.8;
   return config;
+}
+
+RiskDecision ApprovedDecision(const PaperOrder& order) {
+  RiskDecision decision;
+  decision.approved = true;
+  decision.quantity = order.quantity;
+  decision.notional = Money::FromPaise(order.limit_price.paise() *
+                                       static_cast<int64_t>(order.quantity));
+  decision.reason = "RISK-POLICY-TEST-v1";
+  return decision;
 }
 
 void TestCanonicalDateFixture() {
@@ -414,7 +430,7 @@ void TestPaperRehydration() {
       "AAA", OrderSide::kBuy, 4, Money::FromRupees(200.0), &error);
   Check(order != nullptr, "order created for rehydration");
   const std::string original_id = order->id;
-  Check(first.RiskApprove(order->id, &error) &&
+  Check(first.RiskApprove(order->id, ApprovedDecision(*order), &error) &&
             first.Submit(order->id, &error) &&
             first.Acknowledge(order->id, &error),
         "order advanced for rehydration");
@@ -422,7 +438,7 @@ void TestPaperRehydration() {
   quote.symbol = "AAA";
   quote.ask = 100.0;
   quote.ask_qty = 4;
-  Check(first.ApplyQuote(order->id, quote, 1000, &error),
+  Check(first.ApplyQuote(order->id, quote, NowMs(), &error),
         "fill created for rehydration");
   Check(first.Reconcile(order->id, &error), "fill reconciled");
   const int64_t notional = order->cumulative_notional_paise;
@@ -460,15 +476,16 @@ void TestPaperRehydration() {
   PaperOrder* too_big = preflight.CreateIntent(
       "CCC", OrderSide::kBuy, 1000, Money::FromRupees(100.0), &error);
   Check(too_big != nullptr, "oversized intent accepted for preflight test");
-  Check(preflight.RiskApprove(too_big->id, &error) &&
-            preflight.Submit(too_big->id, &error) &&
-            preflight.Acknowledge(too_big->id, &error),
-        "oversized order advanced");
+  Check(
+      preflight.RiskApprove(too_big->id, ApprovedDecision(*too_big), &error) &&
+          preflight.Submit(too_big->id, &error) &&
+          preflight.Acknowledge(too_big->id, &error),
+      "oversized order advanced");
   Quote affordable = GoodQuote(100.0);
   affordable.symbol = "CCC";
   affordable.ask = 100.0;
   affordable.ask_qty = 1000;
-  Check(preflight.ApplyQuote(too_big->id, affordable, 2000, &error),
+  Check(preflight.ApplyQuote(too_big->id, affordable, NowMs(), &error),
         "oversized fill simulated");
   Check(!preflight.Reconcile(too_big->id, &error),
         "posting rejected by portfolio preflight");
@@ -526,7 +543,7 @@ void TestPaperOrderReducer() {
   PaperOrder* order = broker.CreateIntent(
       "AAA", OrderSide::kBuy, 4, Money::FromRupees(200.0), &error);
   Check(order != nullptr, "order intent created");
-  broker.RiskApprove(order->id, &error);
+  broker.RiskApprove(order->id, ApprovedDecision(*order), &error);
   broker.Submit(order->id, &error);
   broker.Acknowledge(order->id, &error);
   const size_t events_before = journal.Replay(&error).size();
@@ -534,7 +551,7 @@ void TestPaperOrderReducer() {
   quote.symbol = "AAA";
   quote.ask = 100.0;
   quote.ask_qty = 4;
-  Check(broker.ApplyQuote(order->id, quote, 1000, &error), "fill applied");
+  Check(broker.ApplyQuote(order->id, quote, NowMs(), &error), "fill applied");
   Check(journal.Replay(&error).size() == events_before + 1,
         "fill and state transition recorded in one event");
   Check(broker.Reconcile(order->id, &error), "fill reconciled");
@@ -804,6 +821,55 @@ void TestUniverseTransactionConsistency() {
   Check(std::string(error).find("commit") != std::string::npos ||
             std::string(error).find("mismatch") != std::string::npos,
         "mismatch failure is explicit");
+  journal.Close();
+}
+
+void TestPaperRiskAndFreshness() {
+  const std::string path = TempPath("paper_fresh.jnl");
+  std::remove(path.c_str());
+  std::string error;
+  Journal journal;
+  journal.Open(path, &error);
+  auto portfolio = std::make_shared<Portfolio>(Money::FromRupees(100000.0));
+  PaperBroker broker(TestConfig(), &journal, portfolio);
+  PaperOrder* order = broker.CreateIntent(
+      "AAA", OrderSide::kBuy, 2, Money::FromRupees(100.0), &error);
+  Check(order != nullptr, "freshness order created");
+  RiskDecision wrong = ApprovedDecision(*order);
+  wrong.approved = false;
+  Check(!broker.RiskApprove(order->id, wrong, &error),
+        "unapproved risk decision rejected");
+  Check(broker.RiskApprove(order->id, ApprovedDecision(*order), &error),
+        "approved risk decision accepted");
+  broker.Submit(order->id, &error);
+  broker.Acknowledge(order->id, &error);
+  Quote stale = GoodQuote(100.0);
+  stale.symbol = "AAA";
+  stale.provider_timestamp_ms = NowMs() - 600000;
+  stale.exchange_timestamp_ms = stale.provider_timestamp_ms;
+  stale.last_trade_timestamp_ms = stale.provider_timestamp_ms;
+  Check(!broker.ApplyQuote(order->id, stale, NowMs(), &error),
+        "stale quote cannot create a fill");
+
+  const std::string bad_path = TempPath("paper_badstate.jnl");
+  std::remove(bad_path.c_str());
+  Journal bad_journal;
+  bad_journal.Open(bad_path, &error);
+  Json::Object payload;
+  payload["order_id"] = quant::Json::String("X");
+  payload["symbol"] = quant::Json::String("AAA");
+  payload["state"] = quant::Json::String("UNKNOWN_STATE");
+  payload["quantity"] = quant::Json::Integer(1);
+  payload["side"] = quant::Json::String("BUY");
+  payload["limit_price_paise"] = quant::Json::Integer(10000);
+  Event event;
+  event.type = EventType::kPaperIntent;
+  event.payload = quant::Json::ObjectValue(payload).Dump();
+  bad_journal.Append(&event, &error);
+  PaperBroker strict(TestConfig(), &bad_journal, portfolio);
+  Check(!strict.RehydrateFromJournal(&error),
+        "unknown journal state fails rehydration closed");
+  bad_journal.Close();
   journal.Close();
 }
 
@@ -1928,7 +1994,7 @@ void TestPaperPartialAndReplay() {
   PaperOrder* order = broker.CreateIntent(
       "AAA", OrderSide::kBuy, 4, Money::FromRupees(200.0), &error);
   Check(order != nullptr, "partial-fill order created");
-  Check(broker.RiskApprove(order->id, &error) &&
+  Check(broker.RiskApprove(order->id, ApprovedDecision(*order), &error) &&
             broker.Submit(order->id, &error) &&
             broker.Acknowledge(order->id, &error),
         "partial-fill order working");
@@ -1936,7 +2002,7 @@ void TestPaperPartialAndReplay() {
   first.symbol = "AAA";
   first.ask = 100.0;
   first.ask_qty = 4;
-  Check(broker.ApplyQuote(order->id, first, 1000, &error),
+  Check(broker.ApplyQuote(order->id, first, NowMs(), &error),
         "first partial fill processed");
   Check(order->filled_quantity == 2 && order->fills.size() == 1,
         "first fill lot is two shares");
@@ -1948,7 +2014,7 @@ void TestPaperPartialAndReplay() {
   second.last = 110.0;
   second.ask = 110.0;
   second.ask_qty = 4;
-  Check(broker.ApplyQuote(order->id, second, 1001, &error),
+  Check(broker.ApplyQuote(order->id, second, NowMs(), &error),
         "second partial fill processed");
   Check(order->filled_quantity == 4 && order->fills.size() == 2,
         "second fill lot recorded separately");
@@ -2017,26 +2083,27 @@ void TestPaperExecution() {
   Check(intent->state == PaperOrderState::kIntent, "intent starts at INTENT");
   Check(broker.Submit(intent->id, &error) == false,
         "unapproved intent cannot be submitted");
-  Check(broker.RiskApprove(intent->id, &error), "risk approves intent");
+  Check(broker.RiskApprove(intent->id, ApprovedDecision(*intent), &error),
+        "risk approves intent");
   Check(broker.Submit(intent->id, &error), "approved order submitted");
   Check(broker.Acknowledge(intent->id, &error), "submission acknowledged");
 
   Quote above_limit = GoodQuote(100.0);
   above_limit.symbol = "AAA";
   above_limit.ask = 105.0;
-  Check(broker.ApplyQuote(intent->id, above_limit, 1000, &error),
+  Check(broker.ApplyQuote(intent->id, above_limit, NowMs(), &error),
         "quote above limit is accepted without fill");
   Check(intent->filled_quantity == 0, "no fill above limit");
   Quote no_depth = above_limit;
   no_depth.ask = 100.0;
   no_depth.ask_qty = 0;
-  Check(broker.ApplyQuote(intent->id, no_depth, 1001, &error),
+  Check(broker.ApplyQuote(intent->id, no_depth, NowMs(), &error),
         "touch without depth accepted");
   Check(intent->filled_quantity == 0, "limit touch without depth is no fill");
 
   Quote executable = no_depth;
   executable.ask_qty = 6;
-  Check(broker.ApplyQuote(intent->id, executable, 1002, &error),
+  Check(broker.ApplyQuote(intent->id, executable, NowMs(), &error),
         "executable quote processed");
   Check(
       intent->filled_quantity > 0 && intent->filled_quantity < intent->quantity,
@@ -2045,7 +2112,7 @@ void TestPaperExecution() {
         "partial fill state recorded");
   Check(portfolio->open_position_count() == 0,
         "fills are not posted before reconciliation");
-  Check(broker.ApplyQuote(intent->id, executable, 1003, &error),
+  Check(broker.ApplyQuote(intent->id, executable, NowMs(), &error),
         "second quote processed");
   Check(intent->state == PaperOrderState::kFilled, "order fully filled");
   Check(broker.Reconcile(intent->id, &error), "fill reconciled to portfolio");
@@ -2057,7 +2124,7 @@ void TestPaperExecution() {
   Check(portfolio->available_cash() == cash_after_reconcile &&
             portfolio->open_position_count() == 1,
         "repeated reconciliation cannot duplicate a fill");
-  Check(!broker.RiskApprove(intent->id, &error),
+  Check(!broker.RiskApprove(intent->id, ApprovedDecision(*intent), &error),
         "filled order cannot return to an earlier state");
   Check(!broker.Cancel(intent->id, &error), "filled order cannot be cancelled");
 
@@ -2073,27 +2140,29 @@ void TestPaperExecution() {
 
   PaperOrder* cancelled = broker.CreateIntent(
       "BBB", OrderSide::kBuy, 1, Money::FromRupees(10.0), &error);
-  Check(broker.RiskApprove(cancelled->id, &error) &&
-            broker.Submit(cancelled->id, &error) &&
-            broker.Acknowledge(cancelled->id, &error),
-        "cancel fixture working");
+  Check(
+      broker.RiskApprove(cancelled->id, ApprovedDecision(*cancelled), &error) &&
+          broker.Submit(cancelled->id, &error) &&
+          broker.Acknowledge(cancelled->id, &error),
+      "cancel fixture working");
   Check(broker.Cancel(cancelled->id, &error), "working order cancelled");
   Check(cancelled->state == PaperOrderState::kCancelled,
         "cancelled state recorded");
 
   PaperOrder* ambiguous = broker.CreateIntent(
       "BBB", OrderSide::kBuy, 1, Money::FromRupees(10.0), &error);
-  Check(broker.RiskApprove(ambiguous->id, &error) &&
-            broker.Submit(ambiguous->id, &error) &&
-            broker.Acknowledge(ambiguous->id, &error),
-        "ambiguous fixture working");
+  Check(
+      broker.RiskApprove(ambiguous->id, ApprovedDecision(*ambiguous), &error) &&
+          broker.Submit(ambiguous->id, &error) &&
+          broker.Acknowledge(ambiguous->id, &error),
+      "ambiguous fixture working");
   Check(broker.MarkAmbiguous(ambiguous->id, &error),
         "ambiguous outcome recorded");
   Check(!broker.Reconcile(ambiguous->id, &error),
         "ambiguous order cannot be auto-reconciled");
   PaperOrder* expiring = broker.CreateIntent(
       "BBB", OrderSide::kBuy, 1, Money::FromRupees(10.0), &error);
-  Check(broker.RiskApprove(expiring->id, &error) &&
+  Check(broker.RiskApprove(expiring->id, ApprovedDecision(*expiring), &error) &&
             broker.Submit(expiring->id, &error) &&
             broker.Acknowledge(expiring->id, &error),
         "expiry fixture working");
@@ -2605,6 +2674,7 @@ void TestTerminalAccounting() {
 int main() {
   using namespace quant;
   TestMoney();
+  TestPaperRiskAndFreshness();
   TestUniverseTransactionConsistency();
   TestEventRuntimeOrdering();
   TestDatasetManifestContract();

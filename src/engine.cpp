@@ -1471,16 +1471,28 @@ PaperOrder* PaperBroker::CreateIntent(const std::string& symbol,
   return &inserted.first->second;
 }
 
-bool PaperBroker::RiskApprove(const std::string& id, std::string* error) {
+bool PaperBroker::RiskApprove(const std::string& id,
+                              const RiskDecision& decision,
+                              std::string* error) {
   auto it = orders_.find(id);
   if (it == orders_.end() || it->second.state != PaperOrderState::kIntent) {
     if (error)
       *error = "order is not in INTENT state";
     return false;
   }
+  if (!decision.approved || decision.quantity < it->second.quantity ||
+      !decision.notional.valid() ||
+      decision.notional <
+          Money::FromPaise(it->second.limit_price.paise() *
+                           static_cast<int64_t>(it->second.quantity))) {
+    if (error)
+      *error = "authoritative risk decision does not approve this order";
+    return false;
+  }
+  it->second.risk_policy_id = decision.reason;
   return Transition(&it->second,
                     PaperOrderState::kRiskApproved,
-                    "local C++ risk gate approved",
+                    "approved by " + decision.reason,
                     error);
 }
 
@@ -1525,7 +1537,22 @@ bool PaperBroker::ApplyQuote(const std::string& id,
                              const Quote& quote,
                              int64_t now_ms,
                              std::string* error) {
-  (void)now_ms;
+  if (quote.quality == "stale" || quote.quality == "missing_depth" ||
+      quote.quality == "cross_provider_mismatch") {
+    if (error)
+      *error = "quote quality rejects fill";
+    return false;
+  }
+  const int64_t stale_ms =
+      static_cast<int64_t>(config_.stale_quote_seconds) * 1000;
+  const int64_t quote_ms = std::max({quote.provider_timestamp_ms,
+                                     quote.exchange_timestamp_ms,
+                                     quote.last_trade_timestamp_ms});
+  if (quote_ms <= 0 || now_ms - quote_ms > stale_ms || quote_ms > now_ms) {
+    if (error)
+      *error = "stale or invalid quote timestamp";
+    return false;
+  }
   auto it = orders_.find(id);
   if (it == orders_.end() ||
       (it->second.state != PaperOrderState::kAcknowledged &&
@@ -1568,10 +1595,8 @@ bool PaperBroker::ApplyQuote(const std::string& id,
   int64_t previous_notional = 0;
   int64_t added_notional = 0;
   int64_t total_notional = 0;
-  if (!money_detail::CheckedMultiply(
-          order.average_fill.paise(),
-          static_cast<int64_t>(order.filled_quantity),
-          &previous_notional) ||
+  if (!money_detail::CheckedAdd(
+          order.cumulative_notional_paise, added_notional, &total_notional) ||
       !money_detail::CheckedMultiply(
           price.paise(), static_cast<int64_t>(fill), &added_notional) ||
       !money_detail::CheckedAdd(
@@ -1723,7 +1748,7 @@ PaperOrderState ParsePaperState(const std::string& name) {
       {"AMBIGUOUS", PaperOrderState::kAmbiguous},
   };
   const auto it = names.find(name);
-  return it == names.end() ? PaperOrderState::kIntent : it->second;
+  return it == names.end() ? PaperOrderState::kAmbiguous : it->second;
 }
 
 bool PaperBroker::RehydrateFromJournal(std::string* error) {
@@ -1821,6 +1846,11 @@ bool PaperBroker::RehydrateFromJournal(std::string* error) {
     optional_text("config_version", &order.config_version);
     optional_text("execution_model", &order.execution_model);
     order.state = ParsePaperState(state->as_string());
+    if (order.state == PaperOrderState::kAmbiguous) {
+      if (error)
+        *error = "unknown paper order state in journal";
+      return false;
+    }
     const Json* quantity = payload.Find("quantity");
     order.quantity =
         quantity == nullptr ? 0 : static_cast<int>(quantity->as_int(0));
