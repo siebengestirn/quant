@@ -157,3 +157,61 @@ def test_experiment_registry_is_append_only(tmp_path):
     )
     assert len(lines) == 2
     assert research.json.loads(lines[0])["id"] == first
+
+
+def test_dataset_quality_reports_missing_and_malformed():
+    rows = [
+        {
+            "date": "D1",
+            "open": 10,
+            "high": 11,
+            "low": 9,
+            "close": 10,
+            "volume": 100,
+        },
+        {
+            "date": "D2",
+            "open": 10,
+            "high": 11,
+            "low": 9,
+            "close": 0,
+            "volume": 100,
+        },
+        {
+            "date": "D2",
+            "open": 10,
+            "high": 11,
+            "low": 9,
+            "close": 10,
+            "volume": 100,
+        },
+        {
+            "date": "D3",
+            "open": 10,
+            "high": 11,
+            "low": 9,
+            "close": 10,
+            "volume": 100,
+        },
+    ]
+    result = research.dataset_quality(rows, ["D1", "D2", "D3", "D4"])
+    assert result["status"] == "PARTIAL"
+    assert result["missing_sessions"] == ["D4"]
+    assert result["duplicate_count"] == 1
+    assert result["invalid_bar_count"] == 1
+    complete = research.dataset_quality(rows[:1], ["D1"])
+    assert complete["status"] == "COMPLETE"
+
+
+def test_point_in_time_universe_ignores_future_status():
+    records = [
+        {"symbol": "AAA", "eligible": True, "effective_from": "2020-01-01"},
+        {"symbol": "BBB", "eligible": True, "effective_from": "2021-01-01"},
+        {
+            "symbol": "AAA",
+            "eligible": False,
+            "effective_from": "2022-01-01",
+        },
+    ]
+    assert research.point_in_time_universe(records, "2020-06-01") == ["AAA"]
+    assert research.point_in_time_universe(records, "2022-06-01") == ["BBB"]
