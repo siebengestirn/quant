@@ -49,6 +49,7 @@ const char* StatusName(DatasetStatus status) {
 struct App {
   Config config;
   Journal journal;
+  std::shared_ptr<std::recursive_mutex> risk_authority_lock;
   std::shared_ptr<DailyRiskState> risk_state =
       std::make_shared<DailyRiskState>();
   DatasetVerification dataset_status;
@@ -93,11 +94,13 @@ App Initialize(std::string* error) {
     *error = "universe publication recovery failed: " + universe_recovery_error;
     return app;
   }
+  app.risk_authority_lock = std::make_shared<std::recursive_mutex>();
   app.paper_broker = std::make_shared<PaperBroker>(
       app.config,
       &app.journal,
       std::make_shared<Portfolio>(app.config.initial_capital),
       app.risk_state);
+  app.paper_broker->ShareAuthorityLock(app.risk_authority_lock);
   std::string paper_error;
   if (!app.paper_broker->RehydrateFromJournal(&paper_error)) {
     app.journal.Close();
@@ -835,6 +838,7 @@ DailyReport BuildReport(App& app, bool* ok) {
 
   Portfolio paper(app.config.initial_capital);
   RiskEngine risk(app.config, app.risk_state, &app.journal);
+  risk.ShareAuthorityLock(app.risk_authority_lock);
   const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
                           std::chrono::system_clock::now().time_since_epoch())
                           .count();

@@ -1597,6 +1597,7 @@ PaperOrder* PaperBroker::CreateIntent(const std::string& symbol,
   order.correlation_id = order.id;
   ++next_id_;
   order.symbol = symbol;
+  order.instrument_key = symbol + "-PERMANENT";
   order.side = side;
   order.quantity = quantity;
   order.limit_price = limit_price;
@@ -1609,8 +1610,10 @@ PaperOrder* PaperBroker::CreateIntent(const std::string& symbol,
 
 bool PaperBroker::RiskApprove(const std::string& id,
                               const RiskAuthorization& authorization,
+                              const Quote& market_snapshot,
                               int64_t now_ms,
                               std::string* error) {
+  std::lock_guard<std::recursive_mutex> guard(*authority_lock_);
   auto it = orders_.find(id);
   if (it == orders_.end() || it->second.state != PaperOrderState::kIntent) {
     if (error)
@@ -1618,6 +1621,8 @@ bool PaperBroker::RiskApprove(const std::string& id,
     return false;
   }
   if (!authorization.Verify(it->second, config_, now_ms, error))
+    return false;
+  if (!authorization.VerifyMarketDataSnapshot(market_snapshot, error))
     return false;
   if (risk_state_ == nullptr ||
       !authorization.VerifyRiskState(*risk_state_, now_ms, error))
@@ -3487,6 +3492,7 @@ RiskDecision RiskEngine::Evaluate(const Signal& signal,
                                   const Portfolio& portfolio,
                                   int64_t now_ms,
                                   OrderSide side) {
+  std::lock_guard<std::recursive_mutex> guard(*authority_lock_);
   RiskDecision decision;
   decision.notional = Money::FromRupees(0.0);
   auto reject = [&decision](const std::string& reason) {
@@ -3496,11 +3502,13 @@ RiskDecision RiskEngine::Evaluate(const Signal& signal,
     return decision;
   };
 
-  if (signal.symbol.empty() || quote.symbol != signal.symbol)
-    return reject("signal and quote instrument identity do not match");
-  if (!signal.permanent_id.empty() && !quote.provider_key.empty() &&
-      signal.permanent_id != quote.provider_key)
-    return reject("permanent instrument identity does not match quote");
+  if (signal.symbol.empty() || quote.symbol != signal.symbol ||
+      signal.permanent_id.empty() || quote.permanent_id.empty() ||
+      signal.permanent_id != quote.permanent_id || signal.venue.empty() ||
+      quote.venue.empty() || signal.venue != quote.venue ||
+      signal.listing_id.empty() || quote.listing_id.empty() ||
+      signal.listing_id != quote.listing_id)
+    return reject("signal and quote identity do not match");
   const std::string session = UtcSessionDate(now_ms);
   const Money equity = portfolio.equity();
   if (!equity.valid()) {
@@ -3641,6 +3649,10 @@ std::string RiskAuthorization::ComputeSignature() const {
   add(order_id_);
   add(account_id_);
   add(instrument_id_);
+  add(venue_);
+  add(listing_id_);
+  add(std::to_string(static_cast<int>(market_data_source_)));
+  add(std::to_string(market_data_version_));
   add(symbol_);
   add(side_ == OrderSide::kBuy ? "BUY" : "SELL");
   add(std::to_string(quantity_));
@@ -3666,7 +3678,8 @@ bool RiskAuthorization::Verify(const PaperOrder& order,
   if (order.id != order_id_ || order.symbol != symbol_ || order.side != side_ ||
       order.quantity != quantity_ ||
       order.limit_price.paise() != limit_price_paise_ ||
-      order.instrument_key != instrument_id_)
+      order.instrument_key != instrument_id_ || order.venue != venue_ ||
+      order.listing_id != listing_id_)
     return fail("risk authorization is not bound to this order");
   if (config.account_id != account_id_)
     return fail("risk authorization account mismatch");
@@ -3679,6 +3692,23 @@ bool RiskAuthorization::Verify(const PaperOrder& order,
     return fail("risk authorization notional does not cover the order");
   if (ComputeSignature() != signature_)
     return fail("risk authorization signature mismatch");
+  return true;
+}
+
+bool RiskAuthorization::VerifyMarketDataSnapshot(const Quote& quote,
+                                                 std::string* error) const {
+  auto fail = [error](const char* reason) {
+    if (error)
+      *error = reason;
+    return false;
+  };
+  if (!valid_)
+    return fail("risk authorization is not valid");
+  if (quote.symbol != symbol_ || quote.permanent_id != instrument_id_ ||
+      quote.venue != venue_ || quote.listing_id != listing_id_ ||
+      quote.source != market_data_source_ ||
+      quote.sequence != market_data_version_)
+    return fail("market snapshot does not match authorized data version");
   return true;
 }
 
@@ -3709,10 +3739,18 @@ RiskAuthorization RiskEngine::Authorize(const Signal& signal,
                                         const PaperOrder& order,
                                         int64_t now_ms) {
   RiskAuthorization auth;
-  if (signal.symbol != quote.symbol || signal.symbol != order.symbol ||
-      (!signal.permanent_id.empty() &&
-       signal.permanent_id != order.instrument_key) ||
-      signal.venue != order.venue)
+  std::lock_guard<std::recursive_mutex> guard(*authority_lock_);
+  if (signal.symbol.empty() || quote.symbol.empty() || order.symbol.empty() ||
+      signal.symbol != quote.symbol || signal.symbol != order.symbol ||
+      signal.permanent_id.empty() || quote.permanent_id.empty() ||
+      order.instrument_key.empty() ||
+      signal.permanent_id != quote.permanent_id ||
+      signal.permanent_id != order.instrument_key || signal.venue.empty() ||
+      quote.venue.empty() || order.venue.empty() ||
+      signal.venue != quote.venue || signal.venue != order.venue ||
+      signal.listing_id.empty() || quote.listing_id.empty() ||
+      order.listing_id.empty() || signal.listing_id != quote.listing_id ||
+      signal.listing_id != order.listing_id)
     return auth;
   const RiskDecision decision =
       Evaluate(signal, quote, portfolio, now_ms, order.side);
@@ -3723,6 +3761,8 @@ RiskAuthorization RiskEngine::Authorize(const Signal& signal,
   auth.account_id_ = config_.account_id;
   auth.instrument_id_ = order.instrument_key;
   auth.venue_ = order.venue;
+  auth.listing_id_ = order.listing_id;
+  auth.market_data_source_ = quote.source;
   auth.market_data_version_ = quote.sequence;
   auth.symbol_ = order.symbol;
   auth.side_ = order.side;

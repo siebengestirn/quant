@@ -16,6 +16,7 @@
 #include <map>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
@@ -417,7 +418,10 @@ struct Instrument {
 
 struct Quote {
   std::string symbol;
+  std::string permanent_id;
   std::string provider_key;
+  std::string venue = "NSE";
+  std::string listing_id = "NSE-EQ";
   Provider source = Provider::kSynthetic;
   double last = 0.0;
   double bid = 0.0;
@@ -465,6 +469,7 @@ struct Signal {
   std::string symbol;
   std::string permanent_id;
   std::string venue = "NSE";
+  std::string listing_id = "NSE-EQ";
   std::string strategy;
   double score = 0.0;
   double confidence = 0.0;
@@ -776,6 +781,7 @@ class RiskAuthorization {
   bool VerifyRiskState(const DailyRiskState& state,
                        int64_t now_ms,
                        std::string* error) const;
+  bool VerifyMarketDataSnapshot(const Quote& quote, std::string* error) const;
 
  private:
   friend class RiskEngine;
@@ -785,6 +791,8 @@ class RiskAuthorization {
   std::string account_id_;
   std::string instrument_id_;
   std::string venue_;
+  std::string listing_id_;
+  Provider market_data_source_ = Provider::kSynthetic;
   int64_t market_data_version_ = 0;
   std::string symbol_;
   OrderSide side_ = OrderSide::kBuy;
@@ -923,11 +931,15 @@ class RiskEngine {
   const DailyRiskState& daily_state() const {
     return *state_;
   }
+  void ShareAuthorityLock(std::shared_ptr<std::recursive_mutex> lock) {
+    authority_lock_ = std::move(lock);
+  }
 
  private:
   Config config_;
   std::shared_ptr<DailyRiskState> state_;
   Journal* journal_ = nullptr;
+  std::shared_ptr<std::recursive_mutex> authority_lock_ = std::make_shared<std::recursive_mutex>();
 };
 
 // ---------------------------------------------------------------------------
@@ -1181,6 +1193,7 @@ struct PaperOrder {
   std::string client_order_id;
   std::string instrument_key;
   std::string venue = "NSE";
+  std::string listing_id = "NSE-EQ";
   std::string order_type = "LIMIT";
   std::string time_in_force = "DAY";
   std::string risk_policy_id;
@@ -1208,6 +1221,7 @@ class PaperBroker {
                            std::string* error);
   bool RiskApprove(const std::string& id,
                    const RiskAuthorization& authorization,
+                   const Quote& market_snapshot,
                    int64_t now_ms,
                    std::string* error);
   bool Reject(const std::string& id,
@@ -1225,6 +1239,9 @@ class PaperBroker {
   bool Reconcile(const std::string& id, std::string* error);
   bool RehydrateFromJournal(std::string* error);
   const PaperOrder* Find(const std::string& id) const;
+  void ShareAuthorityLock(std::shared_ptr<std::recursive_mutex> lock) {
+    authority_lock_ = std::move(lock);
+  }
   size_t order_count() const {
     return orders_.size();
   }
@@ -1245,6 +1262,7 @@ class PaperBroker {
   std::map<std::string, PaperOrder> orders_;
   std::set<std::string> posted_ids_;
   std::set<std::string> consumed_authorizations_;
+  std::shared_ptr<std::recursive_mutex> authority_lock_ = std::make_shared<std::recursive_mutex>();
   uint64_t next_id_ = 1;
 };
 
