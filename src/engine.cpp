@@ -992,6 +992,186 @@ bool KdbxRecoveryPlan(const KdbxCheckpoint& checkpoint,
 }
 
 // ---------------------------------------------------------------------------
+// Canonical market-data pipeline.
+// ---------------------------------------------------------------------------
+const char* PipelineStatusName(PipelineStatus status) {
+  switch (status) {
+    case PipelineStatus::kComplete:
+      return "COMPLETE";
+    case PipelineStatus::kPartial:
+      return "PARTIAL";
+    case PipelineStatus::kFailed:
+      return "FAILED";
+    case PipelineStatus::kBlocked:
+      return "BLOCKED";
+  }
+  return "UNKNOWN";
+}
+
+MarketDataPipeline::MarketDataPipeline(Journal* journal) : journal_(journal) {
+}
+
+bool MarketDataPipeline::IngestQuote(const Quote& quote, std::string* error) {
+  if (journal_ == nullptr || !journal_->healthy()) {
+    if (error)
+      *error = "market-data journal unavailable";
+    return false;
+  }
+  if (quote.symbol.empty() || quote.provider_key.empty() ||
+      !(quote.last > 0.0) || !(quote.bid > 0.0) || !(quote.ask >= quote.bid) ||
+      quote.ask_qty <= 0 || quote.bid_qty <= 0 || !std::isfinite(quote.last) ||
+      !std::isfinite(quote.bid) || !std::isfinite(quote.ask) ||
+      quote.exchange_timestamp_ms <= 0 || quote.provider_timestamp_ms <= 0 ||
+      quote.receive_timestamp_ms <= 0) {
+    if (error)
+      *error = "canonical quote failed validation";
+    return false;
+  }
+  Json::Object payload;
+  payload["symbol"] = Json::String(quote.symbol);
+  payload["provider_key"] = Json::String(quote.provider_key);
+  payload["source"] = Json::Number(static_cast<int>(quote.source));
+  payload["last"] = Json::Number(quote.last);
+  payload["bid"] = Json::Number(quote.bid);
+  payload["ask"] = Json::Number(quote.ask);
+  payload["bid_qty"] = Json::Number(quote.bid_qty);
+  payload["ask_qty"] = Json::Number(quote.ask_qty);
+  payload["volume"] = Json::Number(quote.volume);
+  payload["exchange_timestamp_ms"] = Json::Number(quote.exchange_timestamp_ms);
+  payload["provider_timestamp_ms"] = Json::Number(quote.provider_timestamp_ms);
+  payload["last_trade_timestamp_ms"] =
+      Json::Number(quote.last_trade_timestamp_ms);
+  payload["receive_timestamp_ms"] = Json::Number(quote.receive_timestamp_ms);
+  payload["quality"] = Json::String(quote.quality);
+  Event event;
+  event.type = EventType::kQuote;
+  event.payload = Json::ObjectValue(payload).Dump();
+  return journal_->Append(&event, error);
+}
+
+bool MarketDataPipeline::IngestBar(const Candle& candle,
+                                   const std::string& symbol,
+                                   std::string* error) {
+  if (journal_ == nullptr || !journal_->healthy()) {
+    if (error)
+      *error = "market-data journal unavailable";
+    return false;
+  }
+  if (symbol.empty() || candle.date.empty() || !(candle.close > 0.0) ||
+      !(candle.high >= candle.close) || !(candle.low <= candle.close) ||
+      !(candle.volume >= 0.0) || !std::isfinite(candle.close) ||
+      !std::isfinite(candle.high) || !std::isfinite(candle.low) ||
+      !std::isfinite(candle.volume)) {
+    if (error)
+      *error = "canonical bar failed validation";
+    return false;
+  }
+  Json::Object payload;
+  payload["symbol"] = Json::String(symbol);
+  payload["date"] = Json::String(candle.date);
+  payload["open"] = Json::Number(candle.open);
+  payload["high"] = Json::Number(candle.high);
+  payload["low"] = Json::Number(candle.low);
+  payload["close"] = Json::Number(candle.close);
+  payload["volume"] = Json::Number(candle.volume);
+  Event event;
+  event.type = EventType::kCandle;
+  event.payload = Json::ObjectValue(payload).Dump();
+  return journal_->Append(&event, error);
+}
+
+PipelineResult MarketDataPipeline::Publish(const KdbxCheckpoint& checkpoint,
+                                           MarketDataPublisher* publisher,
+                                           std::string* error) {
+  PipelineResult result;
+  if (publisher == nullptr || journal_ == nullptr) {
+    result.status = PipelineStatus::kBlocked;
+    result.detail = "publisher or journal unavailable";
+    if (error)
+      *error = result.detail;
+    return result;
+  }
+  std::string replay_error;
+  const std::vector<Event> events = journal_->Replay(&replay_error);
+  if (!replay_error.empty()) {
+    result.status = PipelineStatus::kFailed;
+    result.detail = replay_error;
+    if (error)
+      *error = replay_error;
+    return result;
+  }
+  for (const Event& event : events) {
+    if (event.sequence <= checkpoint.journal_watermark)
+      continue;
+    if (event.type != EventType::kQuote && event.type != EventType::kCandle) {
+      ++result.skipped;
+      continue;
+    }
+    Json payload;
+    if (!Json::Parse(event.payload, &payload, error)) {
+      result.status = PipelineStatus::kFailed;
+      result.detail = "undecodable canonical event";
+      return result;
+    }
+    bool ok = false;
+    if (event.type == EventType::kQuote) {
+      Quote quote;
+      const Json* symbol = payload.Find("symbol");
+      const Json* key = payload.Find("provider_key");
+      quote.symbol = symbol == nullptr ? "" : symbol->as_string();
+      quote.provider_key = key == nullptr ? "" : key->as_string();
+      auto number = [&payload](const char* field) {
+        const Json* value = payload.Find(field);
+        return value == nullptr ? 0.0 : value->as_double(0.0);
+      };
+      quote.last = number("last");
+      quote.bid = number("bid");
+      quote.ask = number("ask");
+      quote.volume = number("volume");
+      quote.exchange_timestamp_ms =
+          static_cast<int64_t>(number("exchange_timestamp_ms"));
+      quote.provider_timestamp_ms =
+          static_cast<int64_t>(number("provider_timestamp_ms"));
+      quote.last_trade_timestamp_ms =
+          static_cast<int64_t>(number("last_trade_timestamp_ms"));
+      quote.receive_timestamp_ms =
+          static_cast<int64_t>(number("receive_timestamp_ms"));
+      const Json* quality = payload.Find("quality");
+      quote.quality = quality == nullptr ? "" : quality->as_string();
+      ok = publisher->PublishQuote(quote, event.sequence, event.id, error);
+    } else {
+      Candle candle;
+      const Json* date = payload.Find("date");
+      candle.date = date == nullptr ? "" : date->as_string();
+      auto number = [&payload](const char* field) {
+        const Json* value = payload.Find(field);
+        return value == nullptr ? 0.0 : value->as_double(0.0);
+      };
+      candle.open = number("open");
+      candle.high = number("high");
+      candle.low = number("low");
+      candle.close = number("close");
+      candle.volume = number("volume");
+      const Json* symbol = payload.Find("symbol");
+      ok = publisher->PublishBar(
+          candle, symbol == nullptr ? "" : symbol->as_string(), error);
+    }
+    if (!ok) {
+      result.status = PipelineStatus::kFailed;
+      result.detail =
+          "publisher rejected sequence " + std::to_string(event.sequence);
+      return result;
+    }
+    ++result.published;
+  }
+  result.status = PipelineStatus::kComplete;
+  result.detail = "committed events projected";
+  if (error)
+    error->clear();
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // Paper execution: local simulated order lifecycle. No broker endpoint is
 // reachable from this class by construction.
 // ---------------------------------------------------------------------------
