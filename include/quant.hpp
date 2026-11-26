@@ -1326,6 +1326,23 @@ struct UniverseRecoveryReport {
   std::vector<std::string> unresolved;
 };
 
+// One immutable transaction identity record, shared by publication and
+// recovery. A transaction ID names exactly one payload and one commit.
+struct UniverseTransaction {
+  std::string id;
+  std::string digest;
+  size_t size = 0;
+  bool published = false;
+  bool committed = false;
+  size_t publishes = 0;
+  size_t commits = 0;
+};
+// Build the set of transactions from the journal. Conflicting records are a
+// journal integrity failure and always return false with a structured reason.
+bool LoadUniverseTransactions(Journal* journal,
+                              std::map<std::string, UniverseTransaction>* out,
+                              std::string* error);
+
 bool RecoverUniversePublication(const std::string& path,
                                 Journal* journal,
                                 UniverseRecoveryReport* report,

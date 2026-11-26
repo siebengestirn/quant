@@ -181,8 +181,10 @@ bool DownloadGzipJson(const HttpClient& http,
 
 namespace {
 
+// Universe audit identity uses the same SHA-256 algorithm as the dataset
+// contract, so a content digest has one meaning across the whole system.
 std::string UniverseAuditDigest(const std::string& content) {
-  return ChecksumHex(content);
+  return Sha256Hex(content);
 }
 
 bool AppendUniverseAudit(Journal* journal,
@@ -206,6 +208,76 @@ bool AppendUniverseAudit(Journal* journal,
   event.type = EventType::kHeartbeat;
   event.payload = Json::ObjectValue(payload).Dump();
   return journal->Append(&event, error);
+}
+
+bool BuildUniverseTransactions(Journal* journal,
+                               std::map<std::string, UniverseTransaction>* out,
+                               std::string* error) {
+  if (journal == nullptr || out == nullptr) {
+    if (error)
+      *error = "transaction reconstruction requires a journal";
+    return false;
+  }
+  out->clear();
+  auto fail = [error](const std::string& reason) {
+    if (error)
+      *error = reason;
+    return false;
+  };
+  const std::vector<Event> events = journal->Replay(error);
+  if (error != nullptr && !error->empty())
+    return false;
+  for (const Event& event : events) {
+    if (event.type != EventType::kHeartbeat)
+      continue;
+    Json payload;
+    if (!Json::Parse(event.payload, &payload, error))
+      return fail("universe transaction record is not valid JSON");
+    const Json* action = payload.Find("action");
+    const Json* tx = payload.Find("transaction_id");
+    const Json* digest = payload.Find("content_digest");
+    const Json* size = payload.Find("records");
+    if (action == nullptr || tx == nullptr || digest == nullptr ||
+        size == nullptr || action->type() != Json::Type::kString ||
+        tx->type() != Json::Type::kString ||
+        digest->type() != Json::Type::kString || !size->is_exact_integer() ||
+        (action->as_string() != "UNIVERSE_PUBLISH" &&
+         action->as_string() != "UNIVERSE_PUBLISH_COMMIT"))
+      return fail("malformed universe transaction record");
+    const std::string id = tx->as_string();
+    const std::string value = digest->as_string();
+    const int64_t records = size->as_int(0);
+    if (id.empty() || value.empty() || records < 0)
+      return fail("malformed universe transaction identity");
+    UniverseTransaction& transaction = (*out)[id];
+    if (transaction.id.empty())
+      transaction.id = id;
+    if (action->as_string() == "UNIVERSE_PUBLISH") {
+      if (transaction.published &&
+          (transaction.digest != value ||
+           transaction.size != static_cast<size_t>(records)))
+        return fail("transaction id reused with a different payload");
+      if (transaction.committed &&
+          (transaction.digest != value ||
+           transaction.size != static_cast<size_t>(records)))
+        return fail("committed transaction id reused with a different payload");
+      transaction.digest = value;
+      transaction.size = static_cast<size_t>(records);
+      transaction.published = true;
+      ++transaction.publishes;
+    } else {
+      if (!transaction.published)
+        return fail("commit without a publish record");
+      if (transaction.digest != value ||
+          transaction.size != static_cast<size_t>(records))
+        return fail("commit record conflicts with its publish record");
+      transaction.committed = true;
+      ++transaction.commits;
+      if (transaction.commits > 1)
+        return fail("duplicate commit record for one transaction");
+    }
+  }
+  return true;
 }
 
 bool SyncDirectory(const std::string& path, std::string* error) {
@@ -270,17 +342,47 @@ bool PublishUniverse(const std::string& path,
                      const std::string& transaction_id,
                      PublicationFailurePoint inject,
                      std::string* error) {
-  if (transaction_id.empty()) {
+  auto fail = [error](const std::string& reason) {
     if (error)
-      *error = "publication transaction id required";
+      *error = reason;
     return false;
+  };
+  if (transaction_id.empty())
+    return fail("publication transaction id required");
+  std::map<std::string, UniverseTransaction> known;
+  if (!BuildUniverseTransactions(journal, &known, error))
+    return false;
+  const std::string digest = UniverseAuditDigest(content);
+  const auto prior = known.find(transaction_id);
+  if (prior != known.end()) {
+    if (prior->second.digest != digest || prior->second.size != content.size())
+      return fail("transaction id reused with a different payload");
+    if (prior->second.committed) {
+      std::ifstream published(path, std::ios::binary);
+      const std::string current((std::istreambuf_iterator<char>(published)),
+                                std::istreambuf_iterator<char>());
+      if (UniverseAuditDigest(current) != digest ||
+          current.size() != content.size())
+        return fail("committed transaction target was modified externally");
+      return true;  // Idempotent retry: no rewrite and no new audit record.
+    }
+    return fail("pending transaction requires recovery, not a new publish");
   }
   const std::string staged = path + ".staging." + transaction_id;
+  if (std::filesystem::exists(staged))
+    return fail("transaction staging path already exists");
   if (!WriteAndSyncFile(staged, content, error))
     return false;
   if (!SyncDirectory(staged, error))
     return false;
-  const std::string digest = UniverseAuditDigest(content);
+  const std::string staged_content = [](const std::string& p) {
+    std::ifstream input(p, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(input)),
+                       std::istreambuf_iterator<char>());
+  }(staged);
+  if (UniverseAuditDigest(staged_content) != digest ||
+      staged_content.size() != content.size())
+    return fail("staged content digest does not match transaction identity");
   if (!AppendUniverseAudit(journal,
                            "UNIVERSE_PUBLISH",
                            transaction_id,
@@ -290,15 +392,18 @@ bool PublishUniverse(const std::string& path,
     return false;
   if (inject == PublicationFailurePoint::kAfterAuditBeforeRename)
     return false;
-  if (rename(staged.c_str(), path.c_str()) != 0) {
-    if (error)
-      *error = "universe publication rename failed";
-    return false;
-  }
+  if (rename(staged.c_str(), path.c_str()) != 0)
+    return fail("universe publication rename failed");
   if (!SyncDirectory(path, error))
     return false;
   if (inject == PublicationFailurePoint::kAfterRenameBeforeCommit)
     return false;
+  std::ifstream final_input(path, std::ios::binary);
+  const std::string final_content((std::istreambuf_iterator<char>(final_input)),
+                                  std::istreambuf_iterator<char>());
+  if (UniverseAuditDigest(final_content) != digest ||
+      final_content.size() != content.size())
+    return fail("published content digest does not match transaction identity");
   return AppendUniverseAudit(journal,
                              "UNIVERSE_PUBLISH_COMMIT",
                              transaction_id,
@@ -311,64 +416,20 @@ bool RecoverUniversePublication(const std::string& path,
                                 Journal* journal,
                                 UniverseRecoveryReport* report,
                                 std::string* error) {
-  if (journal == nullptr) {
+  auto fail = [error](const std::string& reason) {
     if (error)
-      *error = "recovery requires a journal";
+      *error = reason;
     return false;
-  }
-  struct Transaction {
-    std::string digest;
-    size_t size = 0;
-    bool committed = false;
   };
   UniverseRecoveryReport local;
-  const std::vector<Event> events = journal->Replay(error);
-  if (error != nullptr && !error->empty())
+  std::map<std::string, UniverseTransaction> transactions;
+  if (!BuildUniverseTransactions(journal, &transactions, error))
     return false;
-  std::map<std::string, Transaction> transactions;
-  for (const Event& event : events) {
-    if (event.type != EventType::kHeartbeat)
-      continue;
-    Json payload;
-    if (!Json::Parse(event.payload, &payload, error))
-      return false;
-    const Json* action = payload.Find("action");
-    const Json* tx = payload.Find("transaction_id");
-    if (action == nullptr || tx == nullptr ||
-        action->type() != Json::Type::kString ||
-        tx->type() != Json::Type::kString)
-      continue;
-    const std::string id = tx->as_string();
-    const std::string name = action->as_string();
-    const Json* digest = payload.Find("content_digest");
-    const Json* size = payload.Find("records");
-    if (digest == nullptr || size == nullptr ||
-        digest->type() != Json::Type::kString || !size->is_exact_integer())
-      return false;
-    Transaction& transaction = transactions[id];
-    if (name == "UNIVERSE_PUBLISH") {
-      if (!transaction.digest.empty() &&
-          (transaction.digest != digest->as_string() ||
-           transaction.size != static_cast<size_t>(size->as_int(0))))
-        return false;
-      transaction.digest = digest->as_string();
-      transaction.size = static_cast<size_t>(size->as_int(0));
-    } else if (name == "UNIVERSE_PUBLISH_COMMIT") {
-      if (transaction.digest != digest->as_string() ||
-          transaction.size != static_cast<size_t>(size->as_int(0))) {
-        if (error)
-          *error = "universe commit mismatches publish record";
-        return false;
-      }
-      transaction.committed = true;
+  for (const auto& [id, transaction] : transactions) {
+    if (transaction.committed) {
       ++local.committed;
-    }
-  }
-  local.recovered = 0;
-  std::vector<std::string> unresolved;
-  for (auto& [id, transaction] : transactions) {
-    if (transaction.committed)
       continue;
+    }
     const std::string staged = path + ".staging." + id;
     bool published = false;
     std::string content;
@@ -378,11 +439,8 @@ bool RecoverUniversePublication(const std::string& path,
                      std::istreambuf_iterator<char>());
       if (UniverseAuditDigest(content) == transaction.digest &&
           content.size() == transaction.size) {
-        if (rename(staged.c_str(), path.c_str()) != 0) {
-          if (error)
-            *error = "universe recovery rename failed";
-          return false;
-        }
+        if (rename(staged.c_str(), path.c_str()) != 0)
+          return fail("universe recovery rename failed");
         published = true;
       }
     }
@@ -395,7 +453,7 @@ bool RecoverUniversePublication(const std::string& path,
         published = true;
     }
     if (!published) {
-      unresolved.push_back(id);
+      local.unresolved.push_back(id);
       continue;
     }
     if (!SyncDirectory(path, error))
@@ -407,18 +465,13 @@ bool RecoverUniversePublication(const std::string& path,
                              transaction.size,
                              error))
       return false;
-    transaction.committed = true;
     ++local.recovered;
   }
-  local.unresolved = unresolved;
   if (report)
     *report = local;
-  if (!unresolved.empty()) {
-    if (error)
-      *error = "unresolved universe publication transactions: " +
-               std::to_string(unresolved.size());
-    return false;
-  }
+  if (!local.unresolved.empty())
+    return fail("unresolved universe publication transactions: " +
+                std::to_string(local.unresolved.size()));
   return true;
 }
 
