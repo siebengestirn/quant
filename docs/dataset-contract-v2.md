@@ -63,7 +63,7 @@ must equal the literal string `sha256`, and an unknown value is a hard failure.
 The storage key is the sole physical filename. It is derived from the permanent
 instrument identity, never from the provider symbol:
 
-```
+```text
 key = "s" + first 31 hex characters of SHA256(
         "QUANT-DATASET-STORAGE-V1\n" + instrument_id)
 ```

@@ -44,8 +44,7 @@ def _spec(symbols: list[str], sessions: list[str]) -> dict:
         "min_rows": 1,
         "instrument_ids": {symbol: f"ID-{symbol}" for symbol in symbols},
         "storage_keys": {
-            symbol: contract.storage_key(f"ID-{symbol}")
-            for symbol in symbols
+            symbol: contract.storage_key(f"ID-{symbol}") for symbol in symbols
         },
     }
 
