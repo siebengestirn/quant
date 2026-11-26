@@ -356,6 +356,83 @@ void TestDeterministicEventRuntime() {
   Check(replay.result().processed == 5, "no replayed event applied twice");
 }
 
+void TestPaperRehydration() {
+  const std::string path = TempPath("paper_rehydrate.jnl");
+  std::remove(path.c_str());
+  std::string error;
+  Journal journal;
+  Check(journal.Open(path, &error), "rehydration journal opens");
+  auto portfolio = std::make_shared<Portfolio>(Money::FromRupees(100000.0));
+  Config config = TestConfig();
+  config.max_participation_fraction = 0.5;
+  PaperBroker first(config, &journal, portfolio);
+  PaperOrder* order = first.CreateIntent(
+      "AAA", OrderSide::kBuy, 4, Money::FromRupees(200.0), &error);
+  Check(order != nullptr, "order created for rehydration");
+  const std::string original_id = order->id;
+  Check(first.RiskApprove(order->id, &error) &&
+            first.Submit(order->id, &error) &&
+            first.Acknowledge(order->id, &error),
+        "order advanced for rehydration");
+  Quote quote = GoodQuote(100.0);
+  quote.symbol = "AAA";
+  quote.ask = 100.0;
+  quote.ask_qty = 4;
+  Check(first.ApplyQuote(order->id, quote, 1000, &error),
+        "fill created for rehydration");
+  Check(first.Reconcile(order->id, &error), "fill reconciled");
+  const int64_t notional = order->cumulative_notional_paise;
+  Check(notional == 20000, "cumulative notional preserved exactly");
+
+  PaperBroker second(config, &journal, portfolio);
+  Check(second.RehydrateFromJournal(&error), "orders rehydrated from journal");
+  const PaperOrder* restored = second.Find(original_id);
+  Check(restored != nullptr && restored->fills.size() == 1,
+        "fill lot rehydrated once");
+  Check(restored->cumulative_notional_paise == notional,
+        "cumulative notional rehydrated exactly");
+  Check(restored->posted_fill_count == 1, "posting state rehydrated");
+  Check(second.Reconcile(original_id, &error),
+        "reconcile after restart is idempotent");
+  Check(portfolio->open_position_count() == 1,
+        "restart does not duplicate portfolio posting");
+
+  PaperOrder* fresh = second.CreateIntent(
+      "BBB", OrderSide::kBuy, 1, Money::FromRupees(10.0), &error);
+  Check(fresh != nullptr && fresh->id != original_id,
+        "restarted broker does not reuse order ids");
+
+  auto poor = std::make_shared<Portfolio>(Money::FromRupees(1.0));
+  PaperBroker preflight(config, &journal, poor);
+  Check(preflight.RehydrateFromJournal(&error), "preflight broker rehydrated");
+  auto accounting_events = [&]() {
+    size_t count = 0;
+    for (const Event& event : journal.Replay(&error))
+      if (event.type == EventType::kAccounting)
+        ++count;
+    return count;
+  };
+  const size_t before = accounting_events();
+  PaperOrder* too_big = preflight.CreateIntent(
+      "CCC", OrderSide::kBuy, 1000, Money::FromRupees(100.0), &error);
+  Check(too_big != nullptr, "oversized intent accepted for preflight test");
+  Check(preflight.RiskApprove(too_big->id, &error) &&
+            preflight.Submit(too_big->id, &error) &&
+            preflight.Acknowledge(too_big->id, &error),
+        "oversized order advanced");
+  Quote affordable = GoodQuote(100.0);
+  affordable.symbol = "CCC";
+  affordable.ask = 100.0;
+  affordable.ask_qty = 1000;
+  Check(preflight.ApplyQuote(too_big->id, affordable, 2000, &error),
+        "oversized fill simulated");
+  Check(!preflight.Reconcile(too_big->id, &error),
+        "posting rejected by portfolio preflight");
+  Check(accounting_events() == before,
+        "rejected posting appended no accounting event");
+  journal.Close();
+}
+
 void TestMoney() {
   Check(Money::FromRupees(500.0).paise() == 50000,
         "money 500 INR -> 50000 paise");
@@ -2154,6 +2231,7 @@ void TestTerminalAccounting() {
 int main() {
   using namespace quant;
   TestMoney();
+  TestPaperRehydration();
   TestDeterministicEventRuntime();
   TestUniversePublishRecovery();
   TestAccountingReplayIntegrity();

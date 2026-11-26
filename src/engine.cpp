@@ -1211,6 +1211,22 @@ PipelineResult MarketDataPipeline::Publish(const KdbxCheckpoint& checkpoint,
   return result;
 }
 
+namespace {
+
+std::string DurableId(const char* prefix) {
+  const int64_t nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count();
+  static uint64_t counter = 0;
+  ++counter;
+  std::ostringstream oss;
+  oss << prefix << '-' << nanos << '-' << counter << '-'
+      << ChecksumHex(std::to_string(nanos) + std::to_string(counter));
+  return oss.str();
+}
+
+}  // namespace
+
 // ---------------------------------------------------------------------------
 // Paper execution: local simulated order lifecycle. No broker endpoint is
 // reachable from this class by construction.
@@ -1334,7 +1350,11 @@ PaperOrder* PaperBroker::CreateIntent(const std::string& symbol,
     return nullptr;
   }
   PaperOrder order;
-  order.id = "PO-" + std::to_string(next_id_++);
+  order.id = DurableId("PO");
+  order.client_order_id = order.id;
+  order.causation_id = order.id;
+  order.correlation_id = order.id;
+  ++next_id_;
   order.symbol = symbol;
   order.side = side;
   order.quantity = quantity;
@@ -1458,9 +1478,10 @@ bool PaperBroker::ApplyQuote(const std::string& id,
   lot.quantity = fill;
   lot.price_paise = price.paise();
   lot.notional_paise = added_notional;
-  lot.id = order.id + ":fill-" + std::to_string(order.fills.size() + 1);
+  lot.id = DurableId("FILL");
   order.fills.push_back(lot);
   order.filled_quantity += fill;
+  order.cumulative_notional_paise += added_notional;
   order.average_fill = Money::FromPaise(
       total_notional / static_cast<int64_t>(order.filled_quantity));
   const PaperOrderState state = order.filled_quantity >= order.quantity
@@ -1469,8 +1490,15 @@ bool PaperBroker::ApplyQuote(const std::string& id,
   Json::Object payload;
   payload["order_id"] = Json::String(order.id);
   payload["symbol"] = Json::String(order.symbol);
-  payload["filled_quantity"] = Json::Integer(order.filled_quantity);
+  payload["fill_id"] = Json::String(lot.id);
+  payload["fill_quantity"] = Json::Integer(fill);
   payload["fill_price_paise"] = Json::Integer(price.paise());
+  payload["fill_notional_paise"] = Json::Integer(added_notional);
+  payload["cumulative_quantity"] = Json::Integer(order.filled_quantity);
+  payload["order_id"] = Json::String(order.id);
+  payload["causation_id"] = Json::String(order.causation_id);
+  payload["correlation_id"] = Json::String(order.correlation_id);
+  payload["schema_version"] = Json::UInteger(1);
   payload["observation_ms"] = Json::Integer(now_ms);
   // Fills are recorded as paper intents; accounting is posted by Reconcile.
   Event event;
@@ -1571,6 +1599,12 @@ bool PaperBroker::Reconcile(const std::string& id, std::string* error) {
         *error = "reconciliation cost calculation invalid";
       return false;
     }
+    Portfolio trial = *portfolio_;
+    if (!ApplyAccountingPosting(posting, &trial, error)) {
+      if (error)
+        *error = std::string("posting preflight failed: ") + *error;
+      return false;
+    }
     if (!AppendAccountingPosting(journal_, posting, error))
       return false;
     posted_ids_.insert(posting_id);
@@ -1584,6 +1618,126 @@ bool PaperBroker::Reconcile(const std::string& id, std::string* error) {
       order.state != PaperOrderState::kFilled) {
     return Transition(
         &order, PaperOrderState::kFilled, "all fill lots reconciled", error);
+  }
+  return true;
+}
+
+PaperOrderState ParsePaperState(const std::string& name) {
+  static const std::map<std::string, PaperOrderState> names = {
+      {"INTENT", PaperOrderState::kIntent},
+      {"RISK_APPROVED", PaperOrderState::kRiskApproved},
+      {"SUBMITTED", PaperOrderState::kSubmitted},
+      {"ACKNOWLEDGED", PaperOrderState::kAcknowledged},
+      {"WORKING", PaperOrderState::kWorking},
+      {"PARTIALLY_FILLED", PaperOrderState::kPartiallyFilled},
+      {"FILLED", PaperOrderState::kFilled},
+      {"REJECTED", PaperOrderState::kRejected},
+      {"CANCELLED", PaperOrderState::kCancelled},
+      {"EXPIRED", PaperOrderState::kExpired},
+      {"AMBIGUOUS", PaperOrderState::kAmbiguous},
+  };
+  const auto it = names.find(name);
+  return it == names.end() ? PaperOrderState::kIntent : it->second;
+}
+
+bool PaperBroker::RehydrateFromJournal(std::string* error) {
+  if (journal_ == nullptr) {
+    if (error)
+      *error = "rehydration requires a journal";
+    return false;
+  }
+  const std::vector<Event> events = journal_->Replay(error);
+  if (!error->empty())
+    return false;
+  orders_.clear();
+  posted_ids_.clear();
+  for (const Event& event : events) {
+    Json payload;
+    if (!Json::Parse(event.payload, &payload, error))
+      return false;
+    if (event.type == EventType::kAccounting) {
+      AccountingPosting posting;
+      if (ParseAccountingPosting(event, &posting, error))
+        posted_ids_.insert(posting.posting_id);
+      continue;
+    }
+    if (event.type == EventType::kFill) {
+      const Json* order_id = payload.Find("order_id");
+      const Json* fill_id = payload.Find("fill_id");
+      if (order_id == nullptr || fill_id == nullptr)
+        continue;
+      auto order = orders_.find(order_id->as_string());
+      if (order == orders_.end())
+        continue;
+      PaperOrder::Fill lot;
+      lot.id = fill_id->as_string();
+      auto integer = [&payload](const char* key) {
+        const Json* value = payload.Find(key);
+        return value == nullptr ? 0 : static_cast<int>(value->as_int(0));
+      };
+      lot.quantity = integer("fill_quantity");
+      lot.price_paise = integer("fill_price_paise");
+      lot.notional_paise = integer("fill_notional_paise");
+      order->second.fills.push_back(lot);
+      order->second.filled_quantity += lot.quantity;
+      order->second.cumulative_notional_paise += lot.notional_paise;
+      continue;
+    }
+    if (event.type != EventType::kPaperIntent)
+      continue;
+    const Json* order_id = payload.Find("order_id");
+    const Json* symbol = payload.Find("symbol");
+    const Json* state = payload.Find("state");
+    if (order_id == nullptr || symbol == nullptr || state == nullptr)
+      continue;
+    PaperOrder order;
+    order.id = order_id->as_string();
+    order.client_order_id = order.id;
+    order.causation_id = order.id;
+    order.correlation_id = order.id;
+    order.symbol = symbol->as_string();
+    const Json* side = payload.Find("side");
+    order.side = side != nullptr && side->as_string() == "SELL"
+                     ? OrderSide::kSell
+                     : OrderSide::kBuy;
+    order.state = ParsePaperState(state->as_string());
+    const Json* quantity = payload.Find("quantity");
+    order.quantity =
+        quantity == nullptr ? 0 : static_cast<int>(quantity->as_int(0));
+    auto existing = orders_.find(order.id);
+    if (existing == orders_.end()) {
+      orders_[order.id] = order;
+    } else {
+      std::vector<PaperOrder::Fill> preserved =
+          std::move(existing->second.fills);
+      const int preserved_quantity = existing->second.filled_quantity;
+      const int64_t preserved_notional =
+          existing->second.cumulative_notional_paise;
+      const size_t preserved_posted = existing->second.posted_fill_count;
+      existing->second = order;
+      existing->second.fills = std::move(preserved);
+      existing->second.filled_quantity = preserved_quantity;
+      existing->second.cumulative_notional_paise = preserved_notional;
+      existing->second.posted_fill_count = preserved_posted;
+    }
+    next_id_ = std::max(next_id_, static_cast<uint64_t>(orders_.size() + 1));
+  }
+  for (auto& [id, order] : orders_) {
+    (void)id;
+    size_t posted = 0;
+    for (const auto& lot : order.fills) {
+      if (posted_ids_.find(lot.id) == posted_ids_.end())
+        break;
+      ++posted;
+    }
+    order.posted_fill_count = posted;
+    if (order.fills.empty() || order.filled_quantity == 0)
+      continue;
+    int64_t weighted = 0;
+    for (const auto& lot : order.fills)
+      weighted += lot.price_paise * static_cast<int64_t>(lot.quantity);
+    order.average_fill = Money::FromPaise(
+        weighted / static_cast<int64_t>(order.filled_quantity));
   }
   return true;
 }
