@@ -268,17 +268,35 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
   if[(count componentNames)<>expectedCount; :0b];
   :.quant.verifyComponent[p;g]/[1b;.quant.componentNames]}
 
-/ Generations are immutable: an existing generation is never overwritten.
+/ Cooperative cross-process writer lock using an exclusive directory.
+.quant.writerAcquire:{[p]
+  result:@[system;("mkdir ",p,"/.writer.lock");{0b}];
+  0=count result}
+.quant.writerRelease:{[p]
+  @[system;("rmdir ",p,"/.writer.lock");{::}];
+  ::}
+.quant.sync:{[] system "sync"; ::}
+
+/ Immutable generation: components are written to a staging directory, synced,
+/ then atomically renamed before the current pointer is published.
 .quant.persist:{[path]
   p:.quant.pathString path;
-  system "mkdir -p ",p;
+  system ("mkdir -p ",p);
+  if[not .quant.writerAcquire[p]; :`writer_busy];
   gen:.quant.currentGeneration[p]+1;
-  gdir:.quant.generationDir[p;gen];
-  existing:key hsym `$p;
-  generationName:`$"gen-",string gen;
-  if[generationName in existing; :`generation_conflict];
-  system "mkdir ",string gdir;
-  root:hsym gdir;
+  genText:string `long$gen;
+  stagedPath:p,"/gen-",genText,".staging";
+  finalPath:p,"/gen-",genText;
+  stagingDir:`$stagedPath;
+  finalDir:`$finalPath;
+  existingGenerations:key hsym `$p;
+  finalName:`$("gen-",genText);
+  if[finalName in existingGenerations;
+     .quant.writerRelease[p];
+     :`generation_conflict];
+  system ("mkdir ",stagedPath);
+  root:hsym stagingDir;
+  .quant.generation::gen;
   savedQuotes:quotes; savedBars:bars;
   savedFeatures:.quant.featureHistory[]; savedSeen:.quant.seen;
   savedState:.quant.state[];
@@ -299,9 +317,26 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
   manifest:`schemaVersion`generation`components!(
     .quant.schemaVersion;gen;components);
   (.quant.filePath[root;`manifest]) set manifest;
+  .quant.sync[];
+  system ("mv -f ",stagedPath," ",finalPath);
+  .quant.sync[];
   (.quant.filePath[hsym `$p;`currentTmp]) set gen;
   system ("mv -f ",p,"/currentTmp ",p,"/current");
+  .quant.sync[];
+  .quant.writerRelease[p];
   `persisted}
+
+/ Uncommitted staging generations are never promoted; remove them explicitly.
+.quant.recoverOrphans:{[p]
+  path:.quant.pathString p;
+  if[0=count key hsym `$path; :0];
+  names:key hsym `$path;
+  staged:names where (like[string each names;"*staging*"]);
+  .quant.removeStaged[path] each staged;
+  count staged}
+.quant.removeStaged:{[path;name]
+  @[system;("rm -rf ",path,"/",string name);{::}];
+  ::}
 
 .quant.loadHistorical:{[path]
   p:.quant.pathString path;
