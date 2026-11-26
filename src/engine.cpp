@@ -992,6 +992,326 @@ bool KdbxRecoveryPlan(const KdbxCheckpoint& checkpoint,
 }
 
 // ---------------------------------------------------------------------------
+// Paper execution: local simulated order lifecycle. No broker endpoint is
+// reachable from this class by construction.
+// ---------------------------------------------------------------------------
+const char* PaperOrderStateName(PaperOrderState state) {
+  switch (state) {
+    case PaperOrderState::kIntent:
+      return "INTENT";
+    case PaperOrderState::kRiskApproved:
+      return "RISK_APPROVED";
+    case PaperOrderState::kSubmitted:
+      return "SUBMITTED";
+    case PaperOrderState::kAcknowledged:
+      return "ACKNOWLEDGED";
+    case PaperOrderState::kWorking:
+      return "WORKING";
+    case PaperOrderState::kPartiallyFilled:
+      return "PARTIALLY_FILLED";
+    case PaperOrderState::kFilled:
+      return "FILLED";
+    case PaperOrderState::kRejected:
+      return "REJECTED";
+    case PaperOrderState::kCancelled:
+      return "CANCELLED";
+    case PaperOrderState::kExpired:
+      return "EXPIRED";
+    case PaperOrderState::kAmbiguous:
+      return "AMBIGUOUS";
+  }
+  return "UNKNOWN";
+}
+
+PaperBroker::PaperBroker(Config config,
+                         Journal* journal,
+                         std::shared_ptr<Portfolio> portfolio)
+    : config_(std::move(config)),
+      journal_(journal),
+      portfolio_(std::move(portfolio)) {
+}
+
+bool PaperBroker::Transition(PaperOrder* order,
+                             PaperOrderState state,
+                             const std::string& reason,
+                             std::string* error) {
+  if (order == nullptr) {
+    if (error)
+      *error = "unknown order";
+    return false;
+  }
+  Json::Object payload;
+  payload["order_id"] = Json::String(order->id);
+  payload["symbol"] = Json::String(order->symbol);
+  payload["side"] =
+      Json::String(order->side == OrderSide::kBuy ? "BUY" : "SELL");
+  payload["state"] = Json::String(PaperOrderStateName(state));
+  payload["quantity"] = Json::Number(order->quantity);
+  payload["filled_quantity"] = Json::Number(order->filled_quantity);
+  payload["reason"] = Json::String(reason);
+  Event event;
+  event.type = EventType::kPaperIntent;
+  event.payload = Json::ObjectValue(payload).Dump();
+  if (journal_ != nullptr && !journal_->Append(&event, error))
+    return false;
+  order->state = state;
+  order->reason = reason;
+  order->audit.push_back(std::string(PaperOrderStateName(state)) + ": " +
+                         reason);
+  return true;
+}
+
+PaperOrder* PaperBroker::CreateIntent(const std::string& symbol,
+                                      OrderSide side,
+                                      int quantity,
+                                      Money limit_price,
+                                      std::string* error) {
+  if (symbol.empty() || quantity <= 0 || !limit_price.valid() ||
+      !(limit_price > Money::FromPaise(0))) {
+    if (error)
+      *error = "invalid paper order intent";
+    return nullptr;
+  }
+  PaperOrder order;
+  order.id = "PO-" + std::to_string(next_id_++);
+  order.symbol = symbol;
+  order.side = side;
+  order.quantity = quantity;
+  order.limit_price = limit_price;
+  if (!Transition(
+          &order, PaperOrderState::kIntent, "local intent created", error))
+    return nullptr;
+  const auto inserted = orders_.emplace(order.id, order);
+  return &inserted.first->second;
+}
+
+bool PaperBroker::RiskApprove(const std::string& id, std::string* error) {
+  auto it = orders_.find(id);
+  if (it == orders_.end() || it->second.state != PaperOrderState::kIntent) {
+    if (error)
+      *error = "order is not in INTENT state";
+    return false;
+  }
+  return Transition(&it->second,
+                    PaperOrderState::kRiskApproved,
+                    "local C++ risk gate approved",
+                    error);
+}
+
+bool PaperBroker::Reject(const std::string& id,
+                         const std::string& reason,
+                         std::string* error) {
+  auto it = orders_.find(id);
+  if (it == orders_.end()) {
+    if (error)
+      *error = "unknown order";
+    return false;
+  }
+  return Transition(&it->second, PaperOrderState::kRejected, reason, error);
+}
+
+bool PaperBroker::Submit(const std::string& id, std::string* error) {
+  auto it = orders_.find(id);
+  if (it == orders_.end() ||
+      it->second.state != PaperOrderState::kRiskApproved) {
+    if (error)
+      *error = "order is not risk-approved";
+    return false;
+  }
+  return Transition(
+      &it->second, PaperOrderState::kSubmitted, "paper submission", error);
+}
+
+bool PaperBroker::Acknowledge(const std::string& id, std::string* error) {
+  auto it = orders_.find(id);
+  if (it == orders_.end() || it->second.state != PaperOrderState::kSubmitted) {
+    if (error)
+      *error = "order is not submitted";
+    return false;
+  }
+  return Transition(&it->second,
+                    PaperOrderState::kAcknowledged,
+                    "simulated acknowledgement",
+                    error);
+}
+
+bool PaperBroker::ApplyQuote(const std::string& id,
+                             const Quote& quote,
+                             int64_t now_ms,
+                             std::string* error) {
+  auto it = orders_.find(id);
+  if (it == orders_.end() ||
+      (it->second.state != PaperOrderState::kAcknowledged &&
+       it->second.state != PaperOrderState::kWorking &&
+       it->second.state != PaperOrderState::kPartiallyFilled)) {
+    if (error)
+      *error = "order is not working";
+    return false;
+  }
+  PaperOrder& order = it->second;
+  if (quote.symbol != order.symbol) {
+    if (error)
+      *error = "quote symbol mismatch";
+    return false;
+  }
+  const bool buy = order.side == OrderSide::kBuy;
+  const double executable = buy ? quote.ask : quote.bid;
+  const int64_t depth = buy ? quote.ask_qty : quote.bid_qty;
+  const bool price_eligible = buy ? executable <= order.limit_price.rupees()
+                                  : executable >= order.limit_price.rupees();
+  if (!price_eligible || depth <= 0 || !(executable > 0.0) ||
+      !std::isfinite(executable)) {
+    // A limit touch without depth is explicitly not a fill.
+    return true;
+  }
+  const double participation = config_.max_participation_fraction;
+  int fill = static_cast<int>(std::min<int64_t>(
+      order.quantity - order.filled_quantity,
+      static_cast<int64_t>(
+          std::floor(static_cast<double>(depth) * participation))));
+  if (fill <= 0)
+    return true;
+  const Money price = Money::FromRupees(executable);
+  if (!price.valid()) {
+    if (error)
+      *error = "invalid fill price";
+    return false;
+  }
+  int64_t previous_notional = 0;
+  int64_t added_notional = 0;
+  int64_t total_notional = 0;
+  if (!money_detail::CheckedMultiply(
+          order.average_fill.paise(),
+          static_cast<int64_t>(order.filled_quantity),
+          &previous_notional) ||
+      !money_detail::CheckedMultiply(
+          price.paise(), static_cast<int64_t>(fill), &added_notional) ||
+      !money_detail::CheckedAdd(
+          previous_notional, added_notional, &total_notional)) {
+    if (error)
+      *error = "fill notional overflow";
+    return false;
+  }
+  order.filled_quantity += fill;
+  order.average_fill = Money::FromPaise(
+      total_notional / static_cast<int64_t>(order.filled_quantity));
+  const PaperOrderState state = order.filled_quantity >= order.quantity
+                                    ? PaperOrderState::kFilled
+                                    : PaperOrderState::kPartiallyFilled;
+  Json::Object payload;
+  payload["order_id"] = Json::String(order.id);
+  payload["symbol"] = Json::String(order.symbol);
+  payload["filled_quantity"] = Json::Number(order.filled_quantity);
+  payload["fill_price_paise"] = Json::Number(price.paise());
+  payload["observation_ms"] = Json::Number(now_ms);
+  // Fills are recorded as paper intents; accounting is posted by Reconcile.
+  Event event;
+  event.type = EventType::kFill;
+  event.payload = Json::ObjectValue(payload).Dump();
+  if (journal_ != nullptr && !journal_->Append(&event, error))
+    return false;
+  const std::string reason = "simulated fill " + std::to_string(fill) + " @ " +
+                             std::to_string(price.paise());
+  return Transition(&order, state, reason, error);
+}
+
+bool PaperBroker::Cancel(const std::string& id, std::string* error) {
+  auto it = orders_.find(id);
+  if (it == orders_.end() ||
+      (it->second.state != PaperOrderState::kWorking &&
+       it->second.state != PaperOrderState::kAcknowledged &&
+       it->second.state != PaperOrderState::kPartiallyFilled)) {
+    if (error)
+      *error = "order cannot be cancelled in this state";
+    return false;
+  }
+  return Transition(
+      &it->second, PaperOrderState::kCancelled, "cancel acknowledged", error);
+}
+
+bool PaperBroker::Expire(const std::string& id, std::string* error) {
+  auto it = orders_.find(id);
+  if (it == orders_.end()) {
+    if (error)
+      *error = "unknown order";
+    return false;
+  }
+  return Transition(
+      &it->second, PaperOrderState::kExpired, "session expired", error);
+}
+
+bool PaperBroker::MarkAmbiguous(const std::string& id, std::string* error) {
+  auto it = orders_.find(id);
+  if (it == orders_.end()) {
+    if (error)
+      *error = "unknown order";
+    return false;
+  }
+  return Transition(&it->second,
+                    PaperOrderState::kAmbiguous,
+                    "uncertain outcome requires reconciliation",
+                    error);
+}
+
+bool PaperBroker::Reconcile(const std::string& id, std::string* error) {
+  auto it = orders_.find(id);
+  if (it == orders_.end() || portfolio_ == nullptr) {
+    if (error)
+      *error = "unknown order or missing portfolio";
+    return false;
+  }
+  PaperOrder& order = it->second;
+  if (order.state == PaperOrderState::kAmbiguous) {
+    if (error)
+      *error = "ambiguous order requires manual reconciliation";
+    return false;
+  }
+  if (order.state != PaperOrderState::kFilled &&
+      order.state != PaperOrderState::kPartiallyFilled) {
+    // No executed quantity: nothing to post.
+    return true;
+  }
+  const Money notional = Money::FromPaise(
+      order.average_fill.paise() * static_cast<int64_t>(order.filled_quantity));
+  if (!notional.valid()) {
+    if (error)
+      *error = "reconciliation notional invalid";
+    return false;
+  }
+  const CostBreakdown costs = EstimateCosts(notional,
+                                            config_.execution_delivery,
+                                            order.side == OrderSide::kBuy,
+                                            config_.slippage_bps);
+  if (!costs.usable()) {
+    if (error)
+      *error = "reconciliation cost calculation invalid";
+    return false;
+  }
+  const bool ok = order.side == OrderSide::kBuy
+                      ? portfolio_->Buy(order.symbol,
+                                        order.filled_quantity,
+                                        order.average_fill,
+                                        costs,
+                                        error)
+                      : portfolio_->Sell(order.symbol,
+                                         order.filled_quantity,
+                                         order.average_fill,
+                                         costs,
+                                         error);
+  if (!ok)
+    return false;
+  return Transition(&order,
+                    PaperOrderState::kFilled,
+                    "accounting reconciled to simulated fills",
+                    error);
+}
+
+const PaperOrder* PaperBroker::Find(const std::string& id) const {
+  const auto it = orders_.find(id);
+  return it == orders_.end() ? nullptr : &it->second;
+}
+
+// ---------------------------------------------------------------------------
 // Durable daily risk state. The journal is authoritative; snapshots are
 // checksummed recovery accelerators carrying a journal watermark.
 // ---------------------------------------------------------------------------
