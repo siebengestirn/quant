@@ -1104,6 +1104,99 @@ void TestRiskAuthorizationBinding() {
   journal.Close();
 }
 
+void TestCancelAfterPartialReplay() {
+  const std::string path = TempPath("cancel_partial.jnl");
+  std::remove(path.c_str());
+  std::string error;
+  Journal journal;
+  Check(journal.Open(path, &error), "cancel journal opens");
+  Config config = TestConfig();
+  config.max_participation_fraction = 1.0;
+  PaperBroker broker(config,
+                     &journal,
+                     std::make_shared<Portfolio>(Money::FromRupees(100000.0)));
+  PaperOrder* order = broker.CreateIntent(
+      "AAA", OrderSide::kBuy, 4, Money::FromRupees(100.0), &error);
+  broker.RiskApprove(order->id, ApprovedAuthorization(*order), NowMs(), &error);
+  broker.Submit(order->id, &error);
+  broker.Acknowledge(order->id, &error);
+  Quote quote = GoodQuote(100.0);
+  quote.symbol = "AAA";
+  quote.ask = 100.0;
+  quote.ask_qty = 2;
+  Check(broker.ApplyQuote(order->id, quote, NowMs(), &error),
+        "partial fill before cancel");
+  Check(order->state == PaperOrderState::kPartiallyFilled,
+        "order is partially filled");
+  Check(broker.Cancel(order->id, &error), "partially filled order cancels");
+
+  PaperBroker restarted(
+      config,
+      &journal,
+      std::make_shared<Portfolio>(Money::FromRupees(100000.0)));
+  Check(restarted.RehydrateFromJournal(&error),
+        "cancel-after-partial replay succeeds");
+  const PaperOrder* restored = restarted.Find(order->id);
+  Check(restored != nullptr, "cancelled order restored");
+  Check(restored != nullptr && restored->state == PaperOrderState::kCancelled,
+        "cancelled state preserved after restart");
+  Check(restored != nullptr && restored->fills.size() == 1,
+        "partial fill preserved through cancellation");
+  Check(restored != nullptr && restored->cumulative_notional_paise == 20000,
+        "partial notional preserved through cancellation");
+  journal.Close();
+}
+
+void TestMalformedFillReplay() {
+  const std::string path = TempPath("malformed_fill.jnl");
+  std::remove(path.c_str());
+  std::string error;
+  Journal journal;
+  Check(journal.Open(path, &error), "malformed journal opens");
+  auto append = [&](const Json::Object& payload) {
+    Event event;
+    event.type = EventType::kPaperIntent;
+    event.payload = quant::Json::ObjectValue(payload).Dump();
+    return journal.Append(&event, &error);
+  };
+  auto order_event = [](PaperOrderState state) {
+    Json::Object payload;
+    payload["order_id"] = quant::Json::String("O-1");
+    payload["symbol"] = quant::Json::String("AAA");
+    payload["state"] = quant::Json::String(PaperOrderStateName(state));
+    payload["side"] = quant::Json::String("BUY");
+    payload["quantity"] = quant::Json::Integer(4);
+    payload["limit_price_paise"] = quant::Json::Integer(15000);
+    payload["schema_version"] = quant::Json::UInteger(1);
+    return payload;
+  };
+  Check(append(order_event(PaperOrderState::kIntent)), "intent for malformed");
+  Check(append(order_event(PaperOrderState::kRiskApproved)), "risk approval");
+  Check(append(order_event(PaperOrderState::kSubmitted)), "submission");
+  Check(append(order_event(PaperOrderState::kAcknowledged)), "ack");
+  FillRecord wrong;
+  wrong.id = "F-BAD";
+  wrong.order_id = "O-1";
+  wrong.symbol = "AAA";
+  wrong.quantity = 2;
+  wrong.price_paise = 10000;
+  wrong.notional_paise = 19999;  // Not equal to quantity times price.
+  Json::Object fill = FillRecordJson(wrong);
+  fill["order_id"] = quant::Json::String("O-1");
+  fill["symbol"] = quant::Json::String("AAA");
+  fill["state"] = quant::Json::String("PARTIALLY_FILLED");
+  fill["side"] = quant::Json::String("BUY");
+  fill["quantity"] = quant::Json::Integer(4);
+  fill["limit_price_paise"] = quant::Json::Integer(15000);
+  Check(append(fill), "notional mismatch event recorded");
+  PaperBroker strict(TestConfig(),
+                     &journal,
+                     std::make_shared<Portfolio>(Money::FromRupees(100000.0)));
+  Check(!strict.RehydrateFromJournal(&error), "notional mismatch stops replay");
+  Check(!error.empty(), "notional mismatch has an explicit reason");
+  journal.Close();
+}
+
 void TestPaperRiskAndFreshness() {
   const std::string path = TempPath("paper_fresh.jnl");
   std::remove(path.c_str());
@@ -2979,6 +3072,8 @@ int main() {
   TestMoney();
   TestPaperRiskAndFreshness();
   TestRiskAuthorizationBinding();
+  TestCancelAfterPartialReplay();
+  TestMalformedFillReplay();
   TestUniverseTransactionConsistency();
   TestEventRuntimeOrdering();
   TestDatasetManifestContract();
