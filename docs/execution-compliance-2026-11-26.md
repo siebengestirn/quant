@@ -82,3 +82,14 @@ the files can recompute a consistent-looking digest. Do not describe the
 audit trail as tamper-proof or adversarially authenticated. If malicious
 local modification enters the threat model, a keyed MAC with documented key
 custody or a signed append-only audit chain is required.
+
+## Native q verification tier
+
+Portable CI runs with `QUANT_WITH_KDBX=OFF`. A separate `native-q` job runs the
+KDB-X persistence and recovery tests on a governed self-hosted runner and is
+gated by `vars.QUANT_NATIVE_Q_ENABLED`. It is NOT currently a required status
+check because no licensed runner is configured; KDB-X persistence evidence is
+therefore locally reproduced, not hosted-CI-certified. The digest used by
+`q/quant.q` is a 128-bit MD5 content digest for corruption detection. It is
+well-specified and order-sensitive but NOT collision-resistant and NOT tamper
+authentication.

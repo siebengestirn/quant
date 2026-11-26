@@ -231,50 +231,84 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
 .quant.pathString:{[v] $[10h=type v; v; string v]}
 .quant.filePath:{[dir;name] hsym `$((string dir),"/",string name)}
 
-/ Content digest over q's canonical binary encoding. This is a non-
-/ cryptographic corruption detector, not tamper authentication.
-.quant.digest:{[x] {[h;c] h+((`long$c)*2654435761)}/[0; -8!x]}
+/ 128-bit content digest for corruption detection. MD5 is well-specified and
+/ order-sensitive but NOT collision-resistant and NOT tamper authentication.
+.quant.digest:{[x] md5["c"$-8!x]}
 .quant.generationDir:{[p;g] `$((.quant.pathString p),"/gen-",string g)}
 .quant.currentGeneration:{[p]
   pointer:.quant.filePath[hsym `$(.quant.pathString p);`current];
   if[0=count key pointer; :0];
   :get pointer}
+.quant.componentNames:`quotes`bars`features`seen`state`meta
 
-/ Each generation is immutable. The small current pointer is written last,
-/ so an interrupted write leaves the previous committed generation intact.
+/ One verifier shared by recovery AND ordinary historical loading.
+.quant.verifyComponent:{[p;g;acc;name]
+  if[not acc; :0b];
+  if[not name in .quant.componentNames; :0b];
+  root:hsym .quant.generationDir[p;g];
+  path:.quant.filePath[root;name];
+  if[0=count key path; :0b];
+  component:@[get;path;{::}];
+  if[component~(::); :0b];
+  m:get .quant.filePath[root;`manifest];
+  expected:(m`components)[name];
+  :((count component);.quant.digest component)~expected}
+
+.quant.verifyGeneration:{[p;g]
+  root:hsym .quant.generationDir[p;g];
+  manifestPath:.quant.filePath[root;`manifest];
+  if[0=count key manifestPath; :0b];
+  m:get manifestPath;
+  componentNames:key (m`components);
+  schema:.quant.schemaVersion;
+  manifestGeneration:(m`generation);
+  expectedCount:count .quant.componentNames;
+  if[(m`schemaVersion)<>schema; :0b];
+  if[manifestGeneration<>g; :0b];
+  if[(count componentNames)<>expectedCount; :0b];
+  :.quant.verifyComponent[p;g]/[1b;.quant.componentNames]}
+
+/ Generations are immutable: an existing generation is never overwritten.
 .quant.persist:{[path]
   p:.quant.pathString path;
   system "mkdir -p ",p;
-  .quant.generation::.quant.generation+1;
-  gen:.quant.generation;
+  gen:.quant.currentGeneration[p]+1;
   gdir:.quant.generationDir[p;gen];
-  system "mkdir -p ",string gdir;
+  existing:key hsym `$p;
+  generationName:`$"gen-",string gen;
+  if[generationName in existing; :`generation_conflict];
+  system "mkdir ",string gdir;
   root:hsym gdir;
   savedQuotes:quotes; savedBars:bars;
   savedFeatures:.quant.featureHistory[]; savedSeen:.quant.seen;
   savedState:.quant.state[];
+  savedMeta:(savedState;.quant.counts[]);
   (.quant.filePath[root;`quotes]) set savedQuotes;
   (.quant.filePath[root;`bars]) set savedBars;
   (.quant.filePath[root;`features]) set savedFeatures;
   (.quant.filePath[root;`seen]) set savedSeen;
   (.quant.filePath[root;`state]) set savedState;
-  (.quant.filePath[root;`meta]) set (savedState;.quant.counts[]);
-  components:`quotes`bars`features`seen`state!(
+  (.quant.filePath[root;`meta]) set savedMeta;
+  components:.quant.componentNames!(
     (count savedQuotes;.quant.digest savedQuotes);
     (count savedBars;.quant.digest savedBars);
     (count savedFeatures;.quant.digest savedFeatures);
     (count savedSeen;.quant.digest savedSeen);
-    (count savedState;.quant.digest savedState));
+    (count savedState;.quant.digest savedState);
+    (count savedMeta;.quant.digest savedMeta));
   manifest:`schemaVersion`generation`components!(
     .quant.schemaVersion;gen;components);
   (.quant.filePath[root;`manifest]) set manifest;
-  (.quant.filePath[hsym `$p;`current]) set gen;
+  (.quant.filePath[hsym `$p;`currentTmp]) set gen;
+  system ("mv -f ",p,"/currentTmp ",p,"/current");
   `persisted}
 
 .quant.loadHistorical:{[path]
-  gen:.quant.currentGeneration[path];
+  p:.quant.pathString path;
+  gen:.quant.currentGeneration[p];
   if[gen<=0; :`invalid_checkpoint];
-  root:hsym .quant.generationDir[path;gen];
+  if[not .quant.verifyGeneration[p;gen]; :`invalid_checkpoint];
+  root:hsym .quant.generationDir[p;gen];
   hQuotes:get .quant.filePath[root;`quotes];
   hBars:get .quant.filePath[root;`bars];
   hFeatures:get .quant.filePath[root;`features];
@@ -288,34 +322,13 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
   p:.quant.pathString path;
   gen:.quant.currentGeneration[p];
   if[gen<=0; :`invalid_checkpoint];
+  if[not .quant.verifyGeneration[p;gen]; :`invalid_checkpoint];
   root:hsym .quant.generationDir[p;gen];
-  manifestPath:.quant.filePath[root;`manifest];
-  if[0=count key manifestPath; :`invalid_checkpoint];
-  hManifest:get manifestPath;
-  manifestSchema:hManifest`schemaVersion;
-  manifestGeneration:hManifest`generation;
-  if[manifestSchema<>.quant.schemaVersion; :`invalid_checkpoint];
-  if[manifestGeneration<>gen; :`invalid_checkpoint];
-  components:hManifest`components;
-  expectedQuotes:components`quotes; expectedBars:components`bars;
-  expectedFeatures:components`features; expectedSeen:components`seen;
-  expectedState:components`state;
-  hQuotes:get .quant.filePath[root;`quotes];
-  hBars:get .quant.filePath[root;`bars];
-  hFeatures:get .quant.filePath[root;`features];
-  hSeen:get .quant.filePath[root;`seen];
   hState:get .quant.filePath[root;`state];
-  if[not (count hQuotes;.quant.digest hQuotes)~expectedQuotes;
-     :`invalid_checkpoint];
-  if[not (count hBars;.quant.digest hBars)~expectedBars;
-     :`invalid_checkpoint];
-  if[not (count hFeatures;.quant.digest hFeatures)~expectedFeatures;
-     :`invalid_checkpoint];
-  if[not (count hSeen;.quant.digest hSeen)~expectedSeen;
-     :`invalid_checkpoint];
-  if[not (count hState;.quant.digest hState)~expectedState;
-     :`invalid_checkpoint];
-  quotes::hQuotes; bars::hBars; features::hFeatures; .quant.seen::hSeen;
+  quotes::get .quant.filePath[root;`quotes];
+  bars::get .quant.filePath[root;`bars];
+  features::get .quant.filePath[root;`features];
+  .quant.seen::get .quant.filePath[root;`seen];
   .quant.maxSeq::hState`maxSeq;
   .quant.duplicates::hState`duplicates;
   .quant.outOfOrder::hState`outOfOrder;
