@@ -626,3 +626,43 @@ def test_fold_count_is_not_observation_count():
     )
     assert stats["folds"] != stats["observations"]
     assert stats["cost_model"] == "GROSS_ONLY"
+
+
+def test_oos_fold_metrics_drive_report():
+    report = research.analyze(research.synthetic_history(), ROOT)
+    best = report["best_strategy"]
+    stats = report["walk_forward"][best]
+    folds = report["methodology"]["purged_walk_forward"]["folds"]
+    expected = (
+        research.statistics.fmean(fold["daily_ic"] for fold in folds)
+        if folds
+        else None
+    )
+    assert stats["scope"] == "OUT_OF_SAMPLE_FOLDS"
+    assert stats["mean_ic"] == expected
+    assert stats["folds"] == len(folds)
+    assert report["methodology"]["holdout_status"] == "SEALED_NOT_EVALUATED"
+    assert report["methodology"]["oos_metric"]
+
+
+def test_future_fold_mutation_does_not_alter_earlier_folds():
+    history = research.synthetic_history()
+    baseline = research.purged_walk_forward(
+        history, research.score_momentum, final_holdout=0
+    )
+    dates = sorted({row["date"] for rows in history.values() for row in rows})
+    mutated = {
+        symbol: [
+            (
+                {**row, "close": row["close"] * 10.0}
+                if row["date"] in dates[-10:]
+                else dict(row)
+            )
+            for row in rows
+        ]
+        for symbol, rows in history.items()
+    }
+    changed = research.purged_walk_forward(
+        mutated, research.score_momentum, final_holdout=0
+    )
+    assert baseline["folds"][0] == changed["folds"][0]
