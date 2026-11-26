@@ -633,3 +633,46 @@ with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
     assert code == 0, out
     assert json.loads(out.strip().splitlines()[-1]) == 2
     assert len(sorted(hdb.glob("gen-*"))) == 2
+
+
+def test_orphan_staging_generation_is_removed(isolated_q):
+    if not q_runtime_available():
+        pytest.skip("native q runtime unavailable; orphan test SKIPPED")
+    hdb = isolated_q.directory / "hdb-orphan"
+    hdb.mkdir(parents=True)
+    (hdb / "gen-1.staging").mkdir()
+    probe = """
+import json
+import pykx as kx
+
+with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
+    removed = q(".quant.recoverOrphans", str(HDB)).py()
+    print(json.dumps({"removed": int(removed)}))
+""".replace("PORT", str(isolated_q.port))
+    probe = probe.replace("HDB", json.dumps(str(hdb)))
+    code, out = run([str(PYKX_PYTHON), "-c", probe])
+    assert code == 0, out
+    assert json.loads(out.strip().splitlines()[-1])["removed"] == 1
+    assert not (hdb / "gen-1.staging").exists()
+
+
+def test_writer_lock_blocks_concurrent_persist(isolated_q):
+    if not q_runtime_available():
+        pytest.skip("native q runtime unavailable; writer lock SKIPPED")
+    hdb = isolated_q.directory / "hdb-lock"
+    hdb.mkdir(parents=True)
+    (hdb / ".writer.lock").mkdir()
+    probe = """
+import json
+import pykx as kx
+
+with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
+    status = q(".quant.persist", str(HDB)).py()
+    if isinstance(status, bytes):
+        status = status.decode()
+    print(json.dumps({"status": status}))
+""".replace("PORT", str(isolated_q.port))
+    probe = probe.replace("HDB", json.dumps(str(hdb)))
+    code, out = run([str(PYKX_PYTHON), "-c", probe])
+    assert code == 0, out
+    assert json.loads(out.strip().splitlines()[-1])["status"] == "writer_busy"
