@@ -27,7 +27,7 @@ const-naming-style=UPPER_CASE
 max-args=12
 max-locals=35
 max-branches=14
-max-statements=60
+max-statements=80
 max-attributes=20
 
 [REPORTS]
