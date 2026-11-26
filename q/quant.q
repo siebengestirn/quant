@@ -63,6 +63,7 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
 .quant.maxSeq:0
 .quant.duplicates:0
 .quant.outOfOrder:0
+.quant.generation:0
 
 .quant.reset:{[]
   quotes::0#quotes; trades::0#trades; depth::0#depth; bars::0#bars;
@@ -70,6 +71,7 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
   signals::0#signals; features::0#features;
   .quant.seen:([eventKey:`symbol$()] flag:`boolean$());
   .quant.maxSeq:0; .quant.duplicates:0; .quant.outOfOrder:0;
+  .quant.generation:0;
   `reset}
 
 / Callers send q symbols (C++ ks(); Python pykx.SymbolAtom).
@@ -134,8 +136,9 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
      count marketStatus;count signals;count features)}
 
 .quant.state:{[]
-  `schemaVersion`maxSeq`duplicates`outOfOrder!(.quant.schemaVersion;
-    .quant.maxSeq;.quant.duplicates;.quant.outOfOrder)}
+  `schemaVersion`generation`maxSeq`duplicates`outOfOrder!(
+    .quant.schemaVersion;.quant.generation;.quant.maxSeq;
+    .quant.duplicates;.quant.outOfOrder)}
 
 .quant.quotesBySymbol:{[sym] select from quotes where symbol=sym}
 
@@ -228,16 +231,25 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
 .quant.pathString:{[v] $[10h=type v; v; string v]}
 .quant.filePath:{[dir;name] hsym `$((string dir),"/",string name)}
 
+/ A checkpoint is committed only when its manifest is published after all
+/ component files. Recovery rejects a directory without a matching manifest.
 .quant.persist:{[path]
   p:.quant.pathString path;
   system "mkdir -p ",p;
   root:hsym `$p;
+  .quant.generation::.quant.generation+1;
   (.quant.filePath[root;`quotes]) set quotes;
   (.quant.filePath[root;`bars]) set bars;
   (.quant.filePath[root;`features]) set .quant.featureHistory[];
   (.quant.filePath[root;`seen]) set .quant.seen;
   (.quant.filePath[root;`state]) set .quant.state[];
   (.quant.filePath[root;`meta]) set (.quant.state[]; .quant.counts[]);
+  counts:.quant.counts[];
+  savedFeatures:.quant.featureHistory[];
+  manifest:`schemaVersion`generation`quotes`bars`features`committed!(
+    .quant.schemaVersion;.quant.generation;counts`quotes;counts`bars;
+    count savedFeatures;1b);
+  (.quant.filePath[root;`manifest]) set manifest;
   `persisted}
 
 .quant.loadHistorical:{[path]
@@ -253,16 +265,31 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
 
 .quant.recover:{[path]
   root:hsym `$(.quant.pathString path);
+  manifestPath:.quant.filePath[root;`manifest];
+  if[0=count key manifestPath; :`invalid_checkpoint];
+  hManifest:get manifestPath;
+  committed:hManifest`committed;
+  manifestSchema:hManifest`schemaVersion;
+  manifestGeneration:hManifest`generation;
+  if[not committed; :`invalid_checkpoint];
+  if[manifestSchema<>.quant.schemaVersion; :`invalid_checkpoint];
+  hState:get .quant.filePath[root;`state];
+  if[(hState`generation)<>manifestGeneration; :`invalid_checkpoint];
   hQuotes:get .quant.filePath[root;`quotes];
   hBars:get .quant.filePath[root;`bars];
   hFeatures:get .quant.filePath[root;`features];
   hSeen:get .quant.filePath[root;`seen];
-  hState:get .quant.filePath[root;`state];
-  if[(count hQuotes)<0; :`invalid_checkpoint];
+  manifestQuotes:hManifest`quotes;
+  manifestBars:hManifest`bars;
+  manifestFeatures:hManifest`features;
+  if[(count hQuotes)<>manifestQuotes; :`invalid_checkpoint];
+  if[(count hBars)<>manifestBars; :`invalid_checkpoint];
+  if[(count hFeatures)<>manifestFeatures; :`invalid_checkpoint];
   quotes::hQuotes; bars::hBars; features::hFeatures; .quant.seen::hSeen;
   .quant.maxSeq::hState`maxSeq;
   .quant.duplicates::hState`duplicates;
   .quant.outOfOrder::hState`outOfOrder;
+  .quant.generation::hState`generation;
   .quant.recoveryWatermark::.quant.maxSeq;
   `recovered}
 

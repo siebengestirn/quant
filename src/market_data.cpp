@@ -443,7 +443,10 @@ UniverseResult MarketDataService::SyncUniverse() const {
     event.type = EventType::kHeartbeat;
     event.payload = Json::ObjectValue(payload).Dump();
     std::string journal_error;
-    journal_->Append(&event, &journal_error);
+    if (!journal_->Append(&event, &journal_error)) {
+      result.error = "universe audit event not committed: " + journal_error;
+      return result;
+    }
   }
   return result;
 }

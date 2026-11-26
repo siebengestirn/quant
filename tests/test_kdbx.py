@@ -352,44 +352,14 @@ def test_benchmark_is_isolated():
     assert p99 is not None and float(p99.group(1)) > 0.0
 
 
-def test_new_process_checkpoint_recovery(isolated_q):
-    """A second q process must rebuild analytical state from a checkpoint.
-
-    This is a real process-lifecycle test. It is SKIPPED, not passed, when the
-    native q runtime is unavailable; portable CI cannot certify q behaviour.
-    """
-    if not q_runtime_available():
-        pytest.skip(
-            "native q runtime unavailable; new-process recovery SKIPPED"
-        )
-    hdb = isolated_q.directory / "hdb"
-    seed = """
-import json
-import pykx as kx
-
-with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
-    q(".quant.reset[]")
-    for i in range(21):
-        close = 100.0 + i
-        q(".quant.ingestBar", [9845 + i, kx.SymbolAtom("REC"),
-                               close, close + 3.0, close - 2.0,
-                               close, 1000.0 + i])
-    q(".quant.persist", str(HDB))
-    print(json.dumps(q(".quant.counts[]").py()))
-""".replace("PORT", str(isolated_q.port)).replace("HDB", json.dumps(str(hdb)))
-    code, out = run([str(PYKX_PYTHON), "-c", seed])
-    assert code == 0, out
-    before = json.loads(out.strip().splitlines()[-1])
-
-    isolated_q.process.terminate()
-    isolated_q.process.wait(timeout=15)
-
+def start_private_q(
+    directory: Path, instance_id: str
+) -> tuple[int, subprocess.Popen]:
     qhome = os.environ.get("QHOME", "")
     qbin = Path(qhome) / "bin" / "q"
     port = free_port()
-    instance_id = "pytest-restart-" + uuid.uuid4().hex
-    log = open(isolated_q.directory / "q-restart.log", "wb")
-    restarted = subprocess.Popen(
+    log = open(directory / (instance_id + ".log"), "wb")
+    process = subprocess.Popen(
         [
             str(qbin),
             str(ROOT / "q" / "quant.q"),
@@ -404,45 +374,141 @@ with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
         stderr=subprocess.STDOUT,
     )
     log.close()
+    return port, process
+
+
+def wait_for_q(port: int, process: subprocess.Popen) -> None:
+    probe = """
+import pykx as kx
+with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
+    print(q(".quant.instanceId").py())
+""".replace("PORT", str(port))
+    deadline = time.time() + 90
+    while time.time() < deadline and process.poll() is None:
+        if run([str(PYKX_PYTHON), "-c", probe], timeout=45)[0] == 0:
+            return
+        time.sleep(0.2)
+    pytest.fail("private q process did not become ready")
+
+
+def stop_private_q(process: subprocess.Popen) -> None:
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=10)
+
+
+def test_new_process_checkpoint_recovery():
+    """A second q process must rebuild analytical state from a checkpoint.
+
+    Both processes are private to this test. It is SKIPPED, not passed, when
+    the native q runtime is unavailable; portable CI cannot certify q.
+    """
+    if not q_runtime_available():
+        pytest.skip(
+            "native q runtime unavailable; new-process recovery SKIPPED"
+        )
+    if not QUANT.exists() or not PYKX_PYTHON.exists():
+        pytest.skip("build or PyKX interpreter unavailable")
+    directory = Path(
+        tempfile.mkdtemp(prefix="quant-restart-", dir=ROOT / "data")
+    )
+    hdb = directory / "hdb"
+    first_id = "pytest-first-" + uuid.uuid4().hex
+    first_port, first = start_private_q(directory, first_id)
     try:
-        probe = (
-            """
+        wait_for_q(first_port, first)
+        seed = """
 import json
 import pykx as kx
 
 with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
     assert q(".quant.instanceId").py().decode() == INSTANCE
-    recovered_status = q(".quant.recover", str(HDB)).py()
-    if isinstance(recovered_status, bytes):
-        recovered_status = recovered_status.decode()
-    print(json.dumps({"recovered": recovered_status,
+    q(".quant.reset[]")
+    for i in range(21):
+        close = 100.0 + i
+        q(".quant.ingestBar", [9845 + i, kx.SymbolAtom("REC"),
+                               close, close + 3.0, close - 2.0,
+                               close, 1000.0 + i])
+    q(".quant.persist", str(HDB))
+    print(json.dumps(q(".quant.counts[]").py()))
+"""
+        seed = seed.replace("PORT", str(first_port))
+        seed = seed.replace("INSTANCE", json.dumps(first_id))
+        seed = seed.replace("HDB", json.dumps(str(hdb)))
+        code, out = run([str(PYKX_PYTHON), "-c", seed])
+        assert code == 0, out
+        before = json.loads(out.strip().splitlines()[-1])
+    finally:
+        stop_private_q(first)
+
+    second_id = "pytest-restart-" + uuid.uuid4().hex
+    second_port, restarted = start_private_q(directory, second_id)
+    try:
+        wait_for_q(second_port, restarted)
+        probe = """
+import json
+import pykx as kx
+
+with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
+    assert q(".quant.instanceId").py().decode() == INSTANCE
+    status = q(".quant.recover", str(HDB)).py()
+    if isinstance(status, bytes):
+        status = status.decode()
+    print(json.dumps({"recovered": status,
                       "counts": q(".quant.counts[]").py()}))
-""".replace("PORT", str(port))
-            .replace("HDB", json.dumps(str(hdb)))
-            .replace("INSTANCE", json.dumps(instance_id))
-        )
+"""
+        probe = probe.replace("PORT", str(second_port))
+        probe = probe.replace("INSTANCE", json.dumps(second_id))
+        probe = probe.replace("HDB", json.dumps(str(hdb)))
         recovered = ""
-        last_probe_error = ""
-        deadline = time.time() + 90
-        while time.time() < deadline:
+        for _ in range(50):
             code, out = run([str(PYKX_PYTHON), "-c", probe], timeout=45)
             if code == 0:
                 recovered = out
                 break
-            last_probe_error = out
             time.sleep(0.2)
-        assert recovered, (
-            "second q process did not become ready: " + last_probe_error
-        )
+        assert recovered, "second q process could not recover the checkpoint"
         payload = json.loads(recovered.strip().splitlines()[-1])
         assert payload["recovered"] == "recovered"
         after = payload["counts"]
         assert after["bars"] == before["bars"]
         assert after["quotes"] == before["quotes"]
     finally:
-        restarted.terminate()
-        try:
-            restarted.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            restarted.kill()
-            restarted.wait(timeout=10)
+        stop_private_q(restarted)
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def test_interrupted_checkpoint_is_rejected(isolated_q):
+    """A checkpoint without its committed manifest must not be accepted."""
+    if not q_runtime_available():
+        pytest.skip("native q runtime unavailable; generation test SKIPPED")
+    hdb = isolated_q.directory / "hdb-incomplete"
+    script = """
+import pykx as kx
+
+with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
+    q(".quant.persist", str(HDB))
+""".replace("PORT", str(isolated_q.port)).replace("HDB", json.dumps(str(hdb)))
+    code, out = run([str(PYKX_PYTHON), "-c", script])
+    assert code == 0, out
+    (hdb / "manifest").unlink()
+
+    probe = """
+import json
+import pykx as kx
+
+with kx.SyncQConnection(host="127.0.0.1", port=PORT) as q:
+    status = q(".quant.recover", str(HDB)).py()
+    if isinstance(status, bytes):
+        status = status.decode()
+    print(json.dumps({"status": status}))
+""".replace("PORT", str(isolated_q.port)).replace("HDB", json.dumps(str(hdb)))
+    code, out = run([str(PYKX_PYTHON), "-c", probe])
+    assert code == 0, out
+    assert json.loads(out.strip().splitlines()[-1])["status"] == (
+        "invalid_checkpoint"
+    )

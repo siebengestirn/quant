@@ -26,6 +26,7 @@
 namespace quant {
 
 class Journal;
+struct Event;
 
 // ---------------------------------------------------------------------------
 // Money: integer paise. Conversions are explicit to prevent unit confusion.
@@ -297,6 +298,7 @@ struct Config {
   std::string data_dir = "data";
   std::string journal_path = "data/journal/events.jnl";
   std::string risk_snapshot_path = "data/journal/risk.snap";
+  std::string account_id = "PRIMARY";
   std::string universe_path = "data/cache/universe.csv";
   std::string history_dir = "data/cache/history";
   std::string report_dir = "data/reports";
@@ -533,12 +535,14 @@ class Portfolio {
            int quantity,
            Money price,
            const CostBreakdown& costs,
-           std::string* error);
+           std::string* error,
+           const std::string& audit_tag = "");
   bool Sell(const std::string& symbol,
             int quantity,
             Money price,
             const CostBreakdown& costs,
-            std::string* error);
+            std::string* error,
+            const std::string& audit_tag = "");
   bool MarkToMarket(const std::string& symbol,
                     Money price,
                     std::string* error = nullptr);
@@ -563,6 +567,9 @@ class Portfolio {
   }
   const std::vector<std::string>& audit() const {
     return audit_;
+  }
+  bool HasAudit(const std::string& marker) const {
+    return std::find(audit_.begin(), audit_.end(), marker) != audit_.end();
   }
 
  private:
@@ -606,6 +613,7 @@ struct RiskDecision {
 };
 
 struct DailyRiskState {
+  std::string account_id = "PRIMARY";
   std::string date;  // Exchange session identity (IST trading day).
   std::string policy_version = "RISK-2026-11-26-v1";
   uint64_t journal_sequence = 0;
@@ -635,8 +643,20 @@ struct RiskSnapshot {
   int64_t unrealized_pnl_paise = 0;
   bool halted = false;
   std::string halt_reason;
+  std::string journal_identity;
+  std::string watermark_event_checksum;
   std::string checksum;
 };
+
+std::string JournalIdentity(const std::vector<Event>& events,
+                            uint64_t through_sequence = 0);
+bool FillRiskCheckpointIdentity(RiskSnapshot* snapshot,
+                                const std::vector<Event>& events,
+                                std::string* error);
+bool VerifyRiskCheckpointIdentity(const RiskSnapshot& snapshot,
+                                  const std::vector<Event>& events,
+                                  const std::string& expected_account,
+                                  std::string* error);
 
 bool SaveRiskSnapshot(const std::string& path,
                       const RiskSnapshot& snapshot,
@@ -652,9 +672,15 @@ bool RecoverRiskState(const std::string& snapshot_path,
                       const std::string& journal_path,
                       DailyRiskState* state,
                       std::string* error);
+bool RecoverRiskState(const std::string& snapshot_path,
+                      const std::string& journal_path,
+                      DailyRiskState* state,
+                      const std::string& expected_account,
+                      std::string* error);
 bool RecoverRiskStateFromJournal(const std::string& snapshot_path,
                                  Journal* journal,
                                  DailyRiskState* state,
+                                 const std::string& expected_account,
                                  std::string* error);
 
 // Durable risk events written before a decision becomes visible.
@@ -909,6 +935,9 @@ struct PaperOrder {
   Money limit_price;
   Money average_fill;
   PaperOrderState state = PaperOrderState::kIntent;
+  int reconciled_quantity = 0;
+  int reconciliation_batches = 0;
+  std::string reconciliation_tag;
   std::string reason;
   std::vector<std::string> audit;
 };
@@ -959,13 +988,24 @@ class PaperBroker {
 // ---------------------------------------------------------------------------
 class Json {
  public:
-  enum class Type { kNull, kBool, kNumber, kString, kArray, kObject };
+  enum class Type {
+    kNull,
+    kBool,
+    kNumber,
+    kInteger,
+    kUInteger,
+    kString,
+    kArray,
+    kObject
+  };
   using Object = std::map<std::string, Json>;
 
   Json() = default;
   static Json Null();
   static Json Bool(bool value);
   static Json Number(double value);
+  static Json Integer(int64_t value);
+  static Json UInteger(uint64_t value);
   static Json String(std::string value);
   static Json Array(std::vector<Json> value);
   static Json ObjectValue(Object value);
@@ -980,6 +1020,11 @@ class Json {
   bool as_bool(bool fallback = false) const;
   double as_double(double fallback = 0.0) const;
   int64_t as_int(int64_t fallback = 0) const;
+  bool as_integer(int64_t* out) const;
+  bool as_uinteger(uint64_t* out) const;
+  bool is_exact_integer() const {
+    return type_ == Type::kInteger || type_ == Type::kUInteger;
+  }
   std::string as_string(std::string fallback = "") const;
   const std::vector<Json>& array() const {
     return array_;
@@ -994,6 +1039,8 @@ class Json {
   Type type_ = Type::kNull;
   bool bool_ = false;
   double number_ = 0.0;
+  int64_t integer_ = 0;
+  uint64_t uinteger_ = 0;
   std::string string_;
   std::vector<Json> array_;
   Object object_;

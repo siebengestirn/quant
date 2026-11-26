@@ -26,6 +26,7 @@ import subprocess
 import sys
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -77,6 +78,64 @@ def load_history(directory: Path) -> dict[str, list[dict[str, float]]]:
         if rows:
             history[path.stem] = rows
     return history
+
+
+@dataclass
+class ValidatedDataset:
+    """One authoritative research dataset contract."""
+
+    history: dict[str, list[dict[str, float]]]
+    quality: dict[str, dict]
+    eligible_dates: dict[str, list[str]]
+    status: str
+    source: str
+    vintage: str
+    invalid_rows: int
+    corporate_actions: str = "NOT INCORPORATED"
+
+
+def load_history_validated(
+    directory: Path,
+    instrument_status: list[dict] | None = None,
+    vintage: str = "UNSPECIFIED",
+) -> ValidatedDataset:
+    """Load history with mandatory quality and point-in-time eligibility."""
+    raw_history = load_history(directory)
+    expected = sorted(
+        {row["date"] for rows in raw_history.values() for row in rows}
+    )
+    quality: dict[str, dict] = {}
+    for symbol, rows in raw_history.items():
+        quality[symbol] = dataset_quality(rows, expected)
+    eligible_dates: dict[str, list[str]] = {}
+    if instrument_status:
+        for date in expected:
+            eligible_dates[date] = point_in_time_universe(
+                instrument_status, date
+            )
+    statuses = {item["status"] for item in quality.values()}
+    if not quality or "BLOCKED" in statuses:
+        status = "BLOCKED"
+    elif "PARTIAL" in statuses:
+        status = "PARTIAL"
+    else:
+        status = "COMPLETE"
+    invalid_rows = sum(item["invalid_bar_count"] for item in quality.values())
+    acceptable = {
+        symbol: rows
+        for symbol, rows in raw_history.items()
+        if quality[symbol]["status"] != "BLOCKED"
+        and symbol not in ("NIFTY 50", "INDIA VIX")
+    }
+    return ValidatedDataset(
+        history=acceptable,
+        quality=quality,
+        eligible_dates=eligible_dates,
+        status=status,
+        source=str(directory),
+        vintage=vintage,
+        invalid_rows=invalid_rows,
+    )
 
 
 def features(rows: list[dict[str, float]], index: int) -> dict[str, float]:
@@ -345,7 +404,16 @@ def dataset_quality(
         ):
             invalid += 1
             continue
-        if float(row["close"]) <= 0 or float(row["high"]) < float(row["low"]):
+        open_price = float(row["open"])
+        high = float(row["high"])
+        low = float(row["low"])
+        close = float(row["close"])
+        if not (
+            0 < low <= min(open_price, close)
+            and max(open_price, close) <= high
+            and close > 0
+            and float(row["volume"]) >= 0
+        ):
             invalid += 1
             continue
         valid_dates.add(date)
@@ -374,7 +442,7 @@ def point_in_time_universe(
 
     A later surveillance or delisting record cannot change a prior decision.
     """
-    eligible: set[str] = set()
+    applicable: dict[str, tuple[tuple[str, int], dict]] = {}
     for record in instrument_status:
         effective_from = str(record.get("effective_from", ""))
         effective_to = str(record.get("effective_to", ""))
@@ -385,11 +453,15 @@ def point_in_time_universe(
         symbol = str(record.get("symbol", ""))
         if not symbol:
             continue
-        if bool(record.get("eligible", False)):
-            eligible.add(symbol)
-        else:
-            eligible.discard(symbol)
-    return sorted(eligible)
+        precedence = (effective_from, int(record.get("revision", 0)))
+        existing = applicable.get(symbol)
+        if existing is None or precedence >= existing[0]:
+            applicable[symbol] = (precedence, record)
+    return sorted(
+        symbol
+        for symbol, (_precedence, record) in applicable.items()
+        if bool(record.get("eligible", False))
+    )
 
 
 def forward_label(
@@ -800,11 +872,37 @@ def synthetic_history() -> dict[str, list[dict[str, float]]]:
     return history
 
 
-def analyze(history: dict[str, list[dict[str, float]]], root: Path) -> dict:
+def analyze(
+    history: dict[str, list[dict[str, float]]],
+    root: Path,
+    dataset: ValidatedDataset | None = None,
+) -> dict:
+    if dataset is not None and dataset.status in ("BLOCKED", "PARTIAL"):
+        return {
+            "labels": {"statistics": dataset.status},
+            "input_series": 0,
+            "conclusion": (
+                f"{dataset.status}: research input failed its data contract"
+            ),
+            "data_contract": {
+                "status": dataset.status,
+                "source": dataset.source,
+                "vintage": dataset.vintage,
+                "invalid_rows": dataset.invalid_rows,
+            },
+            "walk_forward": {},
+            "baselines": {},
+            "authoritative_cpp_backtest": {},
+            "rejections": [
+                f"{dataset.status} research dataset rejected before analysis"
+            ],
+        }
+    if dataset is not None:
+        history = dataset.history
     usable = {
         symbol: rows
         for symbol, rows in history.items()
-        if len(rows) >= MIN_HISTORY and symbol != "NIFTY 50"
+        if len(rows) >= MIN_HISTORY and symbol not in ("NIFTY 50", "INDIA VIX")
     }
     report: dict = {
         "labels": {
@@ -813,6 +911,22 @@ def analyze(history: dict[str, list[dict[str, float]]], root: Path) -> dict:
             "live_trading": "NOT IMPLEMENTED (locked)",
         },
         "input_series": len(usable),
+        "data_contract": {
+            "status": "UNVALIDATED" if dataset is None else dataset.status,
+            "source": (
+                "direct dictionary" if dataset is None else dataset.source
+            ),
+            "vintage": "UNSPECIFIED" if dataset is None else dataset.vintage,
+            "invalid_rows": 0 if dataset is None else dataset.invalid_rows,
+            "corporate_actions": (
+                "NOT INCORPORATED"
+                if dataset is None
+                else dataset.corporate_actions
+            ),
+            "session_eligibility": (
+                {} if dataset is None else dataset.eligible_dates
+            ),
+        },
         "observations_per_series": min(
             (len(rows) for rows in usable.values()), default=0
         ),
@@ -927,7 +1041,7 @@ def render_markdown(report: dict) -> str:
         "## Purged walk-forward IC (ESTIMATED)",
         "",
         "| Strategy | Folds | Mean IC | IC std | Positive folds | "
-        "Deflated IC | PBO proxy |",
+        "Deflated IC | Bounded CSCV PBO |",
         "|---|---:|---:|---:|---:|---:|---:|",
     ]
     for name, stats in report["walk_forward"].items():
@@ -936,7 +1050,7 @@ def render_markdown(report: dict) -> str:
             f"{stats.get('mean_ic', 0):.4f} | {stats.get('ic_std', 0):.4f} | "
             f"{stats.get('positive_folds', 0)} | "
             f"{stats.get('deflated_mean_ic', 0):.4f} | "
-            f"{stats.get('pbo_proxy', 1):.2f} |"
+            f"{report.get('multiple_testing', {}).get('cscv_pbo', {}).get('pbo', 1):.3f} |"
         )
     lines += [
         "",
@@ -958,8 +1072,9 @@ def render_markdown(report: dict) -> str:
     lines += [
         "- NOT IMPLEMENTED in this build: LightGBM meta-labeling, Kalman fair "
         "value, HMM, GARCH/EGARCH, Johansen cointegration, full order-book "
-        "microstructure, White Reality Check, Hansen SPA, CSCV logit "
-        "distribution.",
+        "microstructure, White Reality Check and Hansen SPA. CSCV is a "
+        "bounded diagnostic over four IC signal families, not a full "
+        "parameter-search logit distribution.",
         "- SIMULATED fills use next-session open with 10 bps slippage; no "
         "order-book history is available, and survivorship bias is not "
         "corrected.",
@@ -1007,8 +1122,20 @@ def main() -> int:
         print(json.dumps(summary, indent=2))
         values = [item.get("status") for item in summary.values()]
         return 0 if values.count("VERIFIED") == len(values) else 2
-    history = load_history(Path(args.data))
-    report = analyze(history, root)
+    dataset = load_history_validated(Path(args.data))
+    if dataset.status == "BLOCKED":
+        report = analyze(dataset.history, root, dataset)
+        out = Path(args.out)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "research.json").write_text(
+            json.dumps(report, indent=2), encoding="utf-8"
+        )
+        (out / "research.md").write_text(
+            render_markdown(report), encoding="utf-8"
+        )
+        print(render_markdown(report))
+        return 2
+    report = analyze(dataset.history, root, dataset)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     (out / "research.json").write_text(
