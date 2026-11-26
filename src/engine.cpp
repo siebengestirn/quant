@@ -988,6 +988,46 @@ bool KdbxRecoveryPlan(const KdbxCheckpoint& checkpoint,
 }
 
 // ---------------------------------------------------------------------------
+// Asset and compliance contracts. These describe capability boundaries; they
+// do not authorise any live route.
+// ---------------------------------------------------------------------------
+bool ValidateInstrumentSpec(const InstrumentSpec& spec, std::string* error) {
+  auto reject = [error](const char* message) {
+    if (error)
+      *error = message;
+    return false;
+  };
+  if (spec.exchange.empty() || spec.calendar_id.empty() ||
+      spec.fee_schedule_id.empty())
+    return reject(
+        "instrument spec requires exchange, calendar and fee schedule");
+  if (!std::isfinite(spec.tick_size) || spec.tick_size <= 0.0)
+    return reject("instrument tick size must be finite and positive");
+  if (spec.lot_size <= 0)
+    return reject("instrument lot size must be positive");
+  if (!spec.venue_supported)
+    return reject("venue is not supported in this build");
+  return true;
+}
+
+bool ExecutionProfileSupported(ExecutionProfile profile) {
+  return profile == ExecutionProfile::kDaily;
+}
+
+bool LiveRouteAuthorized(const ComplianceGateState& gate, std::string* error) {
+  if (!gate.written_broker_approval || !gate.compliance_signoff ||
+      !gate.operational_risk_signoff || !gate.sandbox_certified ||
+      gate.approval_ref.empty()) {
+    if (error)
+      *error =
+          "live route requires written broker, compliance, operational "
+          "risk and sandbox approval with a recorded reference";
+    return false;
+  }
+  return false;  // Live execution is unconditionally disabled in this build.
+}
+
+// ---------------------------------------------------------------------------
 // Canonical market-data pipeline.
 
 namespace {

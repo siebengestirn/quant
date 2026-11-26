@@ -433,6 +433,42 @@ void TestPaperRehydration() {
   journal.Close();
 }
 
+void TestAssetAndComplianceContracts() {
+  InstrumentSpec equity;
+  equity.exchange = "NSE";
+  equity.calendar_id = "NSE-CALENDAR-v1";
+  equity.fee_schedule_id = "ZERODHA-EQ-2026-11-25-v1";
+  equity.tick_size = 0.05;
+  equity.lot_size = 1;
+  equity.venue_supported = true;
+  std::string error;
+  Check(ValidateInstrumentSpec(equity, &error), "equity spec valid");
+  InstrumentSpec bad = equity;
+  bad.tick_size = 0.0;
+  Check(!ValidateInstrumentSpec(bad, &error), "zero tick rejected");
+  bad = equity;
+  bad.lot_size = -1;
+  Check(!ValidateInstrumentSpec(bad, &error), "negative lot rejected");
+  bad = equity;
+  bad.venue_supported = false;
+  Check(!ValidateInstrumentSpec(bad, &error), "unsupported venue rejected");
+  Check(ExecutionProfileSupported(ExecutionProfile::kDaily),
+        "daily profile available");
+  Check(!ExecutionProfileSupported(ExecutionProfile::kIntraday) &&
+            !ExecutionProfileSupported(ExecutionProfile::kHft),
+        "intraday and HFT profiles are not available");
+
+  ComplianceGateState gate;
+  Check(!LiveRouteAuthorized(gate, &error), "empty gate blocks live route");
+  gate.written_broker_approval = true;
+  gate.compliance_signoff = true;
+  gate.operational_risk_signoff = true;
+  gate.sandbox_certified = true;
+  gate.approval_ref = "SIGN-OFF-1";
+  Check(!LiveRouteAuthorized(gate, &error),
+        "complete gate still blocks live route in this build");
+}
+
 void TestMoney() {
   Check(Money::FromRupees(500.0).paise() == 50000,
         "money 500 INR -> 50000 paise");
@@ -2231,6 +2267,7 @@ void TestTerminalAccounting() {
 int main() {
   using namespace quant;
   TestMoney();
+  TestAssetAndComplianceContracts();
   TestPaperRehydration();
   TestDeterministicEventRuntime();
   TestUniversePublishRecovery();
