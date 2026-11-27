@@ -173,7 +173,7 @@ def git_head(root: pathlib.Path) -> str:
 
 
 def verification_module() -> object | None:
-    """Import the read-only gate and scope policy from the verification script."""
+    """Import gate and scope policy from the verification script."""
     path = ROOT / "scripts" / "verify_report.py"
     if not path.is_file():
         return None
@@ -298,9 +298,11 @@ def stale_patterns(state: dict) -> tuple[tuple[re.Pattern[str], str], ...]:
         patterns.append(
             (
                 re.compile(
-                    rf"\b{escaped}\b[^\n]{{0,80}}\b(?:is|are|was|remains|becomes)"
+                    rf"\b{escaped}\b[^\n]{{0,80}}"
+                    rf"\b(?:is|are|was|remains|becomes)"
                     rf"\s+(?:the\s+)?(?:CURRENT|current|final)\b"
-                    rf"|\b(?:CURRENT|current|final)\s+release[^\n]{{0,40}}\b{escaped}\b(?!\.)",
+                    rf"|\b(?:CURRENT|current|final)\s+release"
+                    rf"[^\n]{{0,40}}\b{escaped}\b(?!\.)",
                     re.IGNORECASE,
                 ),
                 f"stale {version} current claim",
@@ -336,8 +338,10 @@ def stale_patterns(state: dict) -> tuple[tuple[re.Pattern[str], str], ...]:
                 re.compile(
                     rf"\b{token}[^\n]{{0,20}}\b(?:is|was|remains)\s+"
                     rf"(?:the\s+)?(?:CURRENT|current|final)\b"
-                    rf"|\b(?:CURRENT|current|final)\s+release[^\n]{{0,30}}{token}"
-                    rf"|\b(?:is|was|remains)\s+(?:the\s+)?(?:CURRENT|current|final)"
+                    rf"|\b(?:CURRENT|current|final)\s+release"
+                    rf"[^\n]{{0,30}}{token}"
+                    rf"|\b(?:is|was|remains)\s+(?:the\s+)?"
+                    rf"(?:CURRENT|current|final)"
                     rf"\s+release[^\n]{{0,40}}{token}",
                     re.IGNORECASE,
                 ),
@@ -594,9 +598,7 @@ def gate_errors(state: dict, gates: dict) -> list[str]:
     return errors
 
 
-def test_inventory_errors(
-    root: pathlib.Path, state: dict, gates: dict
-) -> list[str]:
+def test_inventory_errors(state: dict, gates: dict) -> list[str]:
     """Reconcile every recorded test count with the generated report."""
     errors: list[str] = []
     inventory = state.get("test_inventory")
@@ -711,7 +713,7 @@ def state_errors(root: pathlib.Path, state: dict) -> list[str]:
     if not valid:
         return errors
     errors.extend(gate_errors(state, gates))
-    errors.extend(test_inventory_errors(root, state, gates))
+    errors.extend(test_inventory_errors(state, gates))
     errors.extend(branch_policy_errors(state, gates))
     errors.extend(workstream_errors(state))
     return errors

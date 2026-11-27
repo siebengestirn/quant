@@ -9,7 +9,7 @@
       "core build and tests"
     ]
   },
-  "capture_context": "Point-in-time capture at PR #67; volatile pins are verified against git HEAD, the assurance report and the current release manifest, not a claim about later live state",
+  "capture_context": "HISTORICAL point-in-time capture at PR #67; volatile pins are verified against git HEAD, the assurance report and the current release manifest when available, not a claim about later live state",
   "captured_state_basis": "Captured at PR #67; verified against git HEAD, the assurance report and the current release manifest",
   "current_workstreams": {
     "W1": "PARTIAL",
