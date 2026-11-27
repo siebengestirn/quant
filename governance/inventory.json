@@ -228,7 +228,7 @@
       "class": "evidence-record",
       "owner": "maintainer",
       "path": "governance/instrument-master-snapshots.json",
-      "purpose": "Immutable public instrument-master snapshot provenance",
+      "purpose": "Immutable instrument-master provenance pointing at tracked reference-data bytes",
       "retention": "current"
     }
   ],

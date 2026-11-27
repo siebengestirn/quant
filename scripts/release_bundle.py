@@ -37,6 +37,7 @@ Python suite.
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import io
 import json
@@ -47,6 +48,7 @@ import sys
 import tarfile
 import tempfile
 import zipfile
+import zlib
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -154,13 +156,17 @@ GITHUB_REMOTE_URLS = (
     f"ssh://git@github.com/{REPOSITORY}.git",
 )
 INSTRUMENT_DIR = "evidence/instrument-master"
+REFERENCE_DIR = "reference-data/instrument-master"
 INSTRUMENT_DATA = ROOT / "data" / "instrument-master"
+INSTRUMENT_REFERENCE = ROOT / "reference-data" / "instrument-master"
 INSTRUMENT_PROVENANCE = ROOT / "governance" / "instrument-master-snapshots.json"
 INSTRUMENT_PROVENANCE_ENTRY = (
     f"{PREFIX}governance/instrument-master-snapshots.json"
 )
 INSTRUMENT_PREFIX = f"{PREFIX}{INSTRUMENT_DIR}/"
-SNAPSHOTS_REMEDY = "run python3 scripts/fetch_instrument_snapshots.py first"
+SNAPSHOTS_REMEDY = (
+    "restore the tracked reference-data/instrument-master bytes from git"
+)
 SNAPSHOT_FIELDS = frozenset(
     {
         "provider",
@@ -172,9 +178,20 @@ SNAPSHOT_FIELDS = frozenset(
         "decoded_sha256",
     }
 )
+REFERENCE_FIELD_NAMES = (
+    "source_class",
+    "reference_decoded_path",
+    "reference_decoded_bytes",
+    "reference_decoded_sha256",
+    "reference_original_path",
+    "reference_original_bytes",
+    "reference_original_sha256",
+)
+REFERENCE_FIELDS = frozenset(REFERENCE_FIELD_NAMES)
 SNAPSHOT_TEXT_FIELDS = ("provider", "market_date", "original_filename")
 SNAPSHOT_SIZE_FIELDS = ("original_bytes", "decoded_bytes")
 SNAPSHOT_DIGEST_FIELDS = ("original_sha256", "decoded_sha256")
+MAX_SNAPSHOT_BYTES = 100 * 1024 * 1024
 
 
 def run_command(command: list[str]) -> str:
@@ -385,7 +402,41 @@ def parse_snapshot_provenance(text: str) -> list[dict]:
             digest = value.lower() if isinstance(value, str) else ""
             if len(digest) != 64 or not set(digest) <= HEX_DIGITS:
                 raise ValueError(f"invalid instrument provenance field: {key}")
+        validate_reference_fields(entry)
     return entries
+
+
+def validate_reference_fields(entry: dict) -> None:
+    """Validate optional tracked reference-data fields in one entry."""
+    if not REFERENCE_FIELDS & set(entry):
+        return
+    if not REFERENCE_FIELDS <= set(entry):
+        raise ValueError("incomplete reference-data provenance fields")
+    if entry["source_class"] != "immutable-reference-data":
+        raise ValueError("unsupported instrument source_class")
+    for key in ("reference_original_path", "reference_decoded_path"):
+        value = entry[key]
+        if not isinstance(value, str) or not value.startswith(
+            f"{REFERENCE_DIR}/"
+        ):
+            raise ValueError(f"invalid instrument provenance field: {key}")
+        if Path(value).is_absolute() or ".." in Path(value).parts:
+            raise ValueError(f"unsafe instrument reference path: {value}")
+        if not value.endswith(".gz"):
+            raise ValueError(f"unsupported instrument reference path: {value}")
+    for key in ("reference_original_bytes", "reference_decoded_bytes"):
+        value = entry[key]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 0 < value <= MAX_SNAPSHOT_BYTES
+        ):
+            raise ValueError(f"invalid instrument provenance field: {key}")
+    for key in ("reference_original_sha256", "reference_decoded_sha256"):
+        value = entry[key]
+        digest = value.lower() if isinstance(value, str) else ""
+        if len(digest) != 64 or not set(digest) <= HEX_DIGITS:
+            raise ValueError(f"invalid instrument provenance field: {key}")
 
 
 def snapshot_relative(provider: str, market_date: str, filename: str) -> str:
@@ -459,34 +510,121 @@ def check_snapshot_bytes(
         )
 
 
+def reference_files(entry: dict) -> tuple[str, str] | None:
+    """Return the two tracked reference-relative paths for one entry."""
+    if not REFERENCE_FIELDS <= set(entry):
+        return None
+    return tuple(
+        Path(entry[key]).relative_to(REFERENCE_DIR).as_posix()
+        for key in ("reference_original_path", "reference_decoded_path")
+    )
+
+
+def reference_plan(entries: list[dict]) -> list[tuple[str, int, str]]:
+    """Flatten tracked reference files into a unique verification plan."""
+    plan: list[tuple[str, int, str]] = []
+    for entry in entries:
+        pair = reference_files(entry)
+        if pair is None:
+            continue
+        for relative, key in zip(
+            pair, ("reference_original", "reference_decoded"), strict=True
+        ):
+            plan.append(
+                (
+                    relative,
+                    entry[f"{key}_bytes"],
+                    entry[f"{key}_sha256"].lower(),
+                )
+            )
+    paths = [path for path, _, _ in plan]
+    if len(paths) != len(set(paths)):
+        raise ValueError("duplicate tracked reference files in provenance")
+    return plan
+
+
+def gunzip_snapshot(payload: bytes, label: str) -> bytes:
+    """Decompress one bounded gzip-wrapped snapshot payload."""
+    if len(payload) > MAX_SNAPSHOT_BYTES:
+        raise ValueError(f"{label}: gzip wrapper exceeds size limit")
+    result = gzip.decompress(payload)
+    if len(result) > MAX_SNAPSHOT_BYTES:
+        raise ValueError(f"{label}: decoded data exceeds size limit")
+    return result
+
+
+def wire_payload(entry: dict, stored: bytes, label: str) -> bytes:
+    """Return original wire bytes from a raw gzip or a gzip wrapper."""
+    expected = entry["original_sha256"].lower()
+    if hashlib.sha256(stored).hexdigest() == expected:
+        return stored
+    unwrapped = gunzip_snapshot(stored, label)
+    if hashlib.sha256(unwrapped).hexdigest() == expected:
+        return unwrapped
+    raise ValueError(f"instrument snapshot SHA-256 mismatch: {label}")
+
+
 def stage_instrument_snapshots(
     quant_root: Path,
     data_root: Path = INSTRUMENT_DATA,
     provenance: Path = INSTRUMENT_PROVENANCE,
+    reference_root: Path = INSTRUMENT_REFERENCE,
 ) -> int:
-    """Stage pinned raw snapshots from the ignored data tree."""
-    plan = instrument_plan(provenance)
-    sources = [
-        (data_root / relative, relative, size, digest)
-        for relative, size, digest in plan
-    ]
-    missing = [
-        str(source) for source, _, _, _ in sources if not source.is_file()
-    ]
-    if missing:
-        raise RuntimeError(
-            "missing pinned instrument snapshots: "
-            + ", ".join(missing)
-            + f"; {SNAPSHOTS_REMEDY}"
-        )
+    """Stage pinned bytes from tracked reference-data, or legacy local data."""
+    entries = parse_snapshot_provenance(provenance.read_text(encoding="utf-8"))
     target = quant_root / INSTRUMENT_DIR
-    for source, relative, size, digest in sources:
-        payload = source.read_bytes()
-        check_snapshot_bytes(relative, payload, size, digest)
-        destination = target / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(payload)
-    return len(sources)
+    staged = 0
+    for entry in entries:
+        pair = reference_files(entry)
+        if pair is not None:
+            stored_payloads = []
+            for relative, key in zip(
+                pair, ("reference_original", "reference_decoded"), strict=True
+            ):
+                source = reference_root / relative
+                if not source.is_file():
+                    raise RuntimeError(
+                        f"missing tracked instrument snapshot: {source}; "
+                        f"{SNAPSHOTS_REMEDY}"
+                    )
+                payload = source.read_bytes()
+                check_snapshot_bytes(
+                    relative,
+                    payload,
+                    entry[f"{key}_bytes"],
+                    entry[f"{key}_sha256"].lower(),
+                )
+                tracked = quant_root / REFERENCE_DIR / relative
+                tracked.parent.mkdir(parents=True, exist_ok=True)
+                tracked.write_bytes(payload)
+                stored_payloads.append(payload)
+            decoded = gunzip_snapshot(stored_payloads[1], pair[1])
+            payloads = (
+                wire_payload(entry, stored_payloads[0], pair[0]),
+                decoded,
+            )
+            sources = zip(snapshot_files(entry), payloads, strict=True)
+            for (relative, size, digest), payload in sources:
+                check_snapshot_bytes(relative, payload, size, digest)
+                destination = target / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(payload)
+                staged += 1
+            continue
+        for relative, size, digest in snapshot_files(entry):
+            source = data_root / relative
+            if not source.is_file():
+                raise RuntimeError(
+                    f"missing pinned instrument snapshots: {source}; "
+                    f"{SNAPSHOTS_REMEDY}"
+                )
+            payload = source.read_bytes()
+            check_snapshot_bytes(relative, payload, size, digest)
+            destination = target / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(payload)
+            staged += 1
+    return staged
 
 
 def response_urls(payload: object) -> list[str]:
@@ -1337,6 +1475,51 @@ def check_evidence(
     return details
 
 
+def verify_reference_snapshots(
+    archive: zipfile.ZipFile, errors: list[str]
+) -> int:
+    """Digest-check bundled tracked reference files against provenance."""
+    names = set(archive.namelist())
+    if INSTRUMENT_PROVENANCE_ENTRY not in names:
+        return 0
+    try:
+        text = archive.read(INSTRUMENT_PROVENANCE_ENTRY).decode("utf-8")
+        entries = parse_snapshot_provenance(text)
+    except (ValueError, KeyError, TypeError, UnicodeDecodeError) as exc:
+        errors.append(f"instrument provenance error: {exc}")
+        return 0
+    count = 0
+    for entry in entries:
+        pair = reference_files(entry)
+        if pair is None:
+            continue
+        for relative, kind in zip(pair, ("original", "decoded"), strict=True):
+            name = f"{PREFIX}{REFERENCE_DIR}/{relative}"
+            if name not in names:
+                errors.append(f"missing tracked reference snapshot: {name}")
+                continue
+            payload = archive.read(name)
+            try:
+                check_snapshot_bytes(
+                    relative,
+                    payload,
+                    entry[f"reference_{kind}_bytes"],
+                    entry[f"reference_{kind}_sha256"].lower(),
+                )
+                unwrapped = gunzip_snapshot(payload, name)
+                accepted = {entry[f"{kind}_sha256"].lower()}
+                if kind == "original":
+                    accepted.add(entry["decoded_sha256"].lower())
+                if hashlib.sha256(unwrapped).hexdigest() not in accepted:
+                    raise ValueError(
+                        f"instrument snapshot unwrapped digest mismatch: {name}"
+                    )
+            except (ValueError, EOFError, OSError, zlib.error) as exc:
+                errors.append(str(exc))
+            count += 1
+    return count
+
+
 def verify_instrument_snapshots(
     archive: zipfile.ZipFile, errors: list[str]
 ) -> int:
@@ -1427,6 +1610,9 @@ def verify_bundle(
             details["instrument_snapshots"] = verify_instrument_snapshots(
                 archive, errors
             )
+            details["reference_snapshots"] = verify_reference_snapshots(
+                archive, errors
+            )
             entries = len(manifest)
             listed: set[str] = set()
             for name in names:
@@ -1477,6 +1663,7 @@ def print_summary(bundle: Path, result: dict[str, object]) -> None:
     print(f"Evidence report: {result.get('report')}")
     print(f"Manifest commit: {result.get('commit', '')}")
     print(f"Instrument snapshots: {result.get('instrument_snapshots', 0)}")
+    print(f"Tracked reference files: {result.get('reference_snapshots', 0)}")
     print(f"Native q tier: {result.get('native_q')}")
     print(f"Release scope: {result.get('release_scope', 'missing')}")
     for error in result["errors"]:

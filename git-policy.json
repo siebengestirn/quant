@@ -166,6 +166,12 @@
       "status": "closed; superseded by single-developer policy with zero required GitHub approvals"
     }
   },
+  "reference_data": {
+    "generated": false,
+    "path": "reference-data/instrument-master",
+    "policy": "Tracked immutable pinned snapshots: clean checkouts verify and consume these bytes offline; CI never fetches or regenerates them. Re-pinning is a separate reviewed provenance update.",
+    "tracked": true
+  },
   "release_record": {
     "current_main_sha_source": "MANIFEST.md in the current final release bundle (external artifact)",
     "current_state": "The exact main SHA, both CI run identifiers and the bundle digest are recorded in MANIFEST.md in the current final release bundle (external artifact); they are not pinned in this file.",

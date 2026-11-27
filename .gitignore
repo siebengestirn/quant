@@ -1,4 +1,5 @@
 # Generated operational state: never commit.
+# reference-data/ is TRACKED immutable pinned input, never generated.
 build/
 build-san/
 build-kdbx/

@@ -302,19 +302,15 @@ jobs:
     name: Release assurance (offline)
     # Hosted-only tier for push to main and pull_request. Every suite runs
     # against the exact event commit (PR head, never the ephemeral merge
-    # commit) on ubuntu-latest. No licensed runtime or provider network data
-    # is used: pinned snapshot evidence comes only from a controlled artifact
-    # whose bytes are digest-checked against governance provenance.
+    # commit) on ubuntu-latest. No licensed runtime, provider network access
+    # or mutable artifact is used: pinned snapshot bytes are tracked under
+    # reference-data/instrument-master/ and digest-checked offline against
+    # governance provenance. Re-pinning is a separate, reviewed provenance
+    # update and never a CI step.
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    # actions: read is granted only to fetch the pinned evidence artifact.
     permissions:
       contents: read
-      actions: read
-    # Shared by the pinned-snapshot pytest fixture and the optional bundle
-    # verification step; no provider data is ever fetched on this path.
-    env:
-      QUANT_RELEASE_BUNDLE: data/evidence-artifact/quant-final.zip
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -342,61 +338,11 @@ jobs:
       - name: Install pinned offline dependencies
         run: python3 -m pip install --quiet -r requirements.txt
 
-      # The run id is a reviewed, pinned repository variable. Snapshot bytes
-      # from the artifact are digest-checked against governance provenance;
-      # mutable provider downloads are never attempted here.
-      - name: Resolve pinned evidence artifact
-        id: evidence
-        env:
-          EVIDENCE_RUN_ID: ${{ vars.QUANT_EVIDENCE_ARTIFACT_RUN_ID }}
-        run: |
-          set -eu
-          if [ -n "$EVIDENCE_RUN_ID" ]; then
-            if ! printf '%s' "$EVIDENCE_RUN_ID" | grep -Eq '^[0-9]+$'; then
-              printf 'evidence artifact run id must be numeric\n' >&2
-              exit 1
-            fi
-            printf 'download=true\n' >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if python3 scripts/fetch_instrument_snapshots.py verify >/dev/null 2>&1; then
-            printf 'download=false\n' >> "$GITHUB_OUTPUT"
-            printf 'fetch=false\n' >> "$GITHUB_OUTPUT"
-            printf 'Pinned snapshots verified from the checked-out tree.\n'
-            exit 0
-          fi
-          # Explicit controlled provenance update: this is the ONLY place a
-          # network fetch is allowed, and digests must still match the pins.
-          printf 'download=false\n' >> "$GITHUB_OUTPUT"
-          printf 'fetch=true\n' >> "$GITHUB_OUTPUT"
-          printf 'Pinned snapshots absent; fetching from allowlisted official hosts with digest enforcement.\n'
-
-      - name: Download pinned release evidence artifact
-        if: steps.evidence.outputs.download == 'true'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: quant-release-evidence
-          path: data/evidence-artifact
-          run-id: ${{ vars.QUANT_EVIDENCE_ARTIFACT_RUN_ID }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Fetch pinned snapshots in controlled CI
-        if: steps.evidence.outputs.fetch == 'true'
-        run: |
-          set -eu
-          python3 scripts/fetch_instrument_snapshots.py fetch
-          python3 scripts/fetch_instrument_snapshots.py verify
-
-      - name: Confirm pinned release evidence bundle
-        if: steps.evidence.outputs.download == 'true'
-        run: |
-          set -eu
-          if [ ! -s "$QUANT_RELEASE_BUNDLE" ]; then
-            printf 'artifact lacks %s; refusing mutable provider data\n' \
-              "$QUANT_RELEASE_BUNDLE" >&2
-            exit 1
-          fi
-          printf 'pinned evidence bundle present: %s\n' "$QUANT_RELEASE_BUNDLE"
+      # The only snapshot step in hosted CI. Tracked reference bytes are
+      # immutable; a mismatch fails the job with a precise diagnostic.
+      # Network retrieval and pin updates are never part of this job.
+      - name: Verify tracked immutable instrument snapshots (offline)
+        run: python3 scripts/fetch_instrument_snapshots.py verify
 
       - name: Pinned instrument master tests (offline)
         run: python3 -m pytest tests/test_instrument_master.py -o addopts='' -q
@@ -418,10 +364,11 @@ jobs:
       - name: Release bundle manifest and evidence verification
         run: |
           set -eu
-          if [ -s "$QUANT_RELEASE_BUNDLE" ]; then
-            python3 scripts/release_bundle.py verify --bundle "$QUANT_RELEASE_BUNDLE"
+          if [ -s data/evidence-artifact/quant-final.zip ]; then
+            python3 scripts/release_bundle.py verify \
+              --bundle data/evidence-artifact/quant-final.zip
           else
-            printf 'NOT_APPLICABLE: no pinned release bundle artifact supplied; only this optional verification step is skipped.\n'
+            printf 'NOT_APPLICABLE: no local release bundle supplied; pinned reference bytes are verified directly.\n'
           fi
 
   style-contract:
