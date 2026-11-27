@@ -38,13 +38,7 @@ HEX_DIGITS = frozenset("0123456789abcdef")
 
 def run_command(command: list[str]) -> str:
     """Run a command from the repository root, failing loudly on error."""
-    result = subprocess.run(
-        command,
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip()
         raise RuntimeError(
