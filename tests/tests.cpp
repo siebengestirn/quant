@@ -222,8 +222,7 @@ void TestAccountingReplayIntegrity() {
   Check(!RebuildPortfolioFromJournal(
             &journal, Money::FromRupees(100000.0), &failed, &error),
         "conflicting posting ID halts replay");
-  Check(std::string(error).find("conflict") != std::string::npos ||
-            std::string(error).find("illegal") != std::string::npos,
+  Check(std::string(error).find("conflicting") != std::string::npos,
         "conflict failure is explicit");
 
   const std::string mismatch_path = TempPath("accounting_mismatch.jnl");
@@ -655,6 +654,9 @@ void TestReplayFillConflicts() {
     payload["side"] = quant::Json::String("BUY");
     payload["quantity"] = quant::Json::Integer(4);
     payload["limit_price_paise"] = quant::Json::Integer(11000);
+    payload["filled_quantity"] = quant::Json::Integer(0);
+    payload["order_type"] = quant::Json::String("LIMIT");
+    payload["time_in_force"] = quant::Json::String("DAY");
     payload["schema_version"] = quant::Json::UInteger(1);
     Event event;
     event.type = EventType::kPaperIntent;
@@ -677,6 +679,9 @@ void TestReplayFillConflicts() {
     payload["side"] = quant::Json::String("BUY");
     payload["quantity"] = quant::Json::Integer(4);
     payload["limit_price_paise"] = quant::Json::Integer(11000);
+    payload["filled_quantity"] = quant::Json::Integer(2);
+    payload["order_type"] = quant::Json::String("LIMIT");
+    payload["time_in_force"] = quant::Json::String("DAY");
     payload["schema_version"] = quant::Json::UInteger(1);
     Event event;
     event.type = EventType::kPaperIntent;
@@ -716,6 +721,9 @@ void TestReplayFillConflicts() {
     payload["side"] = quant::Json::String("BUY");
     payload["quantity"] = quant::Json::Integer(4);
     payload["limit_price_paise"] = quant::Json::Integer(11000);
+    payload["filled_quantity"] = quant::Json::Integer(2);
+    payload["order_type"] = quant::Json::String("LIMIT");
+    payload["time_in_force"] = quant::Json::String("DAY");
     Event event;
     event.type = EventType::kPaperIntent;
     event.payload = quant::Json::ObjectValue(payload).Dump();
@@ -729,6 +737,9 @@ void TestReplayFillConflicts() {
     payload["side"] = quant::Json::String("BUY");
     payload["quantity"] = quant::Json::Integer(4);
     payload["limit_price_paise"] = quant::Json::Integer(11000);
+    payload["filled_quantity"] = quant::Json::Integer(2);
+    payload["order_type"] = quant::Json::String("LIMIT");
+    payload["time_in_force"] = quant::Json::String("DAY");
     payload["schema_version"] = quant::Json::UInteger(1);
     Event event;
     event.type = EventType::kPaperIntent;
@@ -746,8 +757,9 @@ void TestReplayFillConflicts() {
                      std::make_shared<Portfolio>(Money::FromRupees(100000.0)));
   Check(!strict.RehydrateFromJournal(&error),
         "conflicting duplicate fill id stops replay");
-  Check(std::string(error).find("conflict") != std::string::npos ||
-            std::string(error).find("illegal") != std::string::npos,
+  Check(!error.empty() &&
+            (std::string(error).find("fill") != std::string::npos ||
+             std::string(error).find("recorded") != std::string::npos),
         "conflict failure is explicit");
   bad.Close();
   journal.Close();
@@ -1278,6 +1290,149 @@ void TestRiskAuthorizationBinding() {
   journal.Close();
 }
 
+void TestAmbiguousStateRecovery() {
+  const std::string path = TempPath("ambiguous_replay.jnl");
+  std::remove(path.c_str());
+  std::string error;
+  Journal journal;
+  Check(journal.Open(path, &error), "ambiguous journal opens");
+  auto append = [&](PaperOrderState state, int filled) {
+    Json::Object payload;
+    payload["order_id"] = quant::Json::String("O-AMB");
+    payload["symbol"] = quant::Json::String("AAA");
+    payload["state"] = quant::Json::String(PaperOrderStateName(state));
+    payload["side"] = quant::Json::String("BUY");
+    payload["quantity"] = quant::Json::Integer(4);
+    payload["limit_price_paise"] = quant::Json::Integer(10000);
+    payload["filled_quantity"] = quant::Json::Integer(filled);
+    payload["order_type"] = quant::Json::String("LIMIT");
+    payload["time_in_force"] = quant::Json::String("DAY");
+    payload["schema_version"] = quant::Json::UInteger(1);
+    Event event;
+    event.type = EventType::kPaperIntent;
+    event.payload = quant::Json::ObjectValue(payload).Dump();
+    return journal.Append(&event, &error);
+  };
+  Check(append(PaperOrderState::kIntent, 0), "ambiguous intent");
+  Check(append(PaperOrderState::kRiskApproved, 0), "ambiguous risk approval");
+  Check(append(PaperOrderState::kSubmitted, 0), "ambiguous submission");
+  Check(append(PaperOrderState::kAcknowledged, 0), "ambiguous ack");
+  Check(append(PaperOrderState::kAmbiguous, 0), "ambiguous state recorded");
+  auto portfolio = std::make_shared<Portfolio>(Money::FromRupees(100000.0));
+  PaperBroker broker(TestConfig(), &journal, portfolio);
+  Check(broker.RehydrateFromJournal(&error),
+        "zero-fill ambiguous order rehydrates");
+  const PaperOrder* restored = broker.Find("O-AMB");
+  Check(restored != nullptr && restored->state == PaperOrderState::kAmbiguous,
+        "ambiguous state is preserved");
+  Check(!broker.Submit("O-AMB", &error), "ambiguous order cannot be submitted");
+  Check(!broker.Cancel("O-AMB", &error), "ambiguous order cannot be cancelled");
+  Check(!broker.Expire("O-AMB", &error), "ambiguous order cannot be expired");
+  Check(broker.ResolveAmbiguous("O-AMB",
+                                PaperOrderState::kCancelled,
+                                "OPERATOR-1",
+                                "no broker confirmation",
+                                &error),
+        "operator resolves ambiguous order");
+  Check(broker.Find("O-AMB")->state == PaperOrderState::kCancelled,
+        "resolution produces cancelled state");
+
+  const std::string partial_path = TempPath("ambiguous_partial.jnl");
+  std::remove(partial_path.c_str());
+  Journal partial;
+  partial.Open(partial_path, &error);
+  auto append_to = [&](Journal* target, PaperOrderState state, int filled) {
+    Json::Object payload;
+    payload["order_id"] = quant::Json::String("O-AMB2");
+    payload["symbol"] = quant::Json::String("AAA");
+    payload["state"] = quant::Json::String(PaperOrderStateName(state));
+    payload["side"] = quant::Json::String("BUY");
+    payload["quantity"] = quant::Json::Integer(4);
+    payload["limit_price_paise"] = quant::Json::Integer(10000);
+    payload["filled_quantity"] = quant::Json::Integer(filled);
+    payload["order_type"] = quant::Json::String("LIMIT");
+    payload["time_in_force"] = quant::Json::String("DAY");
+    if (filled > 0) {
+      FillRecord lot;
+      lot.version = 2;
+      lot.id = "F-AMB";
+      lot.order_id = "O-AMB2";
+      lot.symbol = "AAA";
+      lot.quantity = filled;
+      lot.price_paise = 10000;
+      lot.notional_paise = 10000 * filled;
+      for (const auto& [key, value] : FillRecordJson(lot))
+        payload[key] = value;
+    }
+    Event event;
+    event.type = EventType::kPaperIntent;
+    event.payload = quant::Json::ObjectValue(payload).Dump();
+    return target->Append(&event, &error);
+  };
+  Check(append_to(&partial, PaperOrderState::kIntent, 0), "partial intent");
+  Check(append_to(&partial, PaperOrderState::kAmbiguous, 2),
+        "partially filled ambiguous state");
+  PaperBroker partial_broker(
+      TestConfig(),
+      &partial,
+      std::make_shared<Portfolio>(Money::FromRupees(100000.0)));
+  const bool partial_ok = partial_broker.RehydrateFromJournal(&error);
+  Check(partial_ok, "partially filled ambiguous order rehydrates");
+  const PaperOrder* amb = partial_broker.Find("O-AMB2");
+  Check(amb != nullptr, "ambiguous order exists");
+  if (amb == nullptr) {
+    journal.Close();
+    partial.Close();
+    return;
+  }
+  Check(amb->state == PaperOrderState::kAmbiguous,
+        "partial ambiguous state is not upgraded");
+  Check(!partial_broker.ApplyQuote("O-AMB2", GoodQuote(100.0), NowMs(), &error),
+        "ambiguous order cannot receive fills");
+  journal.Close();
+  partial.Close();
+}
+
+void TestImpossibleFilledStateReplay() {
+  const std::string path = TempPath("filled_zero_fills.jnl");
+  std::remove(path.c_str());
+  std::string error;
+  Journal journal;
+  Check(journal.Open(path, &error), "impossible state journal opens");
+  auto append = [&](PaperOrderState state, int filled) {
+    Json::Object payload;
+    payload["order_id"] = quant::Json::String("O-IMPOSSIBLE");
+    payload["symbol"] = quant::Json::String("AAA");
+    payload["state"] = quant::Json::String(PaperOrderStateName(state));
+    payload["side"] = quant::Json::String("BUY");
+    payload["quantity"] = quant::Json::Integer(4);
+    payload["limit_price_paise"] = quant::Json::Integer(10000);
+    payload["filled_quantity"] = quant::Json::Integer(filled);
+    payload["order_type"] = quant::Json::String("LIMIT");
+    payload["time_in_force"] = quant::Json::String("DAY");
+    payload["schema_version"] = quant::Json::UInteger(1);
+    Event event;
+    event.type = EventType::kPaperIntent;
+    event.payload = quant::Json::ObjectValue(payload).Dump();
+    return journal.Append(&event, &error);
+  };
+  Check(append(PaperOrderState::kIntent, 0), "intent recorded");
+  Check(append(PaperOrderState::kRiskApproved, 0), "risk approval recorded");
+  Check(append(PaperOrderState::kSubmitted, 0), "submission recorded");
+  Check(append(PaperOrderState::kAcknowledged, 0), "acknowledgement recorded");
+  Check(append(PaperOrderState::kFilled, 4),
+        "impossible filled event recorded");
+  PaperBroker strict(TestConfig(),
+                     &journal,
+                     std::make_shared<Portfolio>(Money::FromRupees(100000.0)));
+  Check(!strict.RehydrateFromJournal(&error),
+        "FILLED without executions fails replay");
+  Check(!error.empty(), "impossible state rejection has an explicit reason");
+  Check(strict.Find("O-IMPOSSIBLE") == nullptr,
+        "impossible order is not projected");
+  journal.Close();
+}
+
 void TestCancelAfterPartialReplay() {
   const std::string path = TempPath("cancel_partial.jnl");
   std::remove(path.c_str());
@@ -1345,6 +1500,9 @@ void TestMalformedFillReplay() {
     payload["side"] = quant::Json::String("BUY");
     payload["quantity"] = quant::Json::Integer(4);
     payload["limit_price_paise"] = quant::Json::Integer(15000);
+    payload["filled_quantity"] = quant::Json::Integer(0);
+    payload["order_type"] = quant::Json::String("LIMIT");
+    payload["time_in_force"] = quant::Json::String("DAY");
     payload["schema_version"] = quant::Json::UInteger(1);
     return payload;
   };
@@ -3396,6 +3554,8 @@ int main() {
   TestRiskAuthorizationBinding();
   TestRiskAuthorizationContext();
   TestCancelAfterPartialReplay();
+  TestImpossibleFilledStateReplay();
+  TestAmbiguousStateRecovery();
   TestMalformedFillReplay();
   TestUniverseTransactionConsistency();
   TestEventRuntimeOrdering();

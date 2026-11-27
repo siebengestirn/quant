@@ -1427,6 +1427,11 @@ bool PaperBroker::ApplyFillRecord(PaperOrder* order,
       *error = "fill accumulator overflow or overfill";
     return false;
   }
+  if (all_fill_ids_.find(record.id) != all_fill_ids_.end()) {
+    if (error)
+      *error = "fill identity already used by another order";
+    return false;
+  }
   PaperOrder::Fill lot;
   lot.id = record.id;
   lot.quantity = record.quantity;
@@ -1485,21 +1490,47 @@ PaperBroker::PaperBroker(Config config,
 }
 
 namespace {
+bool PaperStateMatchesFills(PaperOrderState state, int filled, int quantity) {
+  if (filled < 0 || quantity <= 0 || filled > quantity)
+    return false;
+  switch (state) {
+    case PaperOrderState::kIntent:
+    case PaperOrderState::kRiskApproved:
+    case PaperOrderState::kSubmitted:
+    case PaperOrderState::kAcknowledged:
+    case PaperOrderState::kWorking:
+      return filled == 0;
+    case PaperOrderState::kPartiallyFilled:
+      return filled > 0 && filled < quantity;
+    case PaperOrderState::kFilled:
+      return filled == quantity;
+    case PaperOrderState::kCancelled:
+    case PaperOrderState::kExpired:
+    case PaperOrderState::kRejected:
+    case PaperOrderState::kAmbiguous:
+      return filled == 0 || filled < quantity;
+  }
+  return false;
+}
+
 bool IsValidPaperTransition(PaperOrderState from, PaperOrderState to) {
   if (from == to)
     return true;
   switch (from) {
     case PaperOrderState::kIntent:
       return to == PaperOrderState::kRiskApproved ||
-             to == PaperOrderState::kRejected;
+             to == PaperOrderState::kRejected ||
+             to == PaperOrderState::kAmbiguous;
     case PaperOrderState::kRiskApproved:
       return to == PaperOrderState::kSubmitted ||
              to == PaperOrderState::kRejected ||
-             to == PaperOrderState::kCancelled;
+             to == PaperOrderState::kCancelled ||
+             to == PaperOrderState::kAmbiguous;
     case PaperOrderState::kSubmitted:
       return to == PaperOrderState::kAcknowledged ||
              to == PaperOrderState::kRejected ||
-             to == PaperOrderState::kCancelled;
+             to == PaperOrderState::kCancelled ||
+             to == PaperOrderState::kAmbiguous;
     case PaperOrderState::kAcknowledged:
     case PaperOrderState::kWorking:
     case PaperOrderState::kPartiallyFilled:
@@ -1509,11 +1540,13 @@ bool IsValidPaperTransition(PaperOrderState from, PaperOrderState to) {
              to == PaperOrderState::kCancelled ||
              to == PaperOrderState::kExpired ||
              to == PaperOrderState::kAmbiguous;
+    case PaperOrderState::kAmbiguous:
+      return to == PaperOrderState::kCancelled ||
+             to == PaperOrderState::kRejected;
     case PaperOrderState::kFilled:
     case PaperOrderState::kRejected:
     case PaperOrderState::kCancelled:
     case PaperOrderState::kExpired:
-    case PaperOrderState::kAmbiguous:
       return false;
   }
   return false;
@@ -1533,6 +1566,11 @@ bool PaperBroker::Transition(PaperOrder* order,
   if (!IsValidPaperTransition(order->state, state)) {
     if (error)
       *error = "invalid paper order state transition";
+    return false;
+  }
+  if (!PaperStateMatchesFills(state, order->filled_quantity, order->quantity)) {
+    if (error)
+      *error = "order state is inconsistent with reconstructed fills";
     return false;
   }
   Json::Object payload;
@@ -1804,6 +1842,11 @@ bool PaperBroker::Expire(const std::string& id, std::string* error) {
       *error = "unknown order";
     return false;
   }
+  if (it->second.state == PaperOrderState::kAmbiguous) {
+    if (error)
+      *error = "ambiguous order requires operator resolution";
+    return false;
+  }
   return Transition(
       &it->second, PaperOrderState::kExpired, "session expired", error);
 }
@@ -1906,10 +1949,44 @@ PaperOrderState ParsePaperState(const std::string& name) {
   return it == names.end() ? PaperOrderState::kAmbiguous : it->second;
 }
 
+bool PaperBroker::ResolveAmbiguous(const std::string& id,
+                                   PaperOrderState resolved_state,
+                                   const std::string& operator_id,
+                                   const std::string& reason,
+                                   std::string* error) {
+  auto it = orders_.find(id);
+  if (it == orders_.end()) {
+    if (error)
+      *error = "unknown order";
+    return false;
+  }
+  if (it->second.state != PaperOrderState::kAmbiguous) {
+    if (error)
+      *error = "order is not in AMBIGUOUS state";
+    return false;
+  }
+  if (resolved_state != PaperOrderState::kCancelled &&
+      resolved_state != PaperOrderState::kRejected) {
+    if (error)
+      *error = "operator resolution must cancel or reject the order";
+    return false;
+  }
+  if (operator_id.empty() || reason.empty()) {
+    if (error)
+      *error = "operator identity and reason are required";
+    return false;
+  }
+  const std::string detail = "operator=" + operator_id + " reason=" + reason;
+  return Transition(&it->second, resolved_state, detail, error);
+}
+
 bool PaperBroker::RehydrateFromJournal(std::string* error) {
-  auto fail = [error](const char* reason) {
+  auto fail = [this, error](const char* reason) {
     if (error)
       *error = reason;
+    orders_.clear();
+    posted_ids_.clear();
+    all_fill_ids_.clear();
     return false;
   };
   if (journal_ == nullptr)
@@ -1919,6 +1996,7 @@ bool PaperBroker::RehydrateFromJournal(std::string* error) {
     return false;
   orders_.clear();
   posted_ids_.clear();
+  all_fill_ids_.clear();
   for (const Event& event : events) {
     Json payload;
     if (!Json::Parse(event.payload, &payload, error))
@@ -1951,8 +2029,11 @@ bool PaperBroker::RehydrateFromJournal(std::string* error) {
       auto order = orders_.find(record.order_id);
       if (order == orders_.end())
         return fail("fill event references missing parent order");
+      if (all_fill_ids_.find(record.id) != all_fill_ids_.end())
+        return fail("fill identity reused across orders in journal");
       if (!ApplyFillRecord(&order->second, record, error))
-        return false;
+        return fail("fill reducer rejected event");
+      all_fill_ids_.insert(record.id);
       continue;
     }
     if (event.type != EventType::kPaperIntent)
@@ -1976,6 +2057,8 @@ bool PaperBroker::RehydrateFromJournal(std::string* error) {
     order.causation_id = order.id;
     order.correlation_id = order.id;
     order.symbol = symbol->as_string();
+    if (side->as_string() != "BUY" && side->as_string() != "SELL")
+      return fail("unknown order side in journal");
     order.side =
         side->as_string() == "SELL" ? OrderSide::kSell : OrderSide::kBuy;
     int64_t order_limit = 0;
@@ -1998,12 +2081,12 @@ bool PaperBroker::RehydrateFromJournal(std::string* error) {
     optional_text("instrument_key", &order.instrument_key);
     optional_text("order_type", &order.order_type);
     optional_text("time_in_force", &order.time_in_force);
+    if (order.order_type != "LIMIT" || order.time_in_force != "DAY")
+      return fail("unsupported order type or time-in-force in journal");
     optional_text("risk_policy_id", &order.risk_policy_id);
     optional_text("config_version", &order.config_version);
     optional_text("execution_model", &order.execution_model);
     const PaperOrderState next_state = ParsePaperState(state->as_string());
-    if (next_state == PaperOrderState::kAmbiguous)
-      return fail("unknown paper order state in journal");
     auto existing = orders_.find(order.id);
     if (existing == orders_.end()) {
       if (next_state != PaperOrderState::kIntent)
@@ -2031,9 +2114,23 @@ bool PaperBroker::RehydrateFromJournal(std::string* error) {
       FillRecord record;
       if (!ParseFillRecord(payload, &record, error))
         return fail("malformed fill record in order transition");
+      const size_t before_fills = restored.fills.size();
       if (!ApplyFillRecord(&restored, record, error))
-        return false;
+        return fail("fill reducer rejected event");
+      if (restored.fills.size() > before_fills &&
+          all_fill_ids_.find(record.id) != all_fill_ids_.end())
+        return fail("fill identity reused across orders in journal");
+      all_fill_ids_.insert(record.id);
     }
+    const Json* recorded_filled = payload.Find("filled_quantity");
+    int64_t decoded_filled = 0;
+    if (recorded_filled == nullptr ||
+        !recorded_filled->as_integer(&decoded_filled) ||
+        decoded_filled != restored.filled_quantity)
+      return fail("recorded filled quantity differs from reconstructed fills");
+    if (!PaperStateMatchesFills(
+            restored.state, restored.filled_quantity, restored.quantity))
+      return fail("journal state is inconsistent with reconstructed fills");
     next_id_ = std::max(next_id_, static_cast<uint64_t>(orders_.size() + 1));
   }
   for (auto& [id, order] : orders_) {

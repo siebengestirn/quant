@@ -1238,6 +1238,11 @@ class PaperBroker {
   bool Cancel(const std::string& id, std::string* error);
   bool Expire(const std::string& id, std::string* error);
   bool MarkAmbiguous(const std::string& id, std::string* error);
+  bool ResolveAmbiguous(const std::string& id,
+                        PaperOrderState resolved_state,
+                        const std::string& operator_id,
+                        const std::string& reason,
+                        std::string* error);
   bool Reconcile(const std::string& id, std::string* error);
   bool RehydrateFromJournal(std::string* error);
   const PaperOrder* Find(const std::string& id) const;
@@ -1264,6 +1269,7 @@ class PaperBroker {
   std::map<std::string, PaperOrder> orders_;
   std::set<std::string> posted_ids_;
   std::set<std::string> consumed_authorizations_;
+  std::set<std::string> all_fill_ids_;
   std::shared_ptr<std::recursive_mutex> authority_lock_ =
       std::make_shared<std::recursive_mutex>();
   uint64_t next_id_ = 1;
