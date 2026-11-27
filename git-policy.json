@@ -9,7 +9,7 @@
   },
   "branch": {
     "active_topic_branches": [],
-    "active_topic_rationale": "Single-developer repository: remediation PRs #47-#53, final release record PR #54, documentation inventory PR #55 and R7 correction PR #56 are all merged; zero PRs are open and main is the sole integration branch. The R8.1 corrective work (exact-integer open interest, integral volume, wall-clock journal replay) is implemented locally, with exact-head CI and a new digest to be recorded in the regenerated final bundle MANIFEST.md. The active policy is zero required GitHub approvals with a mandatory self-review checklist and exact-head CI; independent external acceptance is not recorded.",
+    "active_topic_rationale": "Single-developer repository: remediation PRs #47-#53, final release record PR #54, documentation inventory PR #55 and R7 correction PR #56 are all merged; zero PRs are open and main is the sole integration branch. The R8.1 corrective work (exact-integer open interest, integral volume, wall-clock journal replay) is implemented locally, with exact-head CI run 45968572026 and a regenerated final bundle whose MANIFEST.md records the exact SHA and digest. The active policy is zero required GitHub approvals with a mandatory self-review checklist and exact-head CI; independent external acceptance is not recorded.",
     "allowed_topic_prefixes": [
       "feat",
       "fix",

@@ -125,10 +125,12 @@ is mandatory only for defined high-risk release gates, not every merge.
 
 The R8.1 corrective work — exact-integer OI parsing with C++/Python parity
 above 2^53, the integral-volume dataset contract and a wall-clock journal
-replay test — is IMPLEMENTED locally. After the changes, local verification
-recorded 14090 C++ checks with 0 failures and 9 portable dataset-contract
-pytest passes; the full suite is to be rerun. Exact-head CI for R8.1 will be
-recorded by the regenerated final bundle `MANIFEST.md`; the previous bundle
+replay test — is IMPLEMENTED and MERGED in PR #57. Verification recorded
+14090 C++ checks, 14090 sanitizer checks, zero failures, 50 portable pytest
+passes and all portable assurance gates PASS. Hosted exact-head CI run
+45968572026 succeeded on head `21a62e3eca480440981a3c1fa0681f9a12493171`;
+post-merge CI run 45968891063 succeeded on the merge commit. The final
+bundle `MANIFEST.md` records the exact SHA and digest; the previous bundle
 does not cover R8.1. No independent acceptance is claimed.
 
 Provider scope (W2/W3): the live Upstox integration is read-only V2 REST

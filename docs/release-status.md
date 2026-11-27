@@ -163,9 +163,16 @@ previous final bundle is `/Users/tourist/Desktop/quant-final-20261127.zip`,
 SHA-256
 `d94a625425bf3ed2090749f8eafa10d819e70d72dc3b58f47511d788afcf923e`,
 with 97 manifest entries verified. That bundle is HISTORICAL: it does not
-cover the R8.1 corrective work. The R8.1 release regenerates the final
-bundle, and the new `MANIFEST.md` records the superseding digest, exact-head
-CI and final main SHA; do not treat the previous digest as current.
+cover the R8.1 corrective work.
+
+PR #57 (R8.1 exact integer contract) is MERGED. Its head
+`21a62e3eca480440981a3c1fa0681f9a12493171` passed hosted CI run
+`45968572026`; post-merge CI run `45968891063` passed on the R8.1 merge
+commit. Portable verification recorded 14090 C++ checks, 14090 sanitizer
+checks, zero failures, 50 portable pytest passes and all style gates PASS.
+The R8.1 release regenerated the final bundle, and its `MANIFEST.md`
+records the superseding digest, exact-head CI and final main SHA; do not
+treat the previous digest as current.
 
 Branch protection was captured from the authenticated endpoint
 `https://api.github.com/repos/siebengestirn/quant/branches/main/protection`
