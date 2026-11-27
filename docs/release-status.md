@@ -1,13 +1,16 @@
-# QUANT release status — 27 November 2026 (final, through PR #58)
+# QUANT release status — 27 November 2026 (record through PR #61)
 
 The exact current main SHA, hosted CI runs and bundle digest are recorded in
 `MANIFEST.md` of the current final release bundle (external artifact), not
-as immutable identifiers in this document. Values labelled "at PR #58" are
-release history; they do not claim the current head after reorganization.
-The public web PR index showed "29 closed" because it was not fully paginated;
-it is not the authoritative inventory. PR #44 was an earlier technical
-remediation and PR #45 enforced branch protection. PR #58 is the final
-closeout; PR #56, PR #57 and PR #58 are the latest corrections.
+as immutable identifiers in this document. Values labelled "at PR #58" or
+"at PR #61" are HISTORICAL release records; they do not claim the current
+head after reorganization. PR #61 merged the R8.3 + W1 A/B/C work; R8.4
+(native-q conclusion mapping, remote provenance and W1 snapshot
+reproducibility) is IN PROGRESS. The public web PR index showed "29 closed"
+because it was not fully paginated; it is not the authoritative inventory.
+PR #44 was an earlier technical remediation and PR #45 enforced branch
+protection. PR #58 was the closeout at that time; PR #56, PR #57, PR #58
+and PR #61 are the latest merged corrections.
 
 SUPERSEDED — historical policy before 2026-11-27: open PRs after PR #46: 0;
 branches: `main` only. This is a historical inventory snapshot, not the live
@@ -52,10 +55,13 @@ historical policy before 2026-11-27 and is retained only as evidence.
 | #42 | run `45863382305`, all required jobs pass | — |
 | #43 | run `45867909983`, all required jobs pass | — |
 | #44 | run `45869637951`, all required jobs pass | — |
-| final `main` | run `45969624206`, all three required jobs pass | post-merge success at PR #58 on `1a91da2…`; current head in bundle `MANIFEST.md` |
+| final `main` (at PR #58) | run `45969624206`, all three required jobs pass | HISTORICAL post-merge success at PR #58 on `1a91da2…`; current head in bundle `MANIFEST.md` |
+| #61 | run `46007348694`, three jobs pass and native-q skipped | HISTORICAL at PR #61: R8.3 + W1 A/B/C merge `201f5ba…`; native-q GATED_NOT_RUN, never reported as passed |
 
 It is therefore **not** true that every PR head was green: PR #34 was merged
-with a red style check and was repaired by PR #35. The final `main` is green.
+with a red style check and was repaired by PR #35. Hosted CI at PR #61
+succeeded with the native-q tier skipped; the current head is in
+`MANIFEST.md` of the current final release bundle (external artifact).
 
 ## Governance — SUPERSEDED historical policy before 2026-11-27
 
@@ -95,13 +101,13 @@ PRs, including #34 and #37, were merged before this enforcement and show no
 approving review; that gap is recorded, not hidden. CI success is not
 independent acceptance.
 
-## Gate disposition after remediation PRs #47–#53 and #56–#58
+## Gate disposition after remediation PRs #47–#53, #56–#58 and #61 (HISTORICAL)
 
 | Gate | Status |
 |---|---|
 | 0 policy/review hygiene | IMPLEMENTED, ENFORCED by branch protection from this release; historical approvals absent |
-| 1 PIT data/calendar | INTEGRATION-TESTED for ticker-keyed status; permanent instrument identity remains open |
-| 2 KDB-X generations | IMPLEMENTED, FAULT-INJECTED; native q tested locally and still GATED in hosted CI |
+| 1 PIT data/calendar | INTEGRATION-TESTED for ticker-keyed status and W1-A/B/C offline public-master crosswalk (9,926 VERIFIED / 174 UNMAPPED); effective-dated identity (W1-D) PENDING |
+| 2 KDB-X generations | IMPLEMENTED, FAULT-INJECTED; native q tested locally and still GATED in hosted CI (skipped/GATED_NOT_RUN at PR #61) |
 | 3 accounting replay | INTEGRATION-TESTED with conflict detection |
 | 4 publication transactions | IMMUTABLE transaction IDs; fault-injected at audit/rename/commit boundaries |
 | 5 event runtime | UNIT-TESTED in-memory prototype; not durable or concurrent |
@@ -110,15 +116,18 @@ independent acceptance.
 | 8 asset contracts | Model only; NSE cash-equity daily profile only |
 | 9 live-route controls | DISABLED unconditionally |
 
-## Remaining limitations (unchanged)
+## Remaining limitations (reconciled)
 
 Research INCONCLUSIVE/negative; White Reality Check and Hansen SPA unavailable;
 cost model GROSS_ONLY; final holdout SEALED_NOT_EVALUATED. Provider streaming,
 contract-note reconciliation, corporate-action ingestion and operational paper
-trading NOT IMPLEMENTED. Native q hosted required check GATED/NOT REQUIRED;
-power-loss durability NOT PROVEN; intraday/HFT UNSUPPORTED; multi-asset venue
-conformance NOT ESTABLISHED; independent reviewer acceptance for historical
-releases NOT RECORDED; live execution DISABLED; trading decision NO TRADE.
+trading NOT IMPLEMENTED. W1-A/B/C map pinned public masters offline, but W1-D
+live consistency and effective dating are PENDING; no full W1 exit is claimed.
+Native q hosted required check GATED/NOT REQUIRED (skipped/GATED_NOT_RUN at
+PR #61); power-loss durability NOT PROVEN; intraday/HFT UNSUPPORTED;
+multi-asset venue conformance NOT ESTABLISHED; independent reviewer acceptance
+for recorded releases NOT RECORDED; live execution DISABLED; trading
+decision NO TRADE.
 
 ## Governance evidence refresh (27 November 2026) — SUPERSEDED
 
@@ -135,26 +144,28 @@ export of the endpoint as configured at that time, not the live configuration.
 The JSON export is untouched evidence. `git-policy.json` declares policy;
 only an authenticated API export proves live GitHub configuration.
 
-## ACTIVE POLICY — Integration record — 27 November 2026 (updated through PR #58) <!-- https://github.com/siebengestirn/quant/pull/58 -->
+## ACTIVE POLICY — Integration record — 27 November 2026 (updated through PR #61) <!-- https://github.com/siebengestirn/quant/pull/61 -->
 
 This section is the ACTIVE POLICY. It supersedes the one-approval governance
 material above; zero PRs are open and `main` is the sole integration branch.
 
 All seven remediation PRs #47–#53 were merged sequentially with merge commits
-after fresh exact-head CI on each synced head; PRs #56–#58 were later merged
-under the same policy. `main` is the sole integration branch. Branch protection
-was corrected to the single-developer policy already used in the sibling
-repositories: zero required GitHub approvals, explicit self-review checklist,
-exact-head CI evidence, three required checks, PR, conversation resolution,
-no force pushes and no branch deletion. No admin bypass or history rewrite
-was used.
+after fresh exact-head CI on each synced head; PRs #56–#58 and #61 (R8.3/W1)
+were later merged under the same policy. `main` is the sole integration
+branch. Branch protection was corrected to the single-developer policy used
+in the sibling repositories: zero required GitHub approvals, explicit
+self-review checklist, exact-head CI evidence, three required checks, PR,
+conversation resolution, no force pushes and no branch deletion. No admin
+bypass or history rewrite was used.
 
-This record supersedes the earlier seven-open-PR snapshot. Operating status is
-unchanged: research INCONCLUSIVE/negative; holdout SEALED_NOT_EVALUATED;
+This record supersedes the earlier seven-open-PR snapshot. Operating status
+remains: research INCONCLUSIVE/negative; holdout SEALED_NOT_EVALUATED;
 provider streaming, contract-note reconciliation, corporate actions and
-operational paper trading NOT IMPLEMENTED; native q hosted tier GATED;
-power-loss durability NOT PROVEN; intraday/HFT UNSUPPORTED; multi-asset venue
-conformance NOT ESTABLISHED; live execution DISABLED; decision NO TRADE.
+operational paper trading NOT IMPLEMENTED; W1-A/B/C offline public-master
+evidence only, with W1-D effective dating and live consistency PENDING; native
+q hosted tier GATED (skipped/GATED_NOT_RUN at PR #61); power-loss durability
+NOT PROVEN; intraday/HFT UNSUPPORTED; multi-asset venue conformance NOT
+ESTABLISHED; live execution DISABLED; decision NO TRADE.
 
 ### Active release-bundle policy (R8.1 corrective release)
 
@@ -172,7 +183,7 @@ commit `460b8f2d…`. Portable verification recorded 14090 C++ checks,
 14090 sanitizer checks, zero failures, 50 portable pytest passes and all
 portable assurance gates PASS. PR #57 is not the final closeout.
 
-PR #58 is MERGED and was the final closeout at PR #58. Its head
+PR #58 is MERGED and was the closeout at that time. Its head
 `fb9170ca5e9003b0dbea7c1191e874ff4e7fa8b2` passed hosted CI run
 `45969369813`; final post-merge CI run `45969624206` passed on `main`
 `1a91da2fb08995c9f6ee20e373d004ad28e58a72`. The then-final bundle
@@ -181,6 +192,30 @@ PR #58 is MERGED and was the final closeout at PR #58. Its head
 These are release-history values at PR #58, not immutable current
 identifiers: the exact current main SHA, CI runs and bundle digest are in
 `MANIFEST.md` of the current final release bundle (external artifact).
+
+### Active release-bundle policy (R8.3 / PR #61 — HISTORICAL)
+
+PR #61 merged the R8.3 + W1 A/B/C work at
+`201f5ba602f68fc1370579cefa50b8b599af05d5`. HISTORICAL at PR #61: the
+then-final bundle `MANIFEST.md` recorded 108 entries and digest
+`c5be8f1ff2ae2faeea161dfa815511ee1f8775cb347de98f3602dd500993bf8c`,
+and hosted CI run `46007348694` succeeded with three passing jobs and one
+skipped native-q job (GATED_NOT_RUN). Local verification recorded 14114 C++
+checks / 0 failures, 14114 sanitizer checks / 0 failures, 51 portable
+pytest passes, 11 W1 pytest passes, style 8/8 PASS and 0 binding audit
+findings. These are release-history values at PR #61; the authoritative
+current main SHA, CI runs and bundle digest are in `MANIFEST.md` of the
+current final release bundle (external artifact).
+
+R8.3 closed the legacy volume-validity migration, leading-zero count parity,
+bundle manifest-total verification, a provenance guard that fails closed on
+a missing verification report, and a portable state-freshness self-test.
+W1 A/B/C used pinned public Upstox and FYERS masters with 9,926 VERIFIED
+and 174 UNMAPPED crosswalk identities; W1-D effective dating and live
+consistency remain PENDING. R8.4 work — native-q conclusion mapping, remote
+provenance and W1 snapshot reproducibility — is IN PROGRESS and has no exit
+claim. Independent acceptance remains NOT RECORDED and the independent
+security review remains OPEN.
 
 Branch protection was captured from the authenticated endpoint
 `https://api.github.com/repos/siebengestirn/quant/branches/main/protection`

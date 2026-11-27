@@ -6,12 +6,15 @@ Usage:
       [--staging-dir PATH]
   python3 scripts/release_bundle.py verify [--bundle PATH]
 
-Build stages the exact committed tree from ``git archive HEAD``, derives
-every volatile identifier from repository state and the authenticated
-GitHub API, and embeds the portable verification report as evidence.
-Generated timestamps vary between runs, so a build is repeatable and
-self-verifying but is not byte-identical across times. Verify checks ZIP
-integrity, the SHA-256 manifest table and the embedded evidence report.
+Build first fetches authoritative refs and verifies that HEAD is exactly
+published ``main`` with a clean tree. It then stages the exact committed
+tree from ``git archive HEAD`` together with pinned raw instrument
+snapshots, derives every volatile identifier from repository state and the
+authenticated GitHub API, and embeds the portable verification report as
+evidence. Generated timestamps vary between runs, so a build is repeatable
+and self-verifying but is not byte-identical across times. Verify checks
+ZIP integrity, the SHA-256 manifest table, the embedded evidence report
+and the digests of any bundled instrument snapshots.
 """
 
 from __future__ import annotations
@@ -42,6 +45,34 @@ ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 HEX_DIGITS = frozenset("0123456789abcdef")
 MANIFEST_COMMIT_RE = re.compile(r"Final commit: `([0-9a-f]{40})` on `([^`]+)`")
 REPO_URL_MARKER = f"repos/{REPOSITORY}"
+GITHUB_REMOTE_URLS = (
+    f"https://github.com/{REPOSITORY}",
+    f"https://github.com/{REPOSITORY}.git",
+    f"git@github.com:{REPOSITORY}.git",
+    f"ssh://git@github.com/{REPOSITORY}.git",
+)
+INSTRUMENT_DIR = "evidence/instrument-master"
+INSTRUMENT_DATA = ROOT / "data" / "instrument-master"
+INSTRUMENT_PROVENANCE = ROOT / "governance" / "instrument-master-snapshots.json"
+INSTRUMENT_PROVENANCE_ENTRY = (
+    f"{PREFIX}governance/instrument-master-snapshots.json"
+)
+INSTRUMENT_PREFIX = f"{PREFIX}{INSTRUMENT_DIR}/"
+SNAPSHOTS_REMEDY = "run python3 scripts/fetch_instrument_snapshots.py first"
+SNAPSHOT_FIELDS = frozenset(
+    {
+        "provider",
+        "market_date",
+        "original_filename",
+        "original_bytes",
+        "original_sha256",
+        "decoded_bytes",
+        "decoded_sha256",
+    }
+)
+SNAPSHOT_TEXT_FIELDS = ("provider", "market_date", "original_filename")
+SNAPSHOT_SIZE_FIELDS = ("original_bytes", "decoded_bytes")
+SNAPSHOT_DIGEST_FIELDS = ("original_sha256", "decoded_sha256")
 
 
 def run_command(command: list[str]) -> str:
@@ -104,27 +135,71 @@ def copy_tree(source: Path, target: Path) -> int:
     return count
 
 
-def provenance_guard() -> str:
-    """Return HEAD only if the tree is exactly clean, published main."""
+def git_succeeds(*args: str) -> bool:
+    """Return True when a Git command exits successfully."""
+    result = subprocess.run(
+        ["git", *args], cwd=ROOT, capture_output=True, text=True, check=False
+    )
+    return result.returncode == 0
+
+
+def remote_url_matches(url: str, expected: str) -> bool:
+    """Return True when origin names the expected repository or URL."""
+    if url == expected:
+        return True
+    return expected == REPOSITORY and url in GITHUB_REMOTE_URLS
+
+
+def check_remote_url(expected: str) -> None:
+    """Fail closed when an available origin URL names another repository."""
+    if not git_succeeds("remote", "get-url", "origin"):
+        return
+    url = git_text("remote", "get-url", "origin")
+    if not remote_url_matches(url, expected):
+        raise RuntimeError(
+            f"origin URL {url!r} does not match expected repository "
+            f"{expected!r}"
+        )
+
+
+def verify_provenance(expected_remote: str | None = None) -> str:
+    """Fetch authoritative refs and return verified, published HEAD.
+
+    Every check runs before any staging, so a dirty tree, a stale remote
+    ref or an unpublished commit can never reach the bundle. The expected
+    remote defaults to the configured GitHub repository and can be
+    overridden by callers using a local origin.
+    """
+    run_command(["git", "fetch", "--prune", "origin"])
     branch = git_text("branch", "--show-current")
     if branch != BRANCH:
         raise RuntimeError(
             f"expected branch {BRANCH!r}, current branch is {branch!r}"
         )
+    remote_ref = f"refs/remotes/origin/{BRANCH}"
+    if not git_succeeds("show-ref", "--verify", "--quiet", remote_ref):
+        raise RuntimeError(f"remote branch origin/{BRANCH} is missing")
     head = git_text("rev-parse", "HEAD")
     origin = git_text("rev-parse", f"origin/{BRANCH}")
     if head != origin:
         raise RuntimeError(f"HEAD {head} differs from origin/{BRANCH} {origin}")
-    dirty = git_lines("status", "--porcelain")
-    if dirty:
-        raise RuntimeError(
-            f"working tree is not clean: {', '.join(dirty[:10])}"
-        )
     staged = git_lines("diff", "--cached", "--name-only")
     if staged:
         raise RuntimeError(
             f"staged changes are present: {', '.join(staged[:10])}"
         )
+    dirty = git_lines("status", "--porcelain")
+    if dirty:
+        raise RuntimeError(
+            f"working tree is not clean: {', '.join(dirty[:10])}"
+        )
+    containing = git_lines(
+        "branch", "-r", "--contains", head, "--format=%(refname:short)"
+    )
+    if f"origin/{BRANCH}" not in containing:
+        raise RuntimeError(f"HEAD {head} is not contained in origin/{BRANCH}")
+    expected = REPOSITORY if expected_remote is None else expected_remote
+    check_remote_url(expected)
     return head
 
 
@@ -138,17 +213,17 @@ def archive_member_path(member: tarfile.TarInfo) -> Path:
     return path
 
 
-def stage_tracked(quant_root: Path) -> None:
-    """Extract the exact committed tree from ``git archive HEAD``."""
+def stage_tracked(quant_root: Path, head: str) -> None:
+    """Extract the exact verified commit from ``git archive``."""
     payload = subprocess.run(
-        ["git", "archive", "HEAD"],
+        ["git", "archive", head],
         cwd=ROOT,
         capture_output=True,
         check=False,
     )
     detail = payload.stderr.decode("utf-8", "replace").strip()
     if payload.returncode != 0:
-        raise RuntimeError(f"git archive HEAD failed: {detail}")
+        raise RuntimeError(f"git archive {head} failed: {detail}")
     with tarfile.open(fileobj=io.BytesIO(payload.stdout), mode="r:") as archive:
         for member in archive.getmembers():
             relative = archive_member_path(member)
@@ -174,6 +249,142 @@ def stage_optional_evidence(quant_root: Path) -> None:
         ROOT / "data" / "review-fixtures",
         quant_root / "evidence" / "review-fixtures",
     )
+
+
+def parse_snapshot_provenance(text: str) -> list[dict]:
+    """Parse and validate pinned instrument snapshot provenance."""
+    try:
+        document = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid instrument provenance JSON: {exc}") from exc
+    if not isinstance(document, dict) or not isinstance(
+        document.get("snapshots"), list
+    ):
+        raise ValueError("instrument provenance requires a snapshots array")
+    entries = document["snapshots"]
+    if not entries:
+        raise ValueError("instrument provenance has no snapshots")
+    for entry in entries:
+        if not isinstance(entry, dict) or not SNAPSHOT_FIELDS <= entry.keys():
+            raise ValueError(f"invalid instrument provenance entry: {entry!r}")
+        for key in SNAPSHOT_TEXT_FIELDS:
+            if not isinstance(entry[key], str) or not entry[key]:
+                raise ValueError(f"invalid instrument provenance field: {key}")
+        for key in SNAPSHOT_SIZE_FIELDS:
+            value = entry[key]
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 0
+            ):
+                raise ValueError(f"invalid instrument provenance field: {key}")
+        for key in SNAPSHOT_DIGEST_FIELDS:
+            value = entry[key]
+            digest = value.lower() if isinstance(value, str) else ""
+            if len(digest) != 64 or not set(digest) <= HEX_DIGITS:
+                raise ValueError(f"invalid instrument provenance field: {key}")
+    return entries
+
+
+def snapshot_relative(provider: str, market_date: str, filename: str) -> str:
+    """Return a safe provenance-relative path for one snapshot."""
+    path = Path(provider) / market_date / filename
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError(f"unsafe instrument snapshot path: {path}")
+    if not path.parts or any(part in ("", ".") for part in path.parts):
+        raise ValueError(f"unsafe instrument snapshot path: {path}")
+    return path.as_posix()
+
+
+def decoded_filename(original_filename: str) -> str:
+    """Return the storage name for the decoded snapshot bytes."""
+    if original_filename.endswith(".gz"):
+        return original_filename[:-3]
+    if original_filename.endswith(".json"):
+        return original_filename[:-5] + ".decoded.json"
+    raise ValueError(
+        f"unsupported instrument snapshot filename: {original_filename}"
+    )
+
+
+def snapshot_files(entry: dict) -> list[tuple[str, int, str]]:
+    """Return relative path, size and digest for both pinned byte forms."""
+    provider = entry["provider"]
+    market_date = entry["market_date"]
+    original = snapshot_relative(
+        provider, market_date, entry["original_filename"]
+    )
+    decoded = snapshot_relative(
+        provider, market_date, decoded_filename(entry["original_filename"])
+    )
+    return [
+        (original, entry["original_bytes"], entry["original_sha256"].lower()),
+        (decoded, entry["decoded_bytes"], entry["decoded_sha256"].lower()),
+    ]
+
+
+def plan_from_entries(entries: list[dict]) -> list[tuple[str, int, str]]:
+    """Flatten provenance entries into a unique snapshot staging plan."""
+    plan: list[tuple[str, int, str]] = []
+    for entry in entries:
+        plan.extend(snapshot_files(entry))
+    paths = [path for path, _, _ in plan]
+    if len(paths) != len(set(paths)):
+        raise ValueError("duplicate instrument snapshot paths in provenance")
+    return plan
+
+
+def instrument_plan(provenance: Path) -> list[tuple[str, int, str]]:
+    """Load the pinned snapshot plan from a provenance file."""
+    try:
+        text = provenance.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(
+            f"unreadable instrument provenance {provenance}: {exc}"
+        ) from exc
+    return plan_from_entries(parse_snapshot_provenance(text))
+
+
+def check_snapshot_bytes(
+    relative: str, payload: bytes, size: int, digest: str
+) -> None:
+    """Fail closed when snapshot bytes disagree with the pinned digest."""
+    actual = hashlib.sha256(payload).hexdigest()
+    if len(payload) != size or actual != digest:
+        raise ValueError(
+            f"instrument snapshot SHA-256 mismatch: {relative} "
+            f"(expected {digest}, got {actual})"
+        )
+
+
+def stage_instrument_snapshots(
+    quant_root: Path,
+    data_root: Path = INSTRUMENT_DATA,
+    provenance: Path = INSTRUMENT_PROVENANCE,
+) -> int:
+    """Stage pinned raw snapshots from the ignored data tree."""
+    plan = instrument_plan(provenance)
+    sources = [
+        (data_root / relative, relative, size, digest)
+        for relative, size, digest in plan
+    ]
+    missing = [
+        str(source) for source, _, _, _ in sources if not source.is_file()
+    ]
+    if missing:
+        raise RuntimeError(
+            "missing pinned instrument snapshots: "
+            + ", ".join(missing)
+            + f"; {SNAPSHOTS_REMEDY}"
+        )
+    target = quant_root / INSTRUMENT_DIR
+    for source, relative, size, digest in sources:
+        payload = source.read_bytes()
+        check_snapshot_bytes(relative, payload, size, digest)
+        destination = target / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(payload)
+    return len(sources)
 
 
 def response_urls(payload: object) -> list[str]:
@@ -379,11 +590,6 @@ def validate_report(report: object, head: str) -> dict:
     """Reject reports that do not attest to the exact committed tree."""
     if not isinstance(report, dict):
         raise ValueError("verification report must be a JSON object")
-    commit = report.get("commit")
-    if commit != head:
-        raise ValueError(
-            f"report commit {commit!r} does not match HEAD {head!r}"
-        )
     gates = report.get("gates")
     if not isinstance(gates, list) or not gates:
         raise ValueError("verification report has no gates")
@@ -397,8 +603,7 @@ def validate_report(report: object, head: str) -> dict:
         raise ValueError("hosted CI conclusion is not success")
     if counts.get("head_sha_match") is not True:
         raise ValueError("hosted CI head SHA does not match HEAD")
-    if counts.get("head_sha") != head:
-        raise ValueError("hosted CI head SHA does not match report commit")
+    validate_commit_chain(report, head)
     native = hosted.get("native_q") or {}
     if native.get("result") != "GATED_NOT_RUN":
         raise ValueError("native q is not reported as GATED_NOT_RUN")
@@ -411,6 +616,21 @@ def gate_counts(report: dict, name: str) -> dict:
     """Return the parsed counts of one report gate."""
     counts = report_gate(report, name).get("counts")
     return counts if isinstance(counts, dict) else {}
+
+
+def validate_commit_chain(report: dict, head: str) -> None:
+    """Require report, CI and release commits to equal verified HEAD."""
+    commits = {
+        "report": report.get("commit"),
+        "ci": gate_counts(report, "hosted_ci").get("head_sha"),
+        "release": head,
+    }
+    for label, commit in commits.items():
+        if commit != head:
+            raise ValueError(
+                f"{label} commit {commit!r} does not match verified HEAD "
+                f"{head!r}"
+            )
 
 
 def render_verification(report: dict) -> list[str]:
@@ -624,6 +844,50 @@ def check_evidence(
     return details
 
 
+def verify_instrument_snapshots(
+    archive: zipfile.ZipFile, errors: list[str]
+) -> int:
+    """Digest-check bundled instrument snapshots against the pinned plan."""
+    names = set(archive.namelist())
+    present = sorted(
+        name
+        for name in names
+        if name.startswith(INSTRUMENT_PREFIX) and not name.endswith("/")
+    )
+    if not present:
+        return 0
+    if INSTRUMENT_PROVENANCE_ENTRY not in names:
+        errors.append(
+            "instrument snapshots present but provenance is missing from "
+            "the bundle"
+        )
+        return len(present)
+    try:
+        text = archive.read(INSTRUMENT_PROVENANCE_ENTRY).decode("utf-8")
+        plan = plan_from_entries(parse_snapshot_provenance(text))
+    except (ValueError, KeyError, TypeError, UnicodeDecodeError) as exc:
+        errors.append(f"instrument provenance error: {exc}")
+        return len(present)
+    expected = {
+        f"{INSTRUMENT_PREFIX}{relative}": (size, digest)
+        for relative, size, digest in plan
+    }
+    for name in present:
+        if name not in expected:
+            errors.append(f"unexpected instrument snapshot: {name}")
+            continue
+        payload = archive.read(name)
+        size, digest = expected[name]
+        relative = name[len(INSTRUMENT_PREFIX) :]
+        try:
+            check_snapshot_bytes(relative, payload, size, digest)
+        except ValueError as exc:
+            errors.append(str(exc))
+    for name in sorted(set(expected) - set(present)):
+        errors.append(f"missing instrument snapshot: {name}")
+    return len(present)
+
+
 def verification_result(
     errors: list[str],
     entries: int,
@@ -651,6 +915,7 @@ def verify_bundle(bundle: Path) -> dict[str, object]:
         return verification_result(errors, 0, 0, "")
     files = 0
     entries = 0
+    details: dict[str, object] = {}
     try:
         with zipfile.ZipFile(bundle) as archive:
             damaged = archive.testzip()
@@ -664,6 +929,9 @@ def verify_bundle(bundle: Path) -> dict[str, object]:
             manifest_text = archive.read(manifest_path).decode("utf-8")
             manifest = parse_manifest(manifest_text)
             details = check_evidence(archive, manifest_text, errors)
+            details["instrument_snapshots"] = verify_instrument_snapshots(
+                archive, errors
+            )
             entries = len(manifest)
             listed: set[str] = set()
             for name in names:
@@ -713,6 +981,7 @@ def print_summary(bundle: Path, result: dict[str, object]) -> None:
     print(f"Bundle SHA-256: {result['sha256']}")
     print(f"Evidence report: {result.get('report')}")
     print(f"Manifest commit: {result.get('commit', '')}")
+    print(f"Instrument snapshots: {result.get('instrument_snapshots', 0)}")
     print(f"Native q tier: {result.get('native_q')}")
     for error in result["errors"]:
         print(f"ERROR: {error}")
@@ -725,7 +994,8 @@ def build_stage(
     """Stage, render, zip and verify one bundle in a prepared directory."""
     quant_root = stage / "quant"
     quant_root.mkdir()
-    stage_tracked(quant_root)
+    stage_tracked(quant_root, head)
+    stage_instrument_snapshots(quant_root)
     stage_optional_evidence(quant_root)
     stage_verification_report(quant_root, report_path)
     protection, merged = stage_api_evidence(quant_root)
@@ -758,7 +1028,7 @@ def build(
     output: Path, report_path: Path, staging_dir: Path | None = None
 ) -> None:
     """Guard provenance, validate evidence and build a verified bundle."""
-    head = provenance_guard()
+    head = verify_provenance()
     report = validate_report(load_report(report_path), head)
     if staging_dir is None:
         with tempfile.TemporaryDirectory(prefix="quant-") as name:

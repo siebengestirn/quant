@@ -14,7 +14,7 @@ Statuses: `NOT IMPLEMENTED`, `IMPLEMENTED`, `UNIT-TESTED`,
 Machine-readable release, governance and trading state at the current head.
 The exact current main SHA, CI runs and bundle digest are in `MANIFEST.md`
 of the current final release bundle (external artifact); values marked as
-release history at PR #58 are not immutable current identifiers.
+release history at PR #58 and PR #61 are not immutable current identifiers.
 
 ```yaml
 release:
@@ -37,6 +37,16 @@ release:
   final_bundle_manifest_entries: 98
   final_head_ci_run: 45969369813
   final_post_merge_ci_run: 45969624206
+  # Release history at PR #61 (R8.3 and W1 A/B/C), HISTORICAL:
+  r8_3_pr: 61
+  r8_3_merge_commit: 201f5ba602f68fc1370579cefa50b8b599af05d5
+  # At PR #61; current digest is in the bundle MANIFEST.md (external):
+  r8_3_bundle_sha256:
+    c5be8f1ff2ae2faeea161dfa815511ee1f8775cb347de98f3602dd500993bf8c
+  r8_3_bundle_manifest_entries: 108
+  # At PR #61; hosted CI passed, native q skipped/GATED_NOT_RUN:
+  r8_3_head_ci_run: 46007348694
+  r8_3_native_q: GATED_NOT_RUN
   open_prs: 0
 governance: >-
   model SINGLE_DEVELOPER, required_github_approvals 0,
@@ -56,7 +66,14 @@ release bundle (external artifact), not as immutable identifiers here.
 Release history at PR #58 records `main` as `1a91da2…`
 (full SHA `1a91da2fb08995c9f6ee20e373d004ad28e58a72`) in the then-final
 bundle `MANIFEST.md`; `99bc70c…` was the state at PR #56 and is
-HISTORICAL. PRs #47–#58 are all MERGED; zero PRs are open. Merges use the
+HISTORICAL. Release history at PR #61 records the R8.3 + W1 A/B/C merge
+at `201f5ba602f68fc1370579cefa50b8b599af05d5` (HISTORICAL), with a
+then-final bundle of 108 entries and hosted CI run `46007348694` success;
+the native-q job was skipped/GATED_NOT_RUN. The current digest and CI runs
+are in `MANIFEST.md` of the current bundle (external). R8.4 work —
+native-q conclusion mapping, remote provenance and W1 snapshot
+reproducibility — is IN PROGRESS and is not an exit claim. PRs #47–#61
+are all MERGED; zero PRs are open. Merges use the
 single-developer policy: zero required GitHub approvals, a self-review
 checklist and exact-head CI with three required checks. Independent
 external technical acceptance is PENDING / NOT RECORDED. The older
@@ -100,12 +117,12 @@ accepted.
 
 | Workstream | Implementation | Verification | Independent acceptance | Blocked by |
 |---|---|---|---|---|
-| W1 Instrument master | W1-A/B/C implemented from public Upstox and FYERS masters; full effective-dated registry still pending | 11 offline tests on captured bytes; 9,926 verified crosswalk matches, 174 unmapped | Pending | W1-D live consistency |
+| W1 Instrument master | W1-A/B/C implemented from pinned public Upstox and FYERS masters; effective-dated registry (W1-D) still PENDING | 11 offline tests on captured bytes; 9,926 VERIFIED crosswalk matches, 174 UNMAPPED | Pending: W1-D live consistency and effective dating | W1-D live consistency |
 | W2 Upstox V3 | Partial (V2 REST; V3 fixture-schema normalisation only) | Unit-tested corrections | Pending | W1 |
 | W3 FYERS Data Socket | Not implemented | Not tested | Pending | W1, valid token |
 | W4 Provider journal | Not proven | Synthetic coverage only | Pending | W2, W3 |
 | W12 Durability | Partial | Process/crash evidence only | Pending | W4, fault rig |
-| W16 Independent acceptance | Documented merge controls | Register present; exact-head CI evidence | NOT RECORDED externally | defined high-risk release gates |
+| W16 Independent acceptance | Documented merge controls | Register present; exact-head CI evidence | NOT RECORDED (external) | defined high-risk release gates |
 
 Every workstream row below inherits these three separate fields. A failed
 upstream workstream blocks every dependent release decision; `Blocked by`
@@ -115,7 +132,8 @@ contains requirement IDs from the same register.
 
 | ID | Workstream | Current status | Dependencies | Exit evidence | Release blocking |
 |---|---|---|---|---|---|
-| W1 | Instrument master and multi-venue identity | PARTIAL: W1-A/B/C implemented from pinned public masters; W1-D pending | none | Effective-dated registry, provider crosswalk report, per-class conformance matrix and live consistency tests | Yes for multi-asset |
+| W0 | Evidence-integrity registers | PARTIAL: four governance CSV registers tracked; no prior W0 definition in repository (UNVERIFIED PROVENANCE) | none | Independent reviewer disposition of the four registers | No for routine merges |
+| W1 | Instrument master and multi-venue identity | PARTIAL: W1-A/B/C implemented from pinned public Upstox/FYERS masters (9,926 VERIFIED / 174 UNMAPPED); W1-D live consistency and effective dating PENDING | none | Effective-dated registry, provider crosswalk report, per-class conformance matrix and live consistency tests | Yes for multi-asset |
 | W2 | Upstox V3 data adapter | PARTIAL: read-only V2 REST; V3 seven-field candle schema normalisation of fixtures only | W1 | ISO timestamp parsing, V3 seven-field candles, ascending canonical history, raw payload archive, 10-session qualification | Yes for provider certification |
 | W3 | FYERS Data Socket adapter | NOT IMPLEMENTED | W1, fresh token | REST quotes, history, Data Socket only, reconnect and replay evidence | Yes for dual-provider |
 | W4 | Provider-to-journal-to-q path | NOT PROVEN with real events | W2, W3 | Raw and normalised events, durable journal, q replay parity | Yes |
@@ -132,12 +150,46 @@ contains requirement IDs from the same register.
 | W15 | Multi-asset conformance | NOT ESTABLISHED | W1, W6, W9 | Signed per-class conformance matrix | Yes per class |
 | W16 | Independent acceptance | NOT RECORDED (external) | all relevant gates | Required merge controls: zero GitHub approvals, self-review checklist and exact-head CI. External technical review is optional. Independent acceptance is mandatory only for defined high-risk release gates | No for routine merges; yes for defined high-risk gates |
 | W17 | Live execution authorisation | DISABLED | W7, W10, W12, W16, compliance | Written broker and compliance approval; separate release decision | Yes for any live route |
-| W18 | Independent release assurance and security remediation | PENDING; authoritative owner is the independent reviewer | W16 and all defined high-risk release gates | This row is the authoritative W18 definition. Exit evidence: disposition of each security finding by an independent reviewer and recorded external acceptance. Local checks and CI are not acceptance; acceptance NOT RECORDED | Yes for release acceptance |
+| W18 | Independent release assurance and security remediation | PENDING (independent reviewer) | W16 and all defined high-risk release gates | This row is the authoritative W18 definition. Exit evidence: disposition of each security finding by an independent reviewer and recorded external acceptance. Local checks and CI are not acceptance; acceptance NOT RECORDED | Yes for release acceptance |
 
 CI evidence is an automated gate, not a human independent review. Required
 merge controls are zero GitHub approvals, the self-review checklist and
 exact-head CI. External technical review is optional; independent acceptance
 is mandatory only for defined high-risk release gates, not every merge.
+
+## Authoritative gate dashboard (W0–W18)
+
+This is the single authoritative dashboard. Statuses and blocked-by edges
+are derived from the Workstreams table above and from
+`governance/requirements-traceability.csv`; R8.1/R8.3/R8.4 are corrective
+work entries, not extra gates. No volatile identifier is pinned here: the
+current main SHA, CI runs and bundle digest are in `MANIFEST.md` of the
+current final release bundle (external artifact).
+
+| Gate | Current status | Blocked by |
+|---|---|---|
+| W0 | PARTIAL | independent reviewer (acceptance) |
+| W1 | PARTIAL: W1-A/B/C implemented from pinned public masters; W1-D and effective dating PENDING | none |
+| W2 | PARTIAL: V2 REST only; V3 fixture-schema normalisation | W1 |
+| W3 | NOT IMPLEMENTED (FYERS profile probe only) | W1, fresh token |
+| W4 | NOT PROVEN with real events | W2, W3 |
+| W5 | PARTIAL (ticker-keyed status) | W1 |
+| W6 | NOT IMPLEMENTED | W1, W5 |
+| W7 | INCONCLUSIVE / BLOCKED | W5, W6 |
+| W8 | PARTIAL | W5 |
+| W9 | NOT IMPLEMENTED | W1, W6 |
+| W10 | NOT IMPLEMENTED | W2, W3, W4, W9 |
+| W11 | GATED (native q) | governed licensed runner |
+| W12 | NOT PROVEN (power loss) | W4, fault rig |
+| W13 | UNSUPPORTED | W2, W3, W4, W5, W11 |
+| W14 | SEPARATE PROJECT | W13, low-latency infrastructure |
+| W15 | NOT ESTABLISHED | W1, W6, W9 |
+| W16 | NOT RECORDED (external) | all relevant gates |
+| W17 | DISABLED | W7, W10, W12, W16, compliance |
+| W18 | PENDING (independent reviewer) | W16 and all defined high-risk release gates |
+
+No row above claims full W1 exit, independently accepted status, live
+execution authorisation or `READY FOR TRADE`.
 
 ### R8.1 corrective work (local implementation)
 
@@ -168,6 +220,39 @@ endpoints NOT established; streaming NOT IMPLEMENTED; real feed certification
 NOT achieved. FYERS is a profile probe against
 `https://api-t1.fyers.in/api/v3`; no Data Socket streaming is implemented.
 
+### R8.3 corrective work (PR #61 — HISTORICAL release record)
+
+At PR #61 the R8.3 + W1 A/B/C work was MERGED at
+`201f5ba602f68fc1370579cefa50b8b599af05d5`. This merge SHA, the CI run
+`46007348694` (success) and the 108-entry bundle digest
+`c5be8f1ff2ae2faeea161dfa815511ee1f8775cb347de98f3602dd500993bf8c`
+are HISTORICAL values at PR #61, not current identifiers. The hosted
+CI had three passing jobs and one skipped native-q job; native q was
+GATED_NOT_RUN. At PR #61, local verification recorded 14114 C++ checks
+with 0 failures, 14114 sanitizer checks with 0 failures, 51 portable
+pytest passes, 11 W1 pytest passes, style 8/8 PASS and 0 binding audit
+findings. The exact current main SHA, CI runs and bundle digest are in
+`MANIFEST.md` of the current final release bundle (external artifact).
+
+R8.3 closed the legacy volume-validity migration: newly constructed
+quotes default to `UNKNOWN` and legacy events without the field replay as
+`UNKNOWN`, so a substituted zero is never promoted to a verified
+observation. Both canonical CSV readers reject leading zeros, signs and
+decimal points for counts. The release-bundle generator now renders
+manifest totals from the verification report and checks them against the
+embedded report, fails closed on a missing/unreadable provenance report
+and uses a portable self-test temp directory with a `QUANT_FRESHNESS_TEMP`
+override. These are closure claims for R8.3 only; they do not establish
+independent security acceptance.
+
+W1 A/B/C are offline evidence from two pinned public masters recorded in
+`governance/instrument-master-snapshots.json`: the Upstox NSE master and
+the FYERS NSE_CM symbol master. W1 pytest ran 11 tests on the captured
+bytes; the crosswalk reported 9,926 VERIFIED and 174 UNMAPPED identities.
+W1-D live consistency and effective dating remain PENDING; full W1 exit
+is NOT claimed. R8.4 work — native-q conclusion mapping, remote
+provenance and W1 snapshot reproducibility — is IN PROGRESS.
+
 ## Data-only testing invariants
 
 For provider tests: `LIVE_TRADING_ENABLED=false`, `EXECUTION_MODE=DISABLED`,
@@ -179,6 +264,6 @@ Zerodha submission lock must remain blocked in a negative test.
 
 No claim of strategy profitability, evaluated holdout, provider streaming
 certification, operational paper trading, fully proven universal power-loss
-durability, HFT suitability, multi-asset conformance, independent acceptance,
-live execution authorisation or `READY FOR TRADE` is permitted until the
-corresponding exit evidence above is recorded.
+durability, HFT suitability, multi-asset conformance, full W1 exit,
+independent acceptance, live execution authorisation or `READY FOR TRADE`
+is permitted until the corresponding exit evidence above is recorded.
