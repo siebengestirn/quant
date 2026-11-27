@@ -16,6 +16,7 @@
 #include <map>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
@@ -30,6 +31,7 @@ namespace quant {
 class Journal;
 struct Event;
 struct PaperOrder;
+struct DailyRiskState;
 
 // ---------------------------------------------------------------------------
 // Money: integer paise. Conversions are explicit to prevent unit confusion.
@@ -416,7 +418,10 @@ struct Instrument {
 
 struct Quote {
   std::string symbol;
+  std::string permanent_id;
   std::string provider_key;
+  std::string venue = "NSE";
+  std::string listing_id = "NSE-EQ";
   Provider source = Provider::kSynthetic;
   double last = 0.0;
   double bid = 0.0;
@@ -463,6 +468,9 @@ struct FeatureSet {
 
 struct Signal {
   std::string symbol;
+  std::string permanent_id;
+  std::string venue = "NSE";
+  std::string listing_id = "NSE-EQ";
   std::string strategy;
   double score = 0.0;
   double confidence = 0.0;
@@ -771,6 +779,10 @@ class RiskAuthorization {
               const Config& config,
               int64_t now_ms,
               std::string* error) const;
+  bool VerifyRiskState(const DailyRiskState& state,
+                       int64_t now_ms,
+                       std::string* error) const;
+  bool VerifyMarketDataSnapshot(const Quote& quote, std::string* error) const;
 
  private:
   friend class RiskEngine;
@@ -779,6 +791,10 @@ class RiskAuthorization {
   std::string order_id_;
   std::string account_id_;
   std::string instrument_id_;
+  std::string venue_;
+  std::string listing_id_;
+  Provider market_data_source_ = Provider::kSynthetic;
+  int64_t market_data_version_ = 0;
   std::string symbol_;
   OrderSide side_ = OrderSide::kBuy;
   int quantity_ = 0;
@@ -904,7 +920,8 @@ class RiskEngine {
   RiskDecision Evaluate(const Signal& signal,
                         const Quote& quote,
                         const Portfolio& portfolio,
-                        int64_t now_ms);
+                        int64_t now_ms,
+                        OrderSide side = OrderSide::kBuy);
   // The only way to create a RiskAuthorization. Re-evaluates the decision
   // from authoritative inputs, then binds it to the exact order snapshot.
   RiskAuthorization Authorize(const Signal& signal,
@@ -915,11 +932,16 @@ class RiskEngine {
   const DailyRiskState& daily_state() const {
     return *state_;
   }
+  void ShareAuthorityLock(std::shared_ptr<std::recursive_mutex> lock) {
+    authority_lock_ = std::move(lock);
+  }
 
  private:
   Config config_;
   std::shared_ptr<DailyRiskState> state_;
   Journal* journal_ = nullptr;
+  std::shared_ptr<std::recursive_mutex> authority_lock_ =
+      std::make_shared<std::recursive_mutex>();
 };
 
 // ---------------------------------------------------------------------------
@@ -1172,6 +1194,8 @@ struct PaperOrder {
   };
   std::string client_order_id;
   std::string instrument_key;
+  std::string venue = "NSE";
+  std::string listing_id = "NSE-EQ";
   std::string order_type = "LIMIT";
   std::string time_in_force = "DAY";
   std::string risk_policy_id;
@@ -1190,7 +1214,8 @@ class PaperBroker {
  public:
   PaperBroker(Config config,
               Journal* journal,
-              std::shared_ptr<Portfolio> portfolio);
+              std::shared_ptr<Portfolio> portfolio,
+              std::shared_ptr<DailyRiskState> risk_state = nullptr);
   PaperOrder* CreateIntent(const std::string& symbol,
                            OrderSide side,
                            int quantity,
@@ -1198,6 +1223,7 @@ class PaperBroker {
                            std::string* error);
   bool RiskApprove(const std::string& id,
                    const RiskAuthorization& authorization,
+                   const Quote& market_snapshot,
                    int64_t now_ms,
                    std::string* error);
   bool Reject(const std::string& id,
@@ -1212,9 +1238,17 @@ class PaperBroker {
   bool Cancel(const std::string& id, std::string* error);
   bool Expire(const std::string& id, std::string* error);
   bool MarkAmbiguous(const std::string& id, std::string* error);
+  bool ResolveAmbiguous(const std::string& id,
+                        PaperOrderState resolved_state,
+                        const std::string& operator_id,
+                        const std::string& reason,
+                        std::string* error);
   bool Reconcile(const std::string& id, std::string* error);
   bool RehydrateFromJournal(std::string* error);
   const PaperOrder* Find(const std::string& id) const;
+  void ShareAuthorityLock(std::shared_ptr<std::recursive_mutex> lock) {
+    authority_lock_ = std::move(lock);
+  }
   size_t order_count() const {
     return orders_.size();
   }
@@ -1231,9 +1265,13 @@ class PaperBroker {
   Config config_;
   Journal* journal_;
   std::shared_ptr<Portfolio> portfolio_;
+  std::shared_ptr<DailyRiskState> risk_state_;
   std::map<std::string, PaperOrder> orders_;
   std::set<std::string> posted_ids_;
   std::set<std::string> consumed_authorizations_;
+  std::set<std::string> all_fill_ids_;
+  std::shared_ptr<std::recursive_mutex> authority_lock_ =
+      std::make_shared<std::recursive_mutex>();
   uint64_t next_id_ = 1;
 };
 
