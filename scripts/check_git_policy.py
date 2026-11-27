@@ -32,12 +32,23 @@ def policy_consistency_violations() -> list[str]:
         out.append("policy target local branches must be only main")
     if inventory["target_remote_tracking_branches"] != ["origin/main"]:
         out.append("policy target remote tracking must be only origin/main")
-    if POLICY["pr_review"]["required_approving_reviews"] < 1:
-        out.append("independent approving review must be required")
+    review = POLICY["pr_review"]
+    required = review["required_approving_reviews"]
+    if required not in (0, 1):
+        out.append("required approving reviews must be zero or one")
+    if required == 1 and not review.get("independent_reviewer_required", True):
+        out.append("independent reviewer must be required with one approval")
+    if required == 0 and not review.get("self_review_checklist_required", False):
+        out.append("self-review checklist must be required without GitHub approvals")
+    if not review.get("ci_evidence_required", False):
+        out.append("CI evidence must be required for every PR")
     workflow = (ROOT / "docs" / "git-workflow.md").read_text()
-    if "Required approving reviews remain zero" in workflow:
-        out.append("git-workflow.md contradicts required review policy")
-    if "requires one independent approving review" not in workflow:
+    expected = (
+        "requires one independent approving review"
+        if required == 1
+        else "uses self-review plus independent CI with zero required GitHub approvals"
+    )
+    if expected not in workflow:
         out.append("git-workflow.md does not state the required review policy")
     if not POLICY["pr_review"].get("ci_evidence_per_pr_head", False):
         out.append("CI evidence must be recorded per exact PR head")

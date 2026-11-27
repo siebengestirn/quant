@@ -147,7 +147,7 @@
     "self_review_checklist_required": true,
     "single_maintainer_bootstrap_exception": {
       "active": false,
-      "after_expiry": "No further exception: every PR requires one independent approving review. The scope is exhausted by PRs #45 and #46.",
+      "after_expiry": "No exception exists; the single-developer policy with zero required GitHub approvals applies to every PR.",
       "authorization": "One-time administrative merges recorded in docs/release-status-2026-11-26.md; all three required checks pass on each exact head.",
       "expires": "2026-12-31T23:59:59Z",
       "scope": "Closed: applied only to PRs #45 and #46. No further single-maintainer exception is available.",
