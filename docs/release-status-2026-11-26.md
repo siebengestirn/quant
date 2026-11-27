@@ -112,3 +112,20 @@ It requires three strict checks, one independent approving review,
 conversation resolution, last-push approval and administrator enforcement,
 and prohibits force pushes and branch deletion. This is an authenticated
 export of the live endpoint, not a static description.
+
+## Final integration record — 27 November 2026
+
+All seven remediation PRs #47–#53 were merged sequentially with merge commits
+after fresh exact-head CI on each synced head. `main` is the sole integration
+branch. Branch protection was corrected to the single-developer policy already
+used in the sibling repositories: zero required GitHub approvals, explicit
+self-review checklist, exact-head CI evidence, three required checks, PR,
+conversation resolution, no force pushes and no branch deletion. No admin
+bypass or history rewrite was used.
+
+This record supersedes the earlier seven-open-PR snapshot. Operating status is
+unchanged: research INCONCLUSIVE/negative; holdout SEALED_NOT_EVALUATED;
+provider streaming, contract-note reconciliation, corporate actions and
+operational paper trading NOT IMPLEMENTED; native q hosted tier GATED;
+power-loss durability NOT PROVEN; intraday/HFT UNSUPPORTED; multi-asset venue
+conformance NOT ESTABLISHED; live execution DISABLED; decision NO TRADE.
