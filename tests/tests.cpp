@@ -811,6 +811,42 @@ Json ValidCandleRow(const std::string& date) {
                       Json::Number(1000.0)});
 }
 
+void TestUpstoxQuoteTimestampNormalization() {
+  Json::Object item;
+  item["last_price"] = Json::Number(100.0);
+  item["timestamp"] = Json::String("2026-11-27T10:15:30+05:30");
+  item["last_trade_time"] = Json::String("1764219930000");
+  Json::Object buy;
+  buy["price"] = Json::Number(99.9);
+  buy["quantity"] = Json::Number(100.0);
+  Json::Object sell;
+  sell["price"] = Json::Number(100.1);
+  sell["quantity"] = Json::Number(100.0);
+  std::vector<Json> buy_levels;
+  buy_levels.push_back(Json::ObjectValue(buy));
+  std::vector<Json> sell_levels;
+  sell_levels.push_back(Json::ObjectValue(sell));
+  Json::Object depth;
+  depth["buy"] = Json::Array(buy_levels);
+  depth["sell"] = Json::Array(sell_levels);
+  item["depth"] = Json::ObjectValue(depth);
+  const Quote quote =
+      NormalizeUpstoxQuote(Json::ObjectValue(item), "AAA", "UPSTOX:AAA");
+  Check(quote.provider_timestamp_ms > 0,
+        "ISO provider timestamp parsed instead of becoming zero");
+  Check(quote.last_trade_timestamp_ms == 1764219930000,
+        "last trade millisecond timestamp preserved");
+  Check(quote.quality == "ok", "valid timestamp quote accepted");
+
+  Json::Object future = item;
+  future["timestamp"] = Json::String("2999-01-01T00:00:00Z");
+  const Quote invalid =
+      NormalizeUpstoxQuote(Json::ObjectValue(future), "AAA", "UPSTOX:AAA");
+  Check(invalid.quality == "invalid_timestamp" &&
+            invalid.provider_timestamp_ms == 0,
+        "future timestamp quarantined with unknown freshness");
+}
+
 void TestProviderHistoryValidation() {
   std::string error;
   Json valid =
@@ -830,8 +866,16 @@ void TestProviderHistoryValidation() {
                                                 Json::Number(1000.0),
                                                 Json::Number(7.0)})}),
                       "AAA");
-  Check(!width.errors.empty() && width.accepted == 0,
-        "extra provider column rejected");
+  Check(width.errors.empty() && width.accepted == 1,
+        "V3 open-interest column accepted");
+
+  HistoryParseResult reversed = BuildHistoryCsv(
+      Json::Array({ValidCandleRow("2026-01-02"), ValidCandleRow("2026-01-01")}),
+      "AAA");
+  Check(reversed.errors.empty() && reversed.accepted == 2 &&
+            reversed.csv.find("2026-01-01,100") <
+                reversed.csv.find("2026-01-02,100"),
+        "newest-first provider history normalized to ascending sessions");
 
   HistoryParseResult missing =
       BuildHistoryCsv(Json::Array({Json::Array({Json::String("2026-01-01"),
@@ -3084,6 +3128,7 @@ int main() {
   TestDatasetManifestContract();
   TestInstrumentReferenceModel();
   TestProviderHistoryValidation();
+  TestUpstoxQuoteTimestampNormalization();
   TestPaperOrderReducer();
   TestFillAverageArithmetic();
   TestReplayFillConflicts();
