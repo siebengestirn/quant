@@ -58,10 +58,12 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
 / allows out-of-order events to be retained and flagged rather than silently
 / reordered.
 / ---------------------------------------------------------------------------
-.quant.seen:([eventKey:`symbol$()] flag:`boolean$())
+.quant.seen:([eventKey:`symbol$()] eventId:`symbol$();digest:())
 .quant.eventKey:{[src;seq] `$((string src),":",string seq)}
 .quant.maxSeq:0
+.quant.maxSeqBySource:()!()
 .quant.duplicates:0
+.quant.sequenceConflicts:0
 .quant.outOfOrder:0
 .quant.generation:0
 
@@ -69,8 +71,9 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
   quotes::0#quotes; trades::0#trades; depth::0#depth; bars::0#bars;
   instruments::0#instruments; marketStatus::0#marketStatus;
   signals::0#signals; features::0#features;
-  .quant.seen:([eventKey:`symbol$()] flag:`boolean$());
-  .quant.maxSeq:0; .quant.duplicates:0; .quant.outOfOrder:0;
+  .quant.seen:([eventKey:`symbol$()] eventId:`symbol$();digest:());
+  .quant.maxSeq:0; .quant.maxSeqBySource:()!();
+  .quant.duplicates:0; .quant.sequenceConflicts:0; .quant.outOfOrder:0;
   .quant.generation:0;
   `reset}
 
@@ -84,13 +87,21 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
   px:"f"$x 8; bid:"f"$x 9; ask:"f"$x 10; vol:"f"$x 11;
   qual:.quant.asSymbol[x 12];
   ekey:.quant.eventKey[src;seq];
+  digest:.quant.digest x;
   if[ekey in key .quant.seen;
-      .quant.duplicates::.quant.duplicates+1;
-      :`duplicate];
-  ooo:seq<.quant.maxSeq;
-  if[ooo; .quant.outOfOrder::.quant.outOfOrder+1];
-  if[not ooo; .quant.maxSeq::seq];
-  .quant.seen[ekey]:1b;
+      if[(.quant.seen[ekey]`digest)~digest;
+          .quant.duplicates::.quant.duplicates+1;
+          :`duplicate_identical];
+      .quant.sequenceConflicts::.quant.sequenceConflicts+1;
+      :`sequence_conflict];
+  watermark:$[src in key .quant.maxSeqBySource; .quant.maxSeqBySource[src]; 0];
+  ooo:seq<watermark;
+  if[ooo; .quant.outOfOrder::.quant.outOfOrder+1;
+      .quant.maxSeqBySource[src]::watermark];
+  if[not ooo;
+      .quant.maxSeqBySource[src]::seq;
+      .quant.maxSeq::max (.quant.maxSeq;seq)];
+  .quant.seen[ekey]:(`eventId`digest!(eid;digest));
   quotes::quotes upsert ([]seq:enlist seq;eventId:enlist eid;symbol:enlist sym;
     source:enlist src;exchangeNs:enlist ets;providerNs:enlist pts;
     lastTradeNs:enlist lts;recvNs:enlist rns;lastPx:enlist px;
@@ -264,25 +275,47 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
 / computation is delegated to the checked quant CLI so both languages use
 / the same algorithm. Digests detect corruption but are not authentication.
 .quant.quantBin:{[] .quant.cliArg["-quantBin"]}
-.quant.fileDigest:{[path]
+.quant.executableAlphabet:
+  "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._-"
+.quant.safeExecutable:{[tool]
+  p:$[10h=type tool; tool; string tool];
+  if[not p like "/*"; :0b];
+  if[not all p in\: .quant.executableAlphabet; :0b];
+  :not (p like "*..*")}
+.quant.shellQuote:{[arg]
+  s:$[10h=type arg; arg; string arg];
+  if[any s in " ;$&|`"; '`unsafe_argument];
+  :"'", s, "'"}
+.quant.commandPath:{[]
   tool:.quant.quantBin[];
-  if[not count tool; tool:"build/quant"];
-  out:@[system;(tool," digest ",.quant.quotePath path);{`q_digest_error}];
+  if[not count tool; tool:.quant.canonicalPath "build/quant"];
+  if[not .quant.safeExecutable[tool]; '`unsafe_executable];
+  c:.quant.canonicalPath tool;
+  :$[c like "/*"; c; (first system "pwd"),"/",c]}
+.quant.fileDigest:{[path]
+  tool:.quant.commandPath[];
+  out:@[system;((.quant.shellQuote tool)," digest ",
+    .quant.quotePath path);{`q_digest_error}];
   if[not (type out) in (0h;10h); '`digest_failed];
   if[0=count out; '`digest_failed];
   :$[10h=type out; out; first out]}
+.quant.digestCounter:0
 .quant.digest:{[x]
-  tool:.quant.quantBin[];
-  if[not count tool; tool:"build/quant"];
-  tmp:"/tmp/quant-digest-", string `long$.z.p;
-  hsym[`$tmp] set x;
-  out:.quant.fileDigest[tmp];
+  tool:.quant.commandPath[];
+  .quant.digestCounter::.quant.digestCounter+1;
+  out:@[system;((.quant.shellQuote tool)," mktemp qdigest");
+    {`q_mktemp_error}];
+  if[(type out)<>0h; '`digest_failed];
+  if[0=count out; '`digest_failed];
+  tmp:first out;
+  hsym[`$tmp] set .j.j x;
+  digest:.quant.fileDigest[tmp];
   .quant.checkedSystem[("rm -f ",.quant.quotePath tmp)];
-  :out}
+  :digest}
 .quant.syncFile:{[path]
-  tool:.quant.quantBin[];
-  if[not count tool; tool:"build/quant"];
-  r:@[system;(tool," fsync ",.quant.quotePath path);{`q_fsync_error}];
+  tool:.quant.commandPath[];
+  r:@[system;((.quant.shellQuote tool)," fsync ",
+              .quant.quotePath path);{`q_fsync_error}];
   :((type r)=0h) and (1=count r) and ((first r) ~ "ok")}
 .quant.generationDir:{[p;g] `$((.quant.pathString p),"/gen-",string g)}
 .quant.currentGeneration:{[p]
@@ -355,6 +388,9 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
   record:get hsym `$(.quant.ownerPath p);
   pid:string record`pid;
   if[not .quant.validPid pid; :0b];
+  host:$[10h=type record`host; record`host; string record`host];
+  current:first system "hostname";
+  if[not (host ~ current); :0b];
   alive:@[system;("kill -0 ",pid," 2>/dev/null");{::}];
   if[(type alive)=0h; if[0<count alive; :0b]];
   :.quant.checkedRemoveLock p}
@@ -448,16 +484,35 @@ features:([]date:`date$();symbol:`symbol$();ret20:`float$();ret60:`float$();
   :result}
 
 / Uncommitted staging generations are never promoted; remove them explicitly.
+
+.quant.stagingNameValid:{[name]
+  s:$[10h=type name; name; string name];
+  if[(count s)<13; :0b];
+  if[not ("gen-" ~ 4#s); :0b];
+  if[not (".staging" ~ (-8)#s); :0b];
+  digits:(count s)-12;
+  if[digits<1; :0b];
+  core:digits#4_s;
+  if[not all core in\: "0123456789"; :0b];
+  :1b}
+.quant.removeStaged:{[path;name]
+  if[not .quant.stagingNameValid[name]; :0b];
+  target:.quant.quotePath[(.quant.canonicalPath path),"/",string name];
+  tool:.quant.commandPath[];
+  r:@[system;((.quant.shellQuote tool)," rmrf ",target);
+    {`q_remove_error}];
+  ok:((type r)=0h) and (1=count r) and (first r like "ok*");
+  if[ok; .quant.sync[]];
+  :ok}
 .quant.recoverOrphans:{[p]
   path:.quant.pathString p;
-  if[0=count key hsym `$path; :0];
-  names:key hsym `$path;
-  staged:names where (like[string each names;"*staging*"]);
-  .quant.removeStaged[path] each staged;
+  if[not .quant.safePath path; :`unsafe_path];
+  if[0=count key hsym `$(.quant.canonicalPath path); :0];
+  names:key hsym `$(.quant.canonicalPath path);
+  staged:names where .quant.stagingNameValid each names;
+  results:.quant.removeStaged[path] each staged;
+  if[not all results; '`orphan_cleanup_failed];
   count staged}
-.quant.removeStaged:{[path;name]
-  .quant.checkedSystem[("rm -rf ",path,"/",string name)];
-  ::}
 
 .quant.loadHistorical:{[path]
   p:.quant.pathString path;

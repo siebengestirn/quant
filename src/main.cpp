@@ -49,6 +49,7 @@ const char* StatusName(DatasetStatus status) {
 struct App {
   Config config;
   Journal journal;
+  std::shared_ptr<std::recursive_mutex> risk_authority_lock;
   std::shared_ptr<DailyRiskState> risk_state =
       std::make_shared<DailyRiskState>();
   DatasetVerification dataset_status;
@@ -93,10 +94,13 @@ App Initialize(std::string* error) {
     *error = "universe publication recovery failed: " + universe_recovery_error;
     return app;
   }
+  app.risk_authority_lock = std::make_shared<std::recursive_mutex>();
   app.paper_broker = std::make_shared<PaperBroker>(
       app.config,
       &app.journal,
-      std::make_shared<Portfolio>(app.config.initial_capital));
+      std::make_shared<Portfolio>(app.config.initial_capital),
+      app.risk_state);
+  app.paper_broker->ShareAuthorityLock(app.risk_authority_lock);
   std::string paper_error;
   if (!app.paper_broker->RehydrateFromJournal(&paper_error)) {
     app.journal.Close();
@@ -832,6 +836,7 @@ DailyReport BuildReport(App& app, bool* ok) {
 
   Portfolio paper(app.config.initial_capital);
   RiskEngine risk(app.config, app.risk_state, &app.journal);
+  risk.ShareAuthorityLock(app.risk_authority_lock);
   const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
                           std::chrono::system_clock::now().time_since_epoch())
                           .count();
@@ -1244,6 +1249,41 @@ bool SyncParentDirectory(const std::string& path, std::string* error) {
   return ok;
 }
 
+int CommandMkTemp(const std::string& prefix) {
+  if (prefix.empty())
+    return 2;
+  const std::string directory = "data/cache/qtmp";
+  std::error_code ec;
+  std::filesystem::create_directories(directory, ec);
+  if (ec)
+    return 1;
+  std::filesystem::permissions(
+      directory, std::filesystem::perms::owner_all, ec);
+  std::string pattern = directory + "/" + prefix + "-XXXXXX";
+  std::vector<char> buffer(pattern.begin(), pattern.end());
+  buffer.push_back('\0');
+  const int fd = mkstemp(buffer.data());
+  if (fd < 0)
+    return 1;
+  close(fd);
+  std::cout << std::string(buffer.data()) << "\n";
+  return 0;
+}
+
+int CommandRemoveTree(const std::string& path) {
+  if (path.empty() || path.front() != '/' ||
+      path.find("..") != std::string::npos)
+    return 2;
+  std::error_code error;
+  const std::uintmax_t removed = std::filesystem::remove_all(path, error);
+  if (error) {
+    std::cout << "FAILED: tree removal error for " << path << "\n";
+    return 1;
+  }
+  std::cout << "ok " << removed << "\n";
+  return 0;
+}
+
 int CommandFsync(const std::string& path) {
   if (path.empty())
     return 2;
@@ -1278,6 +1318,10 @@ int RunCli(int argc, char** argv) {
     return CommandDigest(argv[2]);
   if (command == "fsync" && argc == 3)
     return CommandFsync(argv[2]);
+  if (command == "rmrf" && argc == 3)
+    return CommandRemoveTree(argv[2]);
+  if (command == "mktemp" && argc == 3)
+    return CommandMkTemp(argv[2]);
   std::string error;
   App app = Initialize(&error);
   if (!app.ready) {
