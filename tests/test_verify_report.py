@@ -20,6 +20,7 @@ assert _SPEC is not None and _SPEC.loader is not None
 VERIFY_REPORT = importlib.util.module_from_spec(_SPEC)
 sys.modules["verify_report"] = VERIFY_REPORT
 _SPEC.loader.exec_module(VERIFY_REPORT)
+AUDIT_DISPOSITION = sys.modules["audit_disposition"]
 
 PASS = VERIFY_REPORT.PASS
 FAIL = VERIFY_REPORT.FAIL
@@ -579,6 +580,11 @@ def test_report_has_versioned_schema_and_all_gates(
             "audit_disposition_tests",
             "tests/test_audit_disposition.py",
         ),
+        (
+            VERIFY_REPORT.run_runner_attestation_tests,
+            "runner_attestation_tests",
+            "tests/test_runner_attestation.py",
+        ),
     ],
 )
 def test_new_pytest_gates_reset_addopts(
@@ -883,6 +889,8 @@ def test_run_gates_includes_every_required_gate(
         "run_native_q_checker_tests": "native_q_checker_tests",
         "run_ci_security_tests": "ci_security_tests",
         "run_audit_disposition_tests": "audit_disposition_tests",
+        "run_audit_disposition_evidence": "audit_disposition_evidence",
+        "run_runner_attestation_tests": "runner_attestation_tests",
         "run_style": "style",
         "run_freshness": "state_freshness",
         "run_audit": "terminology_audit",
@@ -1126,3 +1134,139 @@ def test_audit_disposition_gate_enforces_skip_policy(
     gate = VERIFY_REPORT.run_audit_disposition_tests(allowed)
     assert gate["result"] == expected
     assert set(VERIFY_REPORT.PYTEST_COUNT_KEYS) <= gate["counts"].keys()
+
+
+def test_runner_status_fields_are_explicit_for_skipped_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A skipped native-q job never claims runner execution or a pass."""
+    gate = build_gate(monkeypatch, make_jobs("skipped"))
+    counts = gate["counts"]
+    assert counts["native_q_result"] == GATED
+    assert counts["native_q_runtime"] == GATED
+    assert counts["native_q_runner_execution"] == "NOT_OBSERVED"
+    assert counts["runner_attestation_mechanism"] == "CHECKED"
+    assert "runner executed" not in str(counts).lower()
+
+
+def write_evidence_files(root: Path, *, mutate: str | None = None) -> bytes:
+    """Write a valid disposition report and review into a temp checkout."""
+    tool = AUDIT_DISPOSITION
+    findings = [
+        tool.Finding(
+            source="docs/a.md",
+            line=1,
+            category="unsupported_absolute",
+            phrase="never",
+            context="Never print secrets.",
+        ),
+        tool.Finding(
+            source="docs/b.md",
+            line=2,
+            category="vague_scope",
+            phrase="some",
+            context="Some wording requires review.",
+        ),
+    ]
+    raw = json.dumps([item.as_dict() for item in findings], indent=2).encode()
+    audit = root / VERIFY_REPORT.AUDIT_RELATIVE
+    audit.parent.mkdir(parents=True, exist_ok=True)
+    audit.write_bytes(raw)
+    report = tool.build_report(raw, findings, source=str(audit))
+    review = tool.build_review_report(raw, report, source=str(audit))
+    if mutate == "stale-digest":
+        report["source_digest"] = "0" * 64
+    elif mutate == "missing-finding":
+        removed = report["dispositions"].pop()
+        report["findings"].pop()
+        name = removed["disposition"]
+        report["counts"][name] -= 1
+        report["advisory_findings"] -= 1
+        category = review["categories"][name]
+        category["finding_ids"].remove(removed["finding_id"])
+        category["count"] -= 1
+        review["counts"] = dict(report["counts"])
+        review["total_findings"] -= 1
+        review["resolution_counts"][category["resolution_status"]] -= 1
+    elif mutate == "extra-finding":
+        duplicate = dict(report["dispositions"][0])
+        duplicate["finding_id"] = "e" * 64
+        report["dispositions"].append(duplicate)
+    tool.write_report(report, root / VERIFY_REPORT.DISPOSITIONS_RELATIVE)
+    tool.write_report(review, root / VERIFY_REPORT.REVIEW_RELATIVE)
+    return raw
+
+
+def test_evidence_gate_is_not_applicable_in_clean_checkout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Generated evidence absent from a clean checkout is not a failure."""
+    monkeypatch.setattr(VERIFY_REPORT, "ROOT", tmp_path)
+    gate = VERIFY_REPORT.run_audit_disposition_evidence()
+    assert gate["name"] == "audit_disposition_evidence"
+    assert gate["result"] == NOT_APPLICABLE
+    assert gate["exit_code"] == 0
+    assert gate["counts"]["applicable"] is False
+    assert len(gate["counts"]["missing_files"]) == 3
+    assert "absent from this clean checkout" in gate["reason"]
+    assert gate["command"] == (
+        "python3 scripts/audit_disposition.py verify "
+        "--input data/assurance/english-audit.json "
+        "--path data/assurance/audit-dispositions.json "
+        "--review data/assurance/audit-disposition-review.json"
+    )
+    assert "audit_disposition_evidence" in REQUIRED_GATES
+
+
+def test_not_applicable_gate_keeps_report_overall_pass(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A clean checkout with absent evidence still yields an overall PASS."""
+    monkeypatch.setattr(VERIFY_REPORT, "ROOT", tmp_path)
+    gate = VERIFY_REPORT.run_audit_disposition_evidence()
+
+    def fake_gates(commit: str, scope: str) -> list:
+        del commit, scope
+        return [gate]
+
+    monkeypatch.setattr(VERIFY_REPORT, "run_gates", fake_gates)
+    monkeypatch.setattr(VERIFY_REPORT, "git_commit", lambda: COMMIT)
+    monkeypatch.setattr(VERIFY_REPORT, "toolchain", lambda: {"python": "3"})
+    output = tmp_path / "report.json"
+    assert VERIFY_REPORT.run_report(output) == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["overall"] == PASS
+    assert gate["result"] == NOT_APPLICABLE
+
+
+def test_evidence_gate_passes_with_exact_evidence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Exact evidence records digest, counts and owner status."""
+    raw = write_evidence_files(tmp_path)
+    monkeypatch.setattr(VERIFY_REPORT, "ROOT", tmp_path)
+    gate = VERIFY_REPORT.run_audit_disposition_evidence()
+    assert gate["result"] == PASS, gate["reason"]
+    counts = gate["counts"]
+    assert counts["applicable"] is True
+    assert counts["source_digest"] == hashlib.sha256(raw).hexdigest()
+    assert counts["finding_count"] == 2
+    assert counts["disposition_count"] == 2
+    assert sum(counts["counts_by_class"].values()) == 2
+    assert set(counts["owner_status"].values()) <= {"resolved", "OPEN"}
+    assert counts["owner_status"]["AMBIGUOUS_REQUIREMENT"] == "OPEN"
+
+
+@pytest.mark.parametrize(
+    "mutate", ["stale-digest", "missing-finding", "extra-finding"]
+)
+def test_evidence_gate_fails_on_stale_or_incomplete_evidence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mutate: str
+) -> None:
+    """A stale digest, missing finding or extra finding never passes."""
+    write_evidence_files(tmp_path, mutate=mutate)
+    monkeypatch.setattr(VERIFY_REPORT, "ROOT", tmp_path)
+    gate = VERIFY_REPORT.run_audit_disposition_evidence()
+    assert gate["result"] == FAIL
+    assert gate["counts"]["applicable"] is True
+    assert gate["reason"]

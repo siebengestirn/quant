@@ -85,6 +85,7 @@ def run_attest(
     jobs: Any = None,
     raw_job: Any = None,
     expected_sha: str = SHA,
+    extra_args: tuple[str, ...] = (),
 ) -> tuple[int, Path, str, list[str]]:
     """Invoke the attestation CLI against stubbed API payloads."""
     calls = install_api(
@@ -102,6 +103,7 @@ def run_attest(
             expected_sha,
             "--output",
             str(output),
+            *extra_args,
         ]
     )
     captured = capsys.readouterr()
@@ -135,11 +137,71 @@ def test_valid_api_job_is_attested_and_accepted(
     assert lifecycle["deregistration_verified"] is False
     assert lifecycle["deregistration_evidence"] == ""
     assert "external runner operator" in lifecycle["requirement"]
+    assert payload["evidence_status"] == {
+        "native_q_runner_execution": "OBSERVED",
+        "runner_attestation_mechanism": "CHECKED",
+    }
     assert payload["required_for_portable_research"] is False
     assert calls == [
         f"actions/runs/{RUN_ID}/jobs",
         f"actions/jobs/{JOB_ID}",
     ]
+
+
+def test_attestation_can_carry_not_observed_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The optional stub fields let evidence state no runner execution."""
+    code, output, _text, _calls = run_attest(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        extra_args=(
+            "--native-q-runner-execution",
+            "NOT_OBSERVED",
+            "--runner-attestation-mechanism",
+            "CHECKED",
+        ),
+    )
+    assert code == 0
+    status = json.loads(output.read_text(encoding="utf-8"))["evidence_status"]
+    assert status == {
+        "native_q_runner_execution": "NOT_OBSERVED",
+        "runner_attestation_mechanism": "CHECKED",
+    }
+
+
+def test_skipped_attestation_records_no_q_runtime_execution(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A skipped native-q job yields a stub, never an execution claim."""
+    output = tmp_path / "runner-attestation.json"
+    code = attest.main(["skipped", "--run-id", RUN_ID, "--output", str(output)])
+    text = capsys.readouterr().out
+    assert code == 0
+    assert "NOT_OBSERVED" in text
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["native_q_result"] == "GATED_NOT_RUN"
+    assert payload["observed"] == {}
+    assert payload["evidence_status"] == {
+        "native_q_runner_execution": "NOT_OBSERVED",
+        "runner_attestation_mechanism": "CHECKED",
+    }
+    assert "no runner identity or q runtime execution" in payload["note"]
+    assert payload["api_endpoints"] == []
+
+
+def test_skipped_attestation_rejects_invalid_run_id(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The skipped stub requires a numeric workflow run id."""
+    output = tmp_path / "runner-attestation.json"
+    code = attest.main(["skipped", "--run-id", "abc", "--output", str(output)])
+    assert code == 1
+    assert "--run-id must be a positive integer" in capsys.readouterr().err
+    assert not output.exists()
 
 
 def test_attestation_is_canonical_json(
@@ -384,3 +446,138 @@ def test_cli_invokes_gh_for_both_endpoints(tmp_path: Path) -> None:
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["observed"]["runner_group_name"] == "quant-native-q"
     assert payload["observed"]["runner_id"] == 98765
+
+
+@pytest.mark.parametrize(
+    "runner_id",
+    [0, -1, True, "unknown", None],
+    ids=["zero", "negative", "bool", "string", "null"],
+)
+def test_wrong_runner_id_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    runner_id: Any,
+) -> None:
+    """A non-positive or non-integer runner ID cannot attest a runner."""
+    code, output, text, _calls = run_attest(
+        tmp_path, monkeypatch, capsys, job=api_job(runner_id=runner_id)
+    )
+    assert code == 1
+    assert "missing runner identity field: runner_id" in text
+    assert "runner attestation passed" not in text
+
+
+def test_wrong_workflow_run_id_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Evidence fetched under one run cannot attest another run's job."""
+    install_api(monkeypatch, job=api_job())
+    output = tmp_path / "attestation.json"
+    code = attest.main(
+        [
+            "attest",
+            "--run-id",
+            str(int(RUN_ID) + 1),
+            "--job-id",
+            JOB_ID,
+            "--expected-sha",
+            SHA,
+            "--output",
+            str(output),
+        ]
+    )
+    text = capsys.readouterr().err + capsys.readouterr().out
+    assert code == 1
+    assert "job run id does not match" in text
+    assert not output.exists()
+
+
+def test_incomplete_job_evidence_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A job missing identity fields cannot attest runner execution."""
+    code, _output, text, _calls = run_attest(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        job=api_job(remove=("runner_id", "runner_name", "runner_group_id")),
+    )
+    assert code == 1
+    assert "missing runner identity field: runner_id" in text
+    assert "missing runner identity field: runner_name" in text
+    assert "missing runner identity field: runner_group_id" in text
+
+
+@pytest.mark.parametrize(
+    "conclusion", ["skipped", "failure", "cancelled", None]
+)
+def test_non_success_conclusion_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    conclusion: Any,
+) -> None:
+    """Only a successful job can attest that its runner executed."""
+    code, output, text, _calls = run_attest(
+        tmp_path, monkeypatch, capsys, job=api_job(conclusion=conclusion)
+    )
+    assert code == 1
+    if conclusion == "skipped":
+        assert "skipped native-q job cannot attest runner execution" in text
+    else:
+        assert "unexpected job conclusion" in text
+
+
+def test_missing_job_response_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An absent API job response fails closed instead of being assumed."""
+
+    def fake_api(path: str, *_args: Any, **_kwargs: Any) -> Any:
+        if path.startswith("actions/runs/"):
+            return {"jobs": [api_job()]}
+        return None
+
+    monkeypatch.setattr(attest, "gh_api", fake_api)
+    output = tmp_path / "attestation.json"
+    code = attest.main(
+        [
+            "attest",
+            "--run-id",
+            RUN_ID,
+            "--job-id",
+            JOB_ID,
+            "--expected-sha",
+            SHA,
+            "--output",
+            str(output),
+        ]
+    )
+    text = capsys.readouterr().err + capsys.readouterr().out
+    assert code == 1
+    assert "workflow job response must be a JSON object" in text
+    assert not output.exists()
+
+
+def test_incomplete_lifecycle_and_bad_group_id_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Invalid group IDs and incomplete lifecycles are not evidence."""
+    code, _output, text, _calls = run_attest(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        job=api_job(runner_group_id=0, remove=("started_at",)),
+    )
+    assert code == 1
+    assert "missing runner identity field: runner_group_id" in text
+    assert "missing lifecycle evidence: started_at" in text

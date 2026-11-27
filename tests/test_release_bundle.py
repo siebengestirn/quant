@@ -25,6 +25,7 @@ LOADER = SPEC.loader
 RELEASE_BUNDLE = importlib.util.module_from_spec(SPEC)
 sys.modules["release_bundle"] = RELEASE_BUNDLE
 LOADER.exec_module(RELEASE_BUNDLE)
+AUDIT_DISPOSITION = sys.modules["audit_disposition"]
 
 COMMIT = "a" * 40
 OTHER_COMMIT = "b" * 40
@@ -42,9 +43,30 @@ GATE_TEST_FILES = {
     "release_bundle_tests": "tests/test_release_bundle.py",
     "verify_report_tests": "tests/test_verify_report.py",
     "native_q_checker_tests": "tests/test_native_q_ci.py",
+    "runner_attestation_tests": "tests/test_runner_attestation.py",
     "ci_security_tests": "tests/test_ci_security.py",
     "audit_disposition_tests": "tests/test_audit_disposition.py",
 }
+EVIDENCE_DIGEST = "d" * 64
+COUNTS_BY_CLASS = {
+    "CORRECT_WORDING": 60,
+    "ACCEPTED_DOMAIN_TERMINOLOGY": 20,
+    "HISTORICAL_STATEMENT": 10,
+    "AMBIGUOUS_REQUIREMENT": 7,
+    "POTENTIALLY_MISLEADING_CLAIM": 7,
+    "DOCUMENTATION_DEFECT": 3,
+}
+OWNER_STATUS = {
+    "CORRECT_WORDING": "resolved",
+    "ACCEPTED_DOMAIN_TERMINOLOGY": "resolved",
+    "HISTORICAL_STATEMENT": "resolved",
+    "AMBIGUOUS_REQUIREMENT": "OPEN",
+    "POTENTIALLY_MISLEADING_CLAIM": "OPEN",
+    "DOCUMENTATION_DEFECT": "OPEN",
+}
+EVIDENCE_REASON = (
+    "exact audit digest, finding coverage and owner status verified"
+)
 BINARY_DIGEST = hashlib.sha256(b"fresh build-ci contract binary\n").hexdigest()
 STALE_DIGEST = hashlib.sha256(b"stale build contract binary\n").hexdigest()
 PASS_REASON = (
@@ -363,6 +385,7 @@ def sample_report(commit: str, *, native: dict | None = None) -> dict:
         "release_bundle_tests": pytest_counts(74),
         "verify_report_tests": pytest_counts(122),
         "native_q_checker_tests": pytest_counts(8),
+        "runner_attestation_tests": pytest_counts(15),
         "ci_security_tests": pytest_counts(11),
         "audit_disposition_tests": pytest_counts(31),
         "style": {"pass_checks": 8, "checks_total": 8},
@@ -380,6 +403,9 @@ def sample_report(commit: str, *, native: dict | None = None) -> dict:
             "native_q_tests_executed": 0,
             "native_q_tests_skipped": 0,
             "native_q_tests_failed": 0,
+            "native_q_runtime": "GATED_NOT_RUN",
+            "native_q_runner_execution": "NOT_OBSERVED",
+            "runner_attestation_mechanism": "CHECKED",
             "jobs_total": 4,
             "jobs_passed": 3,
             "jobs_failed": 0,
@@ -392,6 +418,21 @@ def sample_report(commit: str, *, native: dict | None = None) -> dict:
     for name, test_file in GATE_TEST_FILES.items():
         gate = next(item for item in gates if item["name"] == name)
         gate["command"] = f"python3 -m pytest {test_file} -o addopts='' -q"
+    evidence = make_gate(
+        "audit_disposition_evidence",
+        {
+            "applicable": True,
+            "source_digest": EVIDENCE_DIGEST,
+            "finding_count": 107,
+            "disposition_count": 107,
+            "counts_by_class": dict(COUNTS_BY_CLASS),
+            "owner_status": dict(OWNER_STATUS),
+        },
+    )
+    evidence["command"] = RELEASE_BUNDLE.AUDIT_EVIDENCE_COMMAND
+    evidence["reason"] = EVIDENCE_REASON
+    evidence["steps"][0]["output"] = "verify: PASS"
+    gates.append(evidence)
     hosted = host_gate({"gates": gates})
     hosted["native_q"] = native if native is not None else gated_native()
     return {
@@ -418,6 +459,7 @@ def passed_report(commit: str) -> dict:
         {
             "native_q_conclusion": "success",
             "native_q_result": "PASS",
+            "native_q_runtime": "PASS",
             "native_q_tests_executed": 8,
             "jobs_passed": 4,
             "jobs_gated": 0,
@@ -791,6 +833,7 @@ def write_test_bundle(
     corrupt: bool,
     report: dict | None = None,
     scope: str = RELEASE_SCOPE,
+    audit_evidence: bool | str | None = None,
 ) -> Path:
     """Write a small bundle with a report, provenance and snapshots."""
     quant_root = workspace / "quant"
@@ -802,6 +845,21 @@ def write_test_bundle(
     (evidence / "verification-report.json").write_text(
         json.dumps(report), encoding="utf-8"
     )
+    if audit_evidence is not None:
+        assurance = evidence / "assurance"
+        assurance.mkdir(parents=True, exist_ok=True)
+        (assurance / "english-audit.json").write_bytes(
+            json.dumps(audit_findings(), indent=2).encode("utf-8")
+        )
+        RELEASE_BUNDLE.regenerate_audit_dispositions(quant_root)
+        if audit_evidence == "stale":
+            path = evidence / "assurance" / "audit-dispositions.json"
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["source_digest"] = "0" * 64
+            path.write_text(
+                json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
     governance = quant_root / "governance"
     governance.mkdir()
     (governance / "instrument-master-snapshots.json").write_text(
@@ -1268,3 +1326,282 @@ def test_native_q_invalid_job_state_fails(mutate: str, match: str) -> None:
         native["tests_skipped"] = "0"
     with pytest.raises(ValueError, match=match):
         RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+def test_runner_attestation_gate_is_versioned() -> None:
+    """The runner attestation suite cannot be omitted or renamed."""
+    report = sample_report(COMMIT)
+    report["gates"] = [
+        gate
+        for gate in report["gates"]
+        if gate["name"] != "runner_attestation_tests"
+    ]
+    with pytest.raises(ValueError, match="missing required gates"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+    report = sample_report(COMMIT)
+    report["gates"].append(dict(named_gate(report, "runner_attestation_tests")))
+    with pytest.raises(ValueError, match="duplicate gate names"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+    report = sample_report(COMMIT)
+    named_gate(report, "runner_attestation_tests")["name"] = "unlisted"
+    with pytest.raises(ValueError, match="unknown gate names"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+def test_runner_attestation_gate_has_exact_pinned_command() -> None:
+    """The mandated offline runner attestation command is recorded."""
+    gate = named_gate(sample_report(COMMIT), "runner_attestation_tests")
+    assert gate["command"] == (
+        "python3 -m pytest tests/test_runner_attestation.py " "-o addopts='' -q"
+    )
+    assert gate["counts"] == pytest_counts(15)
+    assert "runner_attestation_tests" in RELEASE_BUNDLE.PYTHON_GATES
+
+
+@pytest.mark.parametrize(
+    "test_id", [None, "tests/test_runner_attestation.py::t"]
+)
+def test_unapproved_runner_attestation_skip_fails(test_id: str | None) -> None:
+    """A skip in the attestation suite needs an authored, matching reason."""
+    report = sample_report(COMMIT)
+    gate = named_gate(report, "runner_attestation_tests")
+    baseline = gate["counts"]["passed"]
+    gate["counts"] = pytest_counts(baseline - 1, skipped=1)
+    if test_id is not None:
+        gate["steps"][0]["output"] = (
+            f"SKIPPED [1] {test_id}:42: {SKIP_REASON}\n"
+            f"{baseline - 1} passed, 1 skipped in 0.1s"
+        )
+    with pytest.raises(ValueError, match="unapproved skip"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+    if test_id is not None:
+        report["config"]["allowed_skips"] = [
+            {"test_id": test_id, "reason": SKIP_REASON}
+        ]
+        assert RELEASE_BUNDLE.validate_report(report, COMMIT) is report
+
+
+def test_evidence_gate_is_versioned_and_pinned() -> None:
+    """The evidence gate is distinct from the disposition test suite."""
+    report = sample_report(COMMIT)
+    assert "audit_disposition_evidence" in RELEASE_BUNDLE.REQUIRED_GATES
+    assert "audit_disposition_evidence" not in RELEASE_BUNDLE.PYTHON_GATES
+    gate = named_gate(report, "audit_disposition_evidence")
+    assert gate["command"] == RELEASE_BUNDLE.AUDIT_EVIDENCE_COMMAND
+    assert gate["command"] == (
+        "python3 scripts/audit_disposition.py verify "
+        "--input data/assurance/english-audit.json "
+        "--path data/assurance/audit-dispositions.json "
+        "--review data/assurance/audit-disposition-review.json"
+    )
+    report["gates"] = [
+        item
+        for item in report["gates"]
+        if item["name"] != "audit_disposition_evidence"
+    ]
+    with pytest.raises(ValueError, match="missing required gates"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+def test_evidence_gate_not_applicable_is_accepted() -> None:
+    """A clean checkout with no generated evidence is honestly reported."""
+    report = sample_report(COMMIT)
+    gate = named_gate(report, "audit_disposition_evidence")
+    gate["result"] = "NOT_APPLICABLE"
+    gate["counts"] = {
+        "applicable": False,
+        "source_digest": "",
+        "finding_count": 0,
+        "disposition_count": 0,
+        "counts_by_class": {},
+        "owner_status": {},
+        "missing_files": ["data/assurance/audit-dispositions.json"],
+    }
+    gate["reason"] = "generated audit evidence is absent from this checkout"
+    assert RELEASE_BUNDLE.validate_report(report, COMMIT) is report
+    assert "Audit disposition evidence: NOT_APPLICABLE" in manifest_for(report)
+    gate["counts"]["applicable"] = True
+    with pytest.raises(ValueError, match="NOT_APPLICABLE needs a reason"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    [
+        ("digest", "invalid source digest"),
+        ("coverage", "coverage mismatch"),
+        ("class", "counts by class"),
+        ("owner", "invalid owner status"),
+        ("verify", "verify did not report PASS"),
+    ],
+)
+def test_evidence_gate_rejects_invalid_evidence(
+    mutate: str, match: str
+) -> None:
+    """A PASS verdict needs exact, internally consistent evidence counts."""
+    report = sample_report(COMMIT)
+    gate = named_gate(report, "audit_disposition_evidence")
+    if mutate == "digest":
+        gate["counts"]["source_digest"] = "not-a-digest"
+    elif mutate == "coverage":
+        gate["counts"]["finding_count"] = 108
+    elif mutate == "class":
+        gate["counts"]["counts_by_class"] = {"CORRECT_WORDING": 1}
+    elif mutate == "owner":
+        gate["counts"]["owner_status"]["CORRECT_WORDING"] = "OPEN"
+    else:
+        gate["steps"][0]["output"] = "no verification output"
+    with pytest.raises(ValueError, match=match):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("native_q_runner_execution", "OBSERVED", "must not be claimed"),
+        (
+            "runner_attestation_mechanism",
+            "ASSUMED",
+            "mechanism is not recorded",
+        ),
+        ("native_q_runtime", "PASS", "runtime contradicts"),
+    ],
+)
+def test_runner_status_fields_are_validated(
+    field: str, value: str, match: str
+) -> None:
+    """A skipped job must not imply runner execution or a native-q pass."""
+    report = sample_report(COMMIT)
+    host_gate(report)["counts"][field] = value
+    with pytest.raises(ValueError, match=match):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+def test_manifest_derives_runner_status_from_report() -> None:
+    """The manifest states the recorded runtime and runner observation."""
+    manifest = manifest_for(sample_report(COMMIT))
+    assert "Native q runtime: GATED_NOT_RUN." in manifest
+    assert (
+        "Runner execution: NOT_OBSERVED; "
+        "runner attestation mechanism: CHECKED." in manifest
+    )
+    assert "native q passed" not in manifest.lower()
+    assert (
+        f"Audit disposition evidence: PASS: source digest {EVIDENCE_DIGEST}"
+        in manifest
+    )
+
+
+def audit_findings() -> list[dict]:
+    """Return two synthetic audit findings for staging tests."""
+    return [
+        {
+            "source": "docs/example.md",
+            "line": number,
+            "category": "vague_scope",
+            "phrase": "some",
+            "context": "Some wording requires review.",
+        }
+        for number in (1, 2)
+    ]
+
+
+def test_regenerate_audit_dispositions_uses_staged_bytes(
+    workspace: Path,
+) -> None:
+    """Stale dispositions are replaced from the staged audit bytes."""
+    quant_root = workspace / "quant"
+    assurance = quant_root / "evidence" / "assurance"
+    assurance.mkdir(parents=True)
+    raw = json.dumps(audit_findings(), indent=2).encode()
+    audit = assurance / "english-audit.json"
+    audit.write_bytes(raw)
+    stale = {
+        "schema_version": 1,
+        "source_digest": "0" * 64,
+        "advisory_findings": 109,
+        "findings": [],
+        "dispositions": [],
+    }
+    report_path = assurance / "audit-dispositions.json"
+    review_path = assurance / "audit-disposition-review.json"
+    for path in (report_path, review_path):
+        path.write_text(json.dumps(stale), encoding="utf-8")
+    stale_digests = {
+        path: RELEASE_BUNDLE.digest_file(path)[1]
+        for path in (report_path, review_path)
+    }
+    summary = RELEASE_BUNDLE.regenerate_audit_dispositions(quant_root)
+    expected = hashlib.sha256(raw).hexdigest()
+    assert summary["source_digest"] == expected
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    review = json.loads(review_path.read_text(encoding="utf-8"))
+    assert report["source_digest"] == expected
+    assert review["source_digest"] == expected
+    assert report["advisory_findings"] == 2
+    assert len(report["dispositions"]) == 2
+    assert AUDIT_DISPOSITION.verify_payloads(raw, report, review) == summary
+    rows = {
+        path: digest
+        for path, _size, digest in RELEASE_BUNDLE.manifest_rows(quant_root)
+    }
+    for path in (report_path, review_path):
+        relative = path.relative_to(quant_root).as_posix()
+        assert rows[relative] == RELEASE_BUNDLE.digest_file(path)[1]
+        assert rows[relative] != stale_digests[path]
+
+
+def test_regenerate_requires_staged_audit(workspace: Path) -> None:
+    """A build without the staged audit evidence fails closed."""
+    quant_root = workspace / "quant"
+    with pytest.raises(RuntimeError, match="staged audit evidence is missing"):
+        RELEASE_BUNDLE.regenerate_audit_dispositions(quant_root)
+
+
+def test_bundle_verify_reports_audit_evidence(
+    snapshots: SnapshotFixture,
+    workspace: Path,
+) -> None:
+    """Bundled audit evidence is verified offline and reported."""
+    bundle = write_test_bundle(
+        workspace, snapshots, corrupt=False, audit_evidence=True
+    )
+    result = RELEASE_BUNDLE.verify_bundle(bundle)
+    assert result["ok"], result["errors"]
+    evidence = result["audit_evidence"]
+    assert evidence["status"] == "PASS"
+    assert evidence["finding_count"] == 2
+    assert evidence["disposition_count"] == 2
+    assert (
+        evidence["source_digest"]
+        == hashlib.sha256(
+            json.dumps(audit_findings(), indent=2).encode()
+        ).hexdigest()
+    )
+    assert evidence["owner_status"]["AMBIGUOUS_REQUIREMENT"] == "OPEN"
+
+
+def test_bundle_verify_rejects_stale_bundled_evidence(
+    snapshots: SnapshotFixture,
+    workspace: Path,
+) -> None:
+    """A stale disposition digest bundled into a ZIP fails verification."""
+    bundle = write_test_bundle(
+        workspace, snapshots, corrupt=False, audit_evidence="stale"
+    )
+    result = RELEASE_BUNDLE.verify_bundle(bundle)
+    assert not result["ok"]
+    assert any("stale source digest" in error for error in result["errors"])
+    assert result["audit_evidence"]["status"] == "FAIL"
+
+
+def test_bundle_verify_without_evidence_is_not_applicable(
+    snapshots: SnapshotFixture,
+    workspace: Path,
+) -> None:
+    """Absent generated evidence is reported, never silently passed."""
+    bundle = write_test_bundle(workspace, snapshots, corrupt=False)
+    result = RELEASE_BUNDLE.verify_bundle(bundle)
+    assert result["ok"], result["errors"]
+    assert result["audit_evidence"]["status"] == "NOT_APPLICABLE"
+    assert "absent from this bundle" in result["audit_evidence"]["reason"]

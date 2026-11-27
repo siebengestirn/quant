@@ -9,8 +9,8 @@
       "core build and tests"
     ]
   },
-  "capture_context": "HISTORICAL point-in-time capture at PR #68; volatile pins are verified against git HEAD and the assurance report when available, not a claim about later live state",
-  "captured_state_basis": "Captured at PR #67; verified against git HEAD, the assurance report and the current release manifest",
+  "capture_context": "HISTORICAL point-in-time capture at PR #70; product release baseline R8.4.3 / PR #67 remains the authoritative product state; volatile pins are verified against git HEAD and the assurance report when available; not a claim about later live state",
+  "captured_state_basis": "Captured at PR #67; product release baseline verified against the assurance report and the current release manifest",
   "current_workstreams": {
     "W1": "PARTIAL",
     "W1-D": "PENDING",
@@ -87,17 +87,20 @@
     }
   ],
   "independent_acceptance": "PENDING",
-  "main_captured_basis": "captured at PR #67; verified against git HEAD by scripts/check_release_state.py",
+  "latest_branch_protection_captured": true,
+  "latest_source_revision": "PR #70",
+  "main_captured_basis": "captured at PR #68; product release baseline pin retained for R8.4.3 / PR #67; not claimed as the latest source commit",
   "main_commit": "1c63da9ed08418b9160a1445d9080422e17e8fda",
-  "manifest_basis": "captured from the R8.4.3 final release manifest; verified against the current bundle",
+  "manifest_basis": "captured from the R8.4.3 product release manifest; verified against the current bundle; product baseline PR #67 is unchanged by later source revisions",
   "manifest_sha256": "8edb3ccb7be34fdb65d76605a818cb65621e6be34549f6297c3549cc7766349c",
   "merged_pull_requests": "47-67",
+  "native_q_runner_execution": "NOT_OBSERVED",
   "native_q_status": "GATED_NOT_RUN",
   "release_id": "R8.4.3-PR67",
   "release_scope": "PORTABLE_RESEARCH",
   "release_status": "COMPLETE",
   "release_version": "R8.4.3",
-  "report_basis": "captured from data/assurance/verification-report.json; verified byte for byte",
+  "report_basis": "captured from data/assurance/verification-report.json at PR #70; verified byte for byte",
   "required_gate_set": [
     "audit_disposition_tests",
     "ci_security_tests",
@@ -113,6 +116,9 @@
     "verify_report_tests",
     "w1"
   ],
+  "runner_attestation_mechanism": "CHECKED",
+  "source_commit": "90f45f31e8f28070f0bbcb38c1e9189a020e6cdc",
+  "source_commit_basis": "captured at PR #70; verified against git HEAD and the generated assurance report by scripts/check_release_state.py",
   "test_inventory": {
     "audit_disposition_tests": 31,
     "ci_security_tests": 16,
@@ -128,6 +134,6 @@
     "decision": "NO_TRADE",
     "live_execution": "DISABLED"
   },
-  "verification_captured_basis": "captured from data/assurance/verification-report.json; verified byte for byte",
-  "verification_report_sha256": "ec0405bb76f2a06870d09e7dbad51799638b1e8c40f8db08626e60f334a91d28"
+  "verification_captured_basis": "captured from data/assurance/verification-report.json at PR #70; verified byte for byte",
+  "verification_report_sha256": "f8da888e8488cd47dd6547671395a9508be03d315b79f09d5e76cb8c8427abf3"
 }

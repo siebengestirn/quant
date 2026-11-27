@@ -306,8 +306,9 @@ jobs:
     name: Runner attestation (post-job API evidence)
     # GitHub-hosted and always attempted after native-q. The native-q tier is
     # gated and is NOT a required status check for PORTABLE_RESEARCH; when it
-    # is skipped (pull_request or disabled variable), every step here is
-    # skipped too so attestation cannot fail a portable event.
+    # is skipped (pull_request or disabled variable), the API attestation
+    # steps are skipped and a stub records native q runner execution as
+    # NOT_OBSERVED, so no portable event claims q runtime execution.
     needs: native-q
     if: always()
     runs-on: ubuntu-latest
@@ -345,8 +346,16 @@ jobs:
             --expected-sha "$EXPECTED_SHA" \
             --output data/assurance/runner-attestation.json
 
+      - name: Record skipped native-q runner execution
+        if: env.NATIVE_Q_RESULT == 'skipped'
+        run: |
+          printf 'native q runner execution NOT_OBSERVED; no q runtime execution claimed\n'
+          python3 scripts/attest_runner.py skipped \
+            --run-id "${{ github.run_id }}" \
+            --output data/assurance/runner-attestation.json
+
       - name: Upload runner attestation
-        if: env.NATIVE_Q_RESULT != 'skipped'
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: runner-attestation
@@ -413,6 +422,7 @@ jobs:
             tests/test_clean_room.py \
             tests/test_release_state.py \
             tests/test_audit_disposition.py \
+            tests/test_runner_attestation.py \
             -o addopts='' -q
 
       - name: Governance schema validation

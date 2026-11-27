@@ -12,6 +12,8 @@ an auditable artifact.
 Usage:
   python3 scripts/capture_runner_evidence.py --output PATH
   python3 scripts/capture_runner_evidence.py --input PATH
+  python3 scripts/capture_runner_evidence.py --q-version "" \
+      --native-q-runner-execution NOT_OBSERVED --output PATH
 """
 
 from __future__ import annotations
@@ -29,6 +31,12 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT = ROOT / "data" / "assurance" / "runner-evidence.json"
 REQUIRED_LABEL = "quant-native-q"
 RUNNER_GROUP_EXPECTATION = "quant-native-q"
+ATTESTATION_MECHANISM_CHECKED = "CHECKED"
+RUNNER_EXECUTION_NOT_OBSERVED = "NOT_OBSERVED"
+RUNNER_EXECUTION_OBSERVED = "OBSERVED"
+RUNNER_EXECUTION_VALUES = frozenset(
+    (RUNNER_EXECUTION_OBSERVED, RUNNER_EXECUTION_NOT_OBSERVED)
+)
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 EVIDENCE_FIELDS = (
     "runner_name",
@@ -100,12 +108,23 @@ def capture(
     *,
     q_version: str | None = None,
     head_sha: str | None = None,
+    native_q_runner_execution: str | None = None,
+    runner_attestation_mechanism: str = ATTESTATION_MECHANISM_CHECKED,
 ) -> dict[str, object]:
     """Build the runner evidence payload from the runner environment."""
     version = (
         q_version
         if q_version is not None
         else probe_q_version(env.get("QHOME", ""))
+    )
+    execution = (
+        native_q_runner_execution
+        if native_q_runner_execution is not None
+        else (
+            RUNNER_EXECUTION_OBSERVED
+            if version.strip()
+            else RUNNER_EXECUTION_NOT_OBSERVED
+        )
     )
     return {
         "schema_version": 1,
@@ -135,6 +154,8 @@ def capture(
         "qhome": env.get("QHOME", ""),
         "q_version": version.strip(),
         "q_runtime_version": version.strip(),
+        "native_q_runner_execution": execution,
+        "runner_attestation_mechanism": runner_attestation_mechanism,
         "scope": "Q_PERSISTENCE",
         "required_for_portable_research": False,
     }
@@ -180,6 +201,18 @@ def validate(evidence: Mapping[str, object]) -> list[str]:
             and not str(lifecycle.get("deregistration_evidence", "")).strip()
         ):
             problems.append("deregistration claimed without evidence")
+    execution = str(evidence.get("native_q_runner_execution", ""))
+    if execution not in RUNNER_EXECUTION_VALUES:
+        problems.append(
+            "native_q_runner_execution must be OBSERVED or NOT_OBSERVED"
+        )
+    if (
+        execution == RUNNER_EXECUTION_OBSERVED
+        and not str(evidence.get("q_version", "")).strip()
+    ):
+        problems.append("q runtime execution claimed without q version")
+    if not str(evidence.get("runner_attestation_mechanism", "")).strip():
+        problems.append("missing runner attestation mechanism")
     return problems
 
 
@@ -216,6 +249,16 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--head-sha",
         help="explicit HEAD SHA override for offline verification",
     )
+    parser.add_argument(
+        "--native-q-runner-execution",
+        choices=RUNNER_EXECUTION_VALUES,
+        help="override the derived q runner execution status",
+    )
+    parser.add_argument(
+        "--runner-attestation-mechanism",
+        default=ATTESTATION_MECHANISM_CHECKED,
+        help="attestation mechanism status carried by the evidence",
+    )
     return parser.parse_args(argv)
 
 
@@ -232,6 +275,8 @@ def main(argv: list[str] | None = None) -> int:
             os.environ,
             q_version=args.q_version,
             head_sha=args.head_sha,
+            native_q_runner_execution=args.native_q_runner_execution,
+            runner_attestation_mechanism=args.runner_attestation_mechanism,
         )
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(

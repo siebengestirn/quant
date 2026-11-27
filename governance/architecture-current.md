@@ -1,15 +1,19 @@
-# Current architecture — R8 target for PR #67 / R8.4.3 (2026-11-28)
+# Current architecture — product baseline PR #67 / source PR #70
 
 ## CURRENT RELEASE RECORD (authoritative)
 
 Canonical machine-readable state: `governance/release-state.json`, checked
-by `scripts/check_release_state.py`. R8.4.3 / PR #67 is COMPLETE; merged
-PRs 47-67; scope PORTABLE_RESEARCH; 4 required checks with zero GitHub
-approvals; native q GATED_NOT_RUN; trading DISABLED / NO TRADE; independent
-acceptance PENDING. W1 is PARTIAL with 46 offline tests and W1-D PENDING;
-W9 NOT QUALIFIED; W13-W15 FUTURE; W16/W18 PENDING; W19/W20 PROPOSED. The
-PR #63 R8.4.1 and PR #66 R8.4.2 records below are HISTORICAL; PR #64 was
-an intermediate R8.4.2 step.
+by `scripts/check_release_state.py`. The authoritative product baseline
+R8.4.3 / PR #67 is COMPLETE; merged PRs 47-67; scope PORTABLE_RESEARCH;
+4 required checks with zero GitHub approvals; native q GATED_NOT_RUN,
+runner execution NOT_OBSERVED and attestation mechanism CHECKED; trading
+DISABLED / NO TRADE; independent acceptance PENDING. Audit evidence
+verification remains PENDING until PR #71 merges. The latest source
+revision PR #70 is a source coordinate, not a new product release.
+W1 is PARTIAL with 46 W1 tests and W1-D PENDING; W9 NOT QUALIFIED;
+W13-W15 FUTURE; W16/W18 PENDING; W19/W20 PROPOSED. The PR #63 R8.4.1 and
+PR #66 R8.4.2 records below are HISTORICAL; PR #64 was an intermediate
+R8.4.2 step.
 
 ## Architecture scope and history
 
@@ -40,7 +44,7 @@ not run. `PENDING` and `NOT PROVEN` describe missing evidence, not closure.
 | Canonical instrument master | Effective-dated identity across venues and classes | PARTIAL | `include/quant.hpp:334` (AssetClass), `include/quant.hpp:343` (InstrumentSpec), `include/quant.hpp:366` (ReferenceInstrument), `include/quant.hpp:392` (InstrumentClass), `include/quant.hpp:403` (Instrument); `src/engine.cpp:994`, `src/engine.cpp:1043`; `q/quant.q:45`. W1-A/B/C add an offline crosswalk (46 tests at PR #67, four bundled snapshots, 9,926 VERIFIED / 174 UNMAPPED) from pinned public Upstox and FYERS masters in `governance/instrument-master-snapshots.json`; effective dating (W1-D) and per-class conformance are PENDING; no full W1 exit. |
 | Validation | Fail-closed contracts at every boundary | PARTIAL | `src/engine.cpp:484` (config), `src/engine.cpp:1107` (bar), `src/engine.cpp:1372` (fill), `src/engine.cpp:4495` (event); `src/dataset.cpp:301`, `src/dataset.cpp:566`; `python/dataset_contract.py:409`; `src/market_data.cpp:686`. R8.3 enforces one decimal count grammar and an explicit volume-validity state in both canonical readers; cross-language boundary fixtures and real-provider qualification are still PENDING. |
 | Durable journal | Append-only, checksummed recovery and audit source | PARTIAL | `include/quant.hpp:1058` (Journal), `include/quant.hpp:1069` (health), `src/engine.cpp:4529` (Open validates via Replay), `src/engine.cpp:4649` (Append with fsync), `src/engine.cpp:4739` (Replay), `src/engine.cpp:1146` (pipeline writes journal). Power-loss durability NOT PROVEN; process/crash evidence only. |
-| q storage | High-volume time-series analytics and generated replay state | PARTIAL | `q/quant.q:427` (persist), `q/quant.q:517` (load), `q/quant.q:532` (recover), `q/quant.q:29` (quotes); `src/kdbx.cpp:205`, `src/kdbx.cpp:259`, `src/kdbx.cpp:351`; `include/quant.hpp:1531`. R8.3 makes `KdbxClient` reject unverified volume before q publication. Local C API not compiled (libe.so missing); hosted native-q job GATED / NOT RUN (skipped/GATED_NOT_RUN at PR #62 and PR #63, both HISTORICAL, and at the current PR #67); R8.4, R8.4.1 and R8.4.2 mapped the skipped conclusion, never reporting a pass; runner provisioning remains OPEN under TD-015; q is not the durability authority. |
+| q storage | High-volume time-series analytics and generated replay state | PARTIAL | `q/quant.q:427` (persist), `q/quant.q:517` (load), `q/quant.q:532` (recover), `q/quant.q:29` (quotes); `src/kdbx.cpp:205`, `src/kdbx.cpp:259`, `src/kdbx.cpp:351`; `include/quant.hpp:1531`. R8.3 makes `KdbxClient` reject unverified volume before q publication. Local C API not compiled (libe.so missing); hosted native-q job GATED / NOT RUN (skipped/GATED_NOT_RUN at PR #62 and PR #63, both HISTORICAL, at product baseline PR #67 and at latest source revision PR #70); runner execution NOT_OBSERVED when skipped; attestation mechanism CHECKED; R8.4, R8.4.1 and R8.4.2 mapped the skipped conclusion, never reporting a pass; runner provisioning remains OPEN under TD-015; q is not the durability authority. |
 | Research | Statistics, multiple-testing diagnostics, sealed holdout | PARTIAL | `python/research.py:4` (research-only scope), `python/research.py:1048` (holdout split), `python/research.py:1086` (purged walk-forward), `python/research.py:1307` (nested validation), `python/research.py:1517` (delegation to C++), `python/research.py:1893`. Results INCONCLUSIVE/negative; holdout SEALED_NOT_EVALUATED. |
 | Strategy | Signal definition and simulated portfolio construction | PARTIAL | `include/quant.hpp:471` (Signal), `include/quant.hpp:959` (metrics), `src/engine.cpp:4063` (RunBacktest), `src/engine.cpp:4032` (conservative fill), `python/research.py:500`, `python/research.py:511`, `python/research.py:516`. Daily simulated backtest only; no accepted strategy; decision NO TRADE. |
 | Independent risk | Authorisation capability isolated from order clients | PARTIAL | `include/quant.hpp:768` (RiskAuthorization), `include/quant.hpp:915` (RiskEngine), `src/engine.cpp:3576`, `src/engine.cpp:3767` (Verify), `src/engine.cpp:3798` (market-data binding), `src/engine.cpp:2708` (state recovery). In-process capability only; not an independent human reviewer; persistence across restart NOT IMPLEMENTED (QG-003). |
@@ -219,3 +223,12 @@ required checks and native q GATED_NOT_RUN. Release scope at PR #62, PR #63
 and PR #67 was PORTABLE_RESEARCH. Current main SHA, CI runs and bundle
 digest are recorded in the current final release bundle `MANIFEST.md`
 (external artifact, regenerated after R8.4.3).
+
+The product baseline remains R8.4.3 / PR #67; the latest source revision
+PR #70 carries native q runner execution NOT_OBSERVED and attestation
+mechanism CHECKED, with audit evidence verification PENDING until PR #71
+merges. Branch protection was captured at PR #70 as a HISTORICAL
+point-in-time snapshot with HTTP 200, API version `2022-11-28`, four strict
+required checks and response SHA-256
+`de633dabfe3016d17f2885c1179282d68736f50692cacd51e9cbdb31acf02356`;
+the prior captures are retained in `governance/branch-protection-capture.json`.
