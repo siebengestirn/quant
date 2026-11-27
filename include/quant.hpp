@@ -416,6 +416,8 @@ struct Instrument {
   std::string eligibility_reason;
 };
 
+enum class VolumeValidity { kValid, kMissing, kInvalid, kUnknown };
+
 struct Quote {
   std::string symbol;
   std::string permanent_id;
@@ -429,6 +431,10 @@ struct Quote {
   int64_t bid_qty = 0;
   int64_t ask_qty = 0;
   double volume = 0.0;
+  // A directly constructed quote asserts its own volume validity. Provider
+  // normalisation always sets this explicitly; zero is never a substitute for
+  // a missing or malformed provider count.
+  VolumeValidity volume_validity = VolumeValidity::kValid;
   double open = 0.0;
   double high = 0.0;
   double low = 0.0;

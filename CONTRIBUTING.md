@@ -17,6 +17,15 @@ This file states the contribution workflow. `git-policy.json` and
    gates. Keep live execution locked.
 7. Do not rewrite published history, force-push or bypass a red gate.
 
+## Evidence freshness
+
+Volatile identifiers (commit SHAs, CI run IDs and bundle digests) belong only
+in `MANIFEST.md` of the generated release bundle; never hardcode them as
+current in tracked files. Label historical values explicitly, keep
+documentation and code changes in the same PR, and run the full gate,
+including state freshness, before publishing. Run
+`python3 scripts/state_freshness.py` for a standalone check.
+
 ## Policy sources
 
 - Branches, merges and PRs: `docs/git-workflow.md`, `git-policy.json`.

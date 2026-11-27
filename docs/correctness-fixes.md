@@ -71,10 +71,12 @@ separate independent decision.
 
 ## QG addendum — updated R8.1 (2026-11-27, PR #57/#58)
 
-Status note (updated R8.1): QG-007a (freshness) remains as recorded above.
-QG-007b (exact-integer OI/volume boundary fixtures at 2^53) is IMPLEMENTED
-and MERGED in PR #57, independently unreviewed; large-timestamp fixtures
-remain NOT IMPLEMENTED. No independent acceptance is claimed.
+Status note (updated R8.2): QG-007a (freshness) remains as recorded above.
+QG-007b exact-integer OI parity was merged in PR #57. Volume parity was
+corrected in R8.2 after a reproduced rounding defect in the provider adapter
+and both canonical CSV readers; a mutation check proves the regression test
+fails when the volume bound is removed. Large-timestamp cross-language
+fixtures remain NOT IMPLEMENTED. No independent acceptance is claimed.
 
 - QG-003 persistence of daily risk state across restart: NOT IMPLEMENTED.
 - QG-004 research/execution universe separation: PARTIAL; execution eligibility
@@ -89,6 +91,7 @@ remain NOT IMPLEMENTED. No independent acceptance is claimed.
   generated journal was preserved as
   `data/journal/events.jnl.legacy-checksum-v1` and a new journal started.
 - QG-003 daily state persistence across process restart: NOT IMPLEMENTED.
-- QG-007 exact-integer OI/volume boundary fixtures at 2^53: IMPLEMENTED
-  locally. Large-timestamp cross-language fixtures: NOT IMPLEMENTED.
+- QG-007 exact-integer OI/volume boundary fixtures at 2^53: IMPLEMENTED with
+  C++/Python parity and a mutation check. Large-timestamp cross-language
+  fixtures: NOT IMPLEMENTED.
 - QG-012..016: unchanged blockers.

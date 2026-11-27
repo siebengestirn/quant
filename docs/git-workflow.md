@@ -40,6 +40,13 @@ Commit subjects use conventional prefixes. Published correctness commits through
 `f321d0c` predate this policy and are grandfathered; no published commit is
 rewritten.
 
+Evidence freshness is part of the integration record. Volatile identifiers
+(commit SHAs, hosted CI run IDs and release bundle digests) belong only in the
+generated `MANIFEST.md` of the current final release bundle: tracked records
+must label historical values explicitly and must never pin them as current.
+Keep documentation and code changes in the same PR, and run the full gate,
+including the state-freshness check, before requesting review.
+
 ## Start and finish routine
 
 ```bash

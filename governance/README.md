@@ -2,7 +2,8 @@
 
 This directory holds authored, curated records about repository policy and
 evidence. It does not hold generated software output: builds, caches and data
-snapshots stay out of Git, as listed in `git-policy.json`.
+snapshots stay out of Git, as listed in `git-policy.json`. The state-freshness
+gate protects these records from stale identifiers and broken references.
 
 ## Index
 

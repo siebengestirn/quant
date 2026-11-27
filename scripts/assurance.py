@@ -29,6 +29,8 @@ import tomllib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from state_freshness import check as check_state_freshness
+
 ROOT = Path(__file__).resolve().parents[1]
 POLICY = json.loads((ROOT / "git-policy.json").read_text())
 CPP_FILES = (
@@ -406,6 +408,14 @@ def check_secrets() -> bool:
     return leaks == 0
 
 
+def check_state_freshness_gate() -> bool:
+    """Print state-freshness errors and report the gate outcome."""
+    errors = check_state_freshness(ROOT)
+    for error in errors:
+        print(error)
+    return not errors
+
+
 def check_git_policy(allow_dirty: bool) -> bool:
     """Validate branch, commit and merge policy state."""
     ok = True
@@ -591,6 +601,7 @@ def run_checks(gate: Gate, allow_dirty: bool) -> None:
     print(f"terminology advisory findings: {len(findings) - len(binding)}")
     if report:
         print(f"audit report: {report}")
+    gate.run("state freshness", check_state_freshness_gate)
     if shutil.which("security"):
         gate.run("secret scan", check_secrets)
     else:

@@ -1154,6 +1154,7 @@ bool MarketDataPipeline::IngestQuote(const Quote& quote, std::string* error) {
       quote.ask_qty <= 0 || quote.bid_qty <= 0 || !std::isfinite(quote.last) ||
       !std::isfinite(quote.bid) || !std::isfinite(quote.ask) ||
       !std::isfinite(quote.volume) || quote.volume < 0.0 ||
+      quote.volume_validity != VolumeValidity::kValid ||
       quote.exchange_timestamp_ms <= 0 || quote.provider_timestamp_ms <= 0 ||
       quote.receive_timestamp_ms <= 0) {
     if (error)
@@ -1170,6 +1171,8 @@ bool MarketDataPipeline::IngestQuote(const Quote& quote, std::string* error) {
   payload["bid_qty"] = Json::Integer(quote.bid_qty);
   payload["ask_qty"] = Json::Integer(quote.ask_qty);
   payload["volume"] = Json::Number(quote.volume);
+  payload["volume_validity"] =
+      Json::Integer(static_cast<int64_t>(quote.volume_validity));
   payload["exchange_timestamp_ms"] = Json::Integer(quote.exchange_timestamp_ms);
   payload["provider_timestamp_ms"] = Json::Integer(quote.provider_timestamp_ms);
   payload["last_trade_timestamp_ms"] =
@@ -1258,6 +1261,11 @@ PipelineResult MarketDataPipeline::Publish(const KdbxCheckpoint& checkpoint,
       quote.bid = number("bid");
       quote.ask = number("ask");
       quote.volume = number("volume");
+      const Json* volume_validity = payload.Find("volume_validity");
+      quote.volume_validity =
+          volume_validity == nullptr
+              ? VolumeValidity::kValid
+              : static_cast<VolumeValidity>(volume_validity->as_int(0));
       quote.exchange_timestamp_ms =
           static_cast<int64_t>(number("exchange_timestamp_ms"));
       quote.provider_timestamp_ms =
@@ -5389,12 +5397,22 @@ bool ReadCsvText(const std::string& text,
     if (!ParseFloating(fields[1], &candle.open) ||
         !ParseFloating(fields[2], &candle.high) ||
         !ParseFloating(fields[3], &candle.low) ||
-        !ParseFloating(fields[4], &candle.close) ||
-        !ParseFloating(fields[5], &candle.volume)) {
+        !ParseFloating(fields[4], &candle.close)) {
       if (error)
         *error = "malformed candle row at line " + std::to_string(line_number);
       return false;
     }
+    uint64_t exact_volume = 0;
+    const auto volume_parsed = std::from_chars(
+        fields[5].data(), fields[5].data() + fields[5].size(), exact_volume);
+    if (volume_parsed.ec != std::errc() ||
+        volume_parsed.ptr != fields[5].data() + fields[5].size() ||
+        exact_volume > 9007199254740992ULL) {
+      if (error)
+        *error = "invalid volume at line " + std::to_string(line_number);
+      return false;
+    }
+    candle.volume = static_cast<double>(exact_volume);
     // Volume is a non-negative integral count. Doubles above 2^53 cannot
     // represent every integer, so larger counts are rejected, not rounded.
     if (!std::isfinite(candle.open) || !std::isfinite(candle.high) ||

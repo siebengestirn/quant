@@ -14,5 +14,10 @@
 - Keep credentials in Keychain. Never print, commit or transmit secrets.
 - Keep generated data, builds and virtual environments out of Git.
 - Reproduce defects before changing code. Add tests with critical fix.
+- Keep volatile identifiers (commit SHAs, CI run IDs and bundle digests) out of
+  tracked files as current values: they belong only in `MANIFEST.md` of the
+  generated release bundle. Label historical values explicitly, keep
+  documentation and code changes in the same PR, and run the full gate,
+  including state freshness, before publishing.
 - Run the full gate suite before publishing a change. Report exact commands,
   exit statuses, test counts and unresolved gates.

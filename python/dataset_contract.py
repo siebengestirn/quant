@@ -45,6 +45,7 @@ _ID_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
 _STORAGE_KEY_RE = re.compile(r"^s[0-9a-f]{31}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _INTEGER_RE = re.compile(r"-?[0-9]+")
+_NONNEGATIVE_INTEGER_RE = re.compile(r"(0|[1-9][0-9]*)")
 
 CONTRACT_FIELDS = {
     "schema_version",
@@ -397,11 +398,20 @@ def _read_csv_content(
             continue
         seen.add(session)
         try:
-            values = [float(value) for value in fields[1:6]]
+            values = [float(value) for value in fields[1:5]]
         except ValueError:
             errors.append(f"{name}:{number}: non-numeric value")
             continue
-        opening, high, low, close, volume = values
+        raw_volume = fields[5]
+        if _NONNEGATIVE_INTEGER_RE.fullmatch(raw_volume) is None:
+            errors.append(f"{name}:{number}: invalid volume")
+            continue
+        volume_integer = int(raw_volume)
+        if volume_integer > MAX_EXACT_DOUBLE_INTEGER:
+            errors.append(f"{name}:{number}: volume exceeds exact range")
+            continue
+        volume = float(volume_integer)
+        opening, high, low, close = values
         open_interest: int | None = None
         if csv_schema == "v3":
             try:
@@ -423,9 +433,6 @@ def _read_csv_content(
             or close <= 0
             or low > min(opening, close)
             or max(opening, close) > high
-            or volume < 0
-            or volume > MAX_EXACT_DOUBLE_INTEGER
-            or not volume.is_integer()
         ):
             errors.append(f"{name}:{number}: invalid OHLCV relationship")
         candles.append(
