@@ -18,6 +18,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -62,6 +63,21 @@ def q_runtime_available() -> bool:
     """Enforce the QUANT style contract."""
     qhome = os.environ.get("QHOME", "")
     return bool(qhome) and (Path(qhome) / "bin" / "q").exists()
+
+
+@pytest.fixture(scope="module", autouse=True)
+def native_q_required_no_skips():
+    """Make conditional skips hard failures when native q is required."""
+    if os.environ.get("QUANT_NATIVE_Q_REQUIRED") != "1":
+        yield
+        return
+
+    def fail_instead_of_skip(reason="", allow_module_level=False):
+        del allow_module_level
+        pytest.fail(f"native q required; refusing to skip: {reason}")
+
+    with mock.patch.object(pytest, "skip", fail_instead_of_skip):
+        yield
 
 
 @pytest.fixture(scope="module")

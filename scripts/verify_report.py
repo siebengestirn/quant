@@ -2,14 +2,16 @@
 """Generate a machine-readable portable verification report.
 
 Usage:
-  python3 scripts/verify_report.py run [--output PATH]
+  python3 scripts/verify_report.py run [--output PATH] [--scope SCOPE]
   python3 scripts/verify_report.py show [--path PATH]
 
 Every gate is executed from the repository root. The report records the
-exact commands, exit codes, parsed counts and results. A skipped native-q
-job is GATED_NOT_RUN; a successful one is PASS, and any other conclusion
-is FAIL. Skipped jobs never add to successful test counts. The report is
-written even when a gate fails.
+exact commands, exit codes, parsed counts and results. The native-q tier
+is GATED_NOT_RUN only when its job was skipped or ran no tests and the
+release scope permits that status. A native-q PASS requires a successful
+job with executed integration tests and zero skipped tests; every other
+conclusion or evidence state is FAIL. Skipped jobs never add to successful
+test counts. The report is written even when a gate fails.
 """
 
 from __future__ import annotations
@@ -39,17 +41,41 @@ SUCCESS = "success"
 SKIPPED = "skipped"
 NATIVE_LABEL = "native-q"
 NATIVE_MARKERS = ("native-q", "native kdb")
+NATIVE_TEST_FILE = "tests/test_kdbx.py"
+NATIVE_TEST_STEP = "Run native q persistence and recovery tests"
 REQUIRED_JOBS = (
     "core build and tests",
     "ASan/UBSan",
     "Style contract (reference guides)",
 )
 NATIVE_RESULTS = {SKIPPED: GATED, SUCCESS: PASS}
+REPORT_SCHEMA_VERSION = 1
+RELEASE_SCOPE = "PORTABLE_RESEARCH"
+PERSISTENCE_SCOPE = "Q_PERSISTENCE"
+RELEASE_SCOPES = frozenset({RELEASE_SCOPE, PERSISTENCE_SCOPE})
+REQUIRED_GATES = frozenset(
+    {
+        "portable_cpp",
+        "sanitizer",
+        "portable_pytest",
+        "w1",
+        "release_bundle_tests",
+        "verify_report_tests",
+        "style",
+        "state_freshness",
+        "terminology_audit",
+        "hosted_ci",
+    }
+)
 PYTEST_FILES = (
     "tests/test_dataset_contract.py",
     "tests/test_research.py",
     "tests/test_dataset_adversarial.py",
 )
+W1_TEST_FILES = ("tests/test_instrument_master.py",)
+RELEASE_BUNDLE_TEST_FILES = ("tests/test_release_bundle.py",)
+VERIFY_REPORT_TEST_FILES = ("tests/test_verify_report.py",)
+PYTEST_RESET = "addopts="
 CHECKS_RE = re.compile(r"checks=(\d+)\s+failures=(\d+)")
 CTEST_RE = re.compile(r"(\d+)%\s+tests passed[^\n]*?\bout of\s+(\d+)")
 PYTEST_TOKENS_RE = re.compile(r"(\d+)\s+(passed|failed|errors?|skipped)")
@@ -83,7 +109,11 @@ def execute(
 
 def command_text(argv: list[str]) -> str:
     """Render a command as a shell-quoted, reproducible string."""
-    return shlex.join(argv)
+    text = shlex.join(argv)
+    if PYTEST_RESET in argv:
+        # pytest receives an empty option value; show its shell spelling.
+        text = text.replace(PYTEST_RESET, "addopts=''")
+    return text
 
 
 def step_result(
@@ -276,16 +306,52 @@ def run_sanitizer() -> dict:
     return make_gate("sanitizer", [configure, build, binary, ctest], counts, ok)
 
 
-def run_pytest() -> dict:
-    """Run the portable Python test subset."""
-    argv = ["python3", "-m", "pytest", *PYTEST_FILES, "-q"]
-    test = step_result("portable pytest", argv)
+def pytest_gate(name: str, files: tuple[str, ...], step_name: str) -> dict:
+    """Run one pytest suite with repository addopts disabled."""
+    argv = [
+        "python3",
+        "-m",
+        "pytest",
+        *files,
+        "-o",
+        PYTEST_RESET,
+        "-q",
+    ]
+    test = step_result(step_name, argv)
     counts = parse_pytest(test["output"])
     ok = counts.get("passed", 0) > 0 and not any(
         counts.get(key) for key in ("failed", "error", "errors")
     )
     test = finalize(test, ok)
-    return make_gate("portable_pytest", [test], counts, ok)
+    return make_gate(name, [test], counts, ok)
+
+
+def run_pytest() -> dict:
+    """Run the portable Python test subset."""
+    return pytest_gate("portable_pytest", PYTEST_FILES, "portable pytest")
+
+
+def run_w1_tests() -> dict:
+    """Run the pinned instrument-master crosswalk suite."""
+    return pytest_gate("w1", W1_TEST_FILES, "W1 instrument master tests")
+
+
+def run_release_bundle_tests() -> dict:
+    """Run the offline release bundle suite."""
+    return pytest_gate(
+        "release_bundle_tests",
+        RELEASE_BUNDLE_TEST_FILES,
+        "release bundle tests",
+    )
+
+
+def run_verify_report_tests() -> dict:
+    """Run the offline verification report suite without recursion."""
+    return pytest_gate(
+        "verify_report_tests",
+        VERIFY_REPORT_TEST_FILES,
+        "verification report tests",
+    )
 
 
 def run_style() -> dict:
@@ -372,10 +438,11 @@ def conclusion_value(conclusion: object) -> str:
 
 
 def map_job_conclusion(name: str, conclusion: object) -> str:
-    """Map one hosted job conclusion to a verification status.
+    """Map a raw conclusion token, before test-count and scope evidence.
 
-    Only a skipped native-q job is gated; a successful native-q job passes.
-    Required jobs pass only on success, and unknown names never pass.
+    A skipped native-q token is gated and a successful one is eligible for
+    a pass. Required jobs pass only on success; unknown names never pass.
+    The native-q record applies the final matrix with its test evidence.
     """
     state = conclusion_value(conclusion)
     job_name = str(name)
@@ -386,16 +453,144 @@ def map_job_conclusion(name: str, conclusion: object) -> str:
     return FAIL
 
 
+def explicit_enablement(job: dict | None) -> bool | None:
+    """Return an explicit enablement flag, or None when it is absent."""
+    if not isinstance(job, dict):
+        return None
+    for key in ("enabled", "enabled_hint"):
+        value = job.get(key)
+        if isinstance(value, bool):
+            return value
+    return None
+
+
+def native_test_step_ok(job: dict | None) -> bool:
+    """Require a successful step that runs the native integration tests."""
+    if not isinstance(job, dict):
+        return False
+    steps = job.get("steps")
+    if not isinstance(steps, list):
+        return False
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        name = str(step.get("name", ""))
+        if (
+            NATIVE_TEST_STEP.lower() not in name.lower()
+            and NATIVE_TEST_FILE not in name
+        ):
+            continue
+        if conclusion_value(step.get("conclusion")) == SUCCESS:
+            return True
+    return False
+
+
+def parse_native_evidence(logs: str) -> dict:
+    """Parse native pytest counts from a hosted job log."""
+    counts = parse_pytest(logs)
+    failed = sum(counts.get(key, 0) for key in ("failed", "error", "errors"))
+    return {
+        "pytest_counts": counts,
+        "tests_executed": counts.get("passed", 0) + failed,
+        "tests_skipped": counts.get("skipped", 0),
+        "tests_failed": failed,
+        "test_file_in_log": NATIVE_TEST_FILE in logs,
+    }
+
+
+def native_q_record(job: dict | None, scope: str, logs: str = "") -> dict:
+    """Apply the full native-q matrix and explain the recorded status."""
+    raw = job if isinstance(job, dict) else {}
+    explicit = explicit_enablement(job)
+    conclusion = conclusion_value(raw.get("conclusion"))
+    test_step = native_test_step_ok(job)
+    evidence = parse_native_evidence(logs)
+    executed = evidence["tests_executed"]
+    skipped = evidence["tests_skipped"]
+    failed = evidence["tests_failed"]
+    record = {
+        "name": raw.get("name", NATIVE_LABEL),
+        "enabled": (
+            explicit
+            if explicit is not None
+            else (conclusion == SUCCESS and test_step)
+        ),
+        "conclusion": raw.get("conclusion"),
+        "result": FAIL,
+        "tests_executed": executed,
+        "tests_skipped": skipped,
+        "tests_failed": failed,
+        "evidence": {
+            "source": "hosted job steps and pytest job log",
+            "test_file": NATIVE_TEST_FILE,
+            "test_step": NATIVE_TEST_STEP,
+            "test_step_executed": test_step,
+            "test_file_in_log": evidence["test_file_in_log"],
+            "pytest_counts": evidence["pytest_counts"],
+        },
+        "reason": "",
+        "database_id": raw.get("database_id", raw.get("databaseId")),
+    }
+    if job is None or conclusion not in (SKIPPED, SUCCESS):
+        record["reason"] = (
+            "native-q job is missing from the hosted run"
+            if job is None
+            else f"native-q conclusion {raw.get('conclusion')!r} is neither "
+            "skipped nor success"
+        )
+        return record
+    if explicit is True and conclusion == SKIPPED:
+        record["reason"] = "native-q is explicitly enabled but its job skipped"
+        return record
+    if conclusion == SKIPPED or not test_step:
+        record["tests_executed"] = 0
+        record["tests_skipped"] = 0
+        record["tests_failed"] = 0
+        record["evidence"]["pytest_counts"] = {}
+        record["evidence"]["test_file_in_log"] = False
+        if scope == RELEASE_SCOPE and explicit is not True:
+            record["result"] = GATED
+            record["reason"] = (
+                "native-q feature is not enabled; hosted job skipped or ran "
+                "no integration tests"
+            )
+        else:
+            record["reason"] = (
+                f"native-q ran no integration tests under release scope "
+                f"{scope}"
+            )
+        return record
+    if explicit is False:
+        record["reason"] = "native-q succeeded while explicitly disabled"
+        return record
+    if executed <= 0 or skipped > 0 or failed > 0:
+        record["reason"] = (
+            f"native-q integration evidence is insufficient: "
+            f"{executed} executed, {skipped} skipped, {failed} failed"
+        )
+        return record
+    record["result"] = PASS
+    record["reason"] = (
+        f"native-q integration tests executed: {executed} passed, "
+        f"{skipped} skipped, {failed} failed"
+    )
+    return record
+
+
 def map_job(job: dict) -> dict:
     """Record a hosted job's raw conclusion and its mapped status."""
     name = str(job.get("name", ""))
     conclusion = job.get("conclusion")
-    return {
+    record = {
         "name": name,
         "conclusion": conclusion,
         "result": map_job_conclusion(name, conclusion),
         "database_id": job.get("databaseId"),
     }
+    if is_native_job(name):
+        record["steps"] = job.get("steps", [])
+        record["enabled_hint"] = explicit_enablement(job)
+    return record
 
 
 def parse_jobs(output: str) -> list[dict]:
@@ -451,9 +646,11 @@ def job_counts(jobs: list[dict]) -> dict:
 
 def native_result(native: dict | None, expect_native: bool) -> str:
     """Return the native-q status, including when its job is absent."""
-    if native is not None:
+    if native is not None and native["result"] != FAIL:
         return native["result"]
-    return FAIL if expect_native else NOT_APPLICABLE
+    if not expect_native:
+        return NOT_APPLICABLE
+    return FAIL
 
 
 def hosted_ok(
@@ -463,6 +660,7 @@ def hosted_ok(
     missing: list[str],
     match: bool,
     expect_native: bool,
+    scope: str,
 ) -> bool:
     """Decide whether hosted evidence satisfies all required jobs."""
     if not match or run.get("conclusion") != SUCCESS or missing:
@@ -474,7 +672,8 @@ def hosted_ok(
         return False
     status = native_result(native, expect_native)
     if expect_native:
-        if status not in (PASS, GATED):
+        allowed = (PASS,) if scope == PERSISTENCE_SCOPE else (PASS, GATED)
+        if status not in allowed:
             return False
     elif status not in (PASS, GATED, NOT_APPLICABLE):
         return False
@@ -485,8 +684,29 @@ def hosted_ok(
     )
 
 
-def hosted_gate(commit: str, expect_native: bool = True) -> dict:
-    """Verify the hosted CI run, its head SHA and every job conclusion."""
+def native_log_step(native: dict) -> dict | None:
+    """Fetch the successful native job's log for pytest evidence."""
+    database_id = native.get("database_id")
+    if (
+        not isinstance(database_id, int)
+        or isinstance(database_id, bool)
+        or database_id <= 0
+    ):
+        return None
+    return step_result(
+        "native q test log",
+        [
+            "gh",
+            "api",
+            f"repos/{REPOSITORY}/actions/jobs/{database_id}/logs",
+        ],
+    )
+
+
+def hosted_gate(
+    commit: str, expect_native: bool = True, scope: str = RELEASE_SCOPE
+) -> dict:
+    """Verify the hosted CI run, its head SHA and its job evidence."""
     listing = step_result(
         "hosted CI list",
         [
@@ -529,6 +749,16 @@ def hosted_gate(commit: str, expect_native: bool = True) -> dict:
         except ValueError as exc:
             error = str(exc)
     native = native_job(jobs)
+    has_native = native is not None
+    log_step = None
+    logs = ""
+    if has_native and conclusion_value(native["conclusion"]) == SUCCESS:
+        log_step = native_log_step(native)
+        if log_step is not None and log_step["exit_code"] == 0:
+            logs = log_step["output"]
+    native = native_q_record(native, scope, logs)
+    if has_native:
+        jobs = [native if is_native_job(job["name"]) else job for job in jobs]
     head_sha = str(run.get("headSha", ""))
     match = bool(commit) and head_sha == commit
     missing = missing_jobs(jobs, expect_native)
@@ -541,18 +771,25 @@ def hosted_gate(commit: str, expect_native: bool = True) -> dict:
         "commit": commit,
         "native_expected": expect_native,
         "missing_jobs": missing,
-        "native_q_conclusion": native["conclusion"] if native else None,
+        "release_scope": scope,
+        "native_q_conclusion": native["conclusion"],
         "native_q_result": native_result(native, expect_native),
+        "native_q_tests_executed": native["tests_executed"],
+        "native_q_tests_skipped": native["tests_skipped"],
+        "native_q_tests_failed": native["tests_failed"],
         **job_counts(jobs),
     }
     if error:
         counts["error"] = error
     ok = not error and hosted_ok(
-        run, jobs, native, missing, match, expect_native
+        run, jobs, native, missing, match, expect_native, scope
     )
     listing = finalize(listing, not error)
     viewing = finalize(viewing, not error and bool(jobs))
-    gate = make_gate("hosted_ci", [listing, viewing], counts, ok)
+    steps = [listing, viewing]
+    if log_step is not None:
+        steps.append(log_step)
+    gate = make_gate("hosted_ci", steps, counts, ok)
     gate["jobs"] = jobs
     gate["run"] = {
         "id": run.get("databaseId"),
@@ -560,25 +797,23 @@ def hosted_gate(commit: str, expect_native: bool = True) -> dict:
         "head_sha": head_sha,
         "conclusion": run.get("conclusion"),
     }
-    gate["native_q"] = native or {
-        "name": NATIVE_LABEL,
-        "conclusion": None,
-        "result": native_result(native, expect_native),
-        "database_id": None,
-    }
+    gate["native_q"] = native
     return gate
 
 
-def run_gates(commit: str) -> list[dict]:
-    """Execute every portable and hosted verification gate."""
+def run_gates(commit: str, scope: str = RELEASE_SCOPE) -> list[dict]:
+    """Execute every portable, assurance and hosted verification gate."""
     return [
         run_portable(),
         run_sanitizer(),
         run_pytest(),
+        run_w1_tests(),
+        run_release_bundle_tests(),
+        run_verify_report_tests(),
         run_style(),
         run_freshness(),
         run_audit(),
-        hosted_gate(commit),
+        hosted_gate(commit, scope=scope),
     ]
 
 
@@ -599,14 +834,16 @@ def write_report(report: dict, path: Path) -> None:
     )
 
 
-def run_report(output: Path) -> int:
+def run_report(output: Path, scope: str = RELEASE_SCOPE) -> int:
     """Execute all gates, write a report and return a process exit code."""
     started = utc_now()
     commit = git_commit()
-    gates = run_gates(commit)
+    gates = run_gates(commit, scope)
     completed = utc_now()
     overall = PASS if all(gate["result"] == PASS for gate in gates) else FAIL
     report = {
+        "schema_version": REPORT_SCHEMA_VERSION,
+        "release_scope": scope,
         "commit": commit,
         "branch": BRANCH,
         "generated_at": utc_now(),
@@ -628,6 +865,8 @@ def run_report(output: Path) -> int:
 def show_report(path: Path) -> int:
     """Print a concise, human-readable summary of a saved report."""
     report = json.loads(path.read_text(encoding="utf-8"))
+    print(f"Schema version: {report.get('schema_version', 'missing')}")
+    print(f"Release scope: {report.get('release_scope', 'missing')}")
     print(f"Commit: {report.get('commit', '')}")
     print(f"Branch: {report.get('branch', '')}")
     print(f"Generated: {report.get('generated_at', '')}")
@@ -642,7 +881,7 @@ def show_report(path: Path) -> int:
     print(
         "- Native q tier: "
         f"{native.get('result', FAIL)} "
-        f"(hosted conclusion: {native.get('conclusion')})"
+        f"({native.get('reason', 'no explanation recorded')})"
     )
     overall = report.get("overall", FAIL)
     print(f"Overall: {overall}")
@@ -657,6 +896,12 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     run_parser.add_argument(
         "--output", type=Path, default=DEFAULT_OUTPUT, help="report JSON path"
     )
+    run_parser.add_argument(
+        "--scope",
+        choices=sorted(RELEASE_SCOPES),
+        default=RELEASE_SCOPE,
+        help="release scope for native-q qualification",
+    )
     show_parser = subparsers.add_parser("show", help="summarize a report")
     show_parser.add_argument(
         "--path", type=Path, default=DEFAULT_OUTPUT, help="report JSON path"
@@ -669,7 +914,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         if args.command == "run":
-            return run_report(args.output)
+            return run_report(args.output, args.scope)
         return show_report(args.path)
     except (OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

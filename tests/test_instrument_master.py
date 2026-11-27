@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import gzip
+import hashlib
 import importlib.util
+import io
 import json
+import os
 import sys
+import zipfile
+from email.message import Message
 from pathlib import Path
 
 import pytest
@@ -29,6 +35,7 @@ fetcher = _load_module(
     "quant_fetch_instrument_snapshots",
     ROOT / "scripts" / "fetch_instrument_snapshots.py",
 )
+REAL_DOWNLOAD = fetcher.download
 
 PROVENANCE = ROOT / "governance" / "instrument-master-snapshots.json"
 DATA = ROOT / "data" / "instrument-master"
@@ -39,22 +46,43 @@ MARUTI_TICKER = "NSE:MARUTI-EQ"
 MARUTI_FY_TOKEN = "101000000010999"
 
 
-def _available(provider: str) -> bool:
-    """Return True when a provenance entry has readable captured bytes."""
-    meta = METAS.get(provider)
-    if meta is None or meta.status != "AVAILABLE":
-        return False
-    return (
-        im.snapshot_path(DATA, meta).is_file()
-        and im.snapshot_path(DATA, meta, decoded=False).is_file()
+def _local_available() -> bool:
+    """Return True when every pinned snapshot has verified local bytes."""
+    return all(
+        fetcher.verify_local(meta, DATA)
+        for meta in fetcher.load_pins(PROVENANCE)
     )
 
 
 @pytest.fixture(scope="session", autouse=True)
+def _block_network() -> None:
+    """Make any accidental network call in an ordinary test fail loudly."""
+
+    def forbidden(*args, **kwargs) -> None:
+        raise AssertionError("tests must never access the network")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(fetcher.urllib.request, "urlopen", forbidden)
+        patch.setattr(fetcher, "download", forbidden)
+        yield
+
+
+@pytest.fixture(scope="session", autouse=True)
 def pinned_snapshots() -> None:
-    """Fetch pinned public bytes once when a clean checkout lacks them."""
-    fetcher.fetch(PROVENANCE, DATA)
-    assert _available("upstox") and _available("fyers")
+    """Use local bytes or extract a bundle; never download on the test path."""
+    if _local_available():
+        return
+    bundle_path = os.environ.get("QUANT_RELEASE_BUNDLE", "")
+    if not bundle_path:
+        pytest.fail(
+            "Pinned instrument snapshots are absent or corrupt. Set "
+            "QUANT_RELEASE_BUNDLE to a release ZIP containing the pinned "
+            "snapshots, or explicitly run "
+            "'python3 scripts/fetch_instrument_snapshots.py fetch'. "
+            "Tests never download snapshots."
+        )
+    fetcher.extract_from_bundle(Path(bundle_path), DATA, PROVENANCE)
+    assert _local_available()
 
 
 @pytest.fixture(scope="session", name="upstox_data")
@@ -105,12 +133,80 @@ def _fyers_maruti():
     )
 
 
+def _maruti_pair(upstox_data, fyers_data):
+    """Return normalized MARUTI provider observations from parsed snapshots."""
+    up = next(
+        record
+        for record in upstox_data.records
+        if record.provider_key == MARUTI_KEY
+    )
+    fy = next(
+        record
+        for record in fyers_data.records
+        if record.provider_key == MARUTI_FY_TOKEN
+    )
+    return up, fy
+
+
 def _identity(provider: str, key: str, upstox, fyers) -> str:
     """Return the canonical ID of one parsed provider record."""
     result = upstox if provider == "upstox" else fyers
     return im.canonical_id(
         next(record for record in result.records if record.provider_key == key)
     )
+
+
+def _copy_pinned_bytes(data_root: Path) -> None:
+    """Copy the verified pinned bytes into a temporary data root."""
+    for meta in fetcher.load_pins(PROVENANCE):
+        for source in fetcher.paths(meta, DATA):
+            destination = data_root / source.relative_to(DATA)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(source.read_bytes())
+
+
+def _mini_bundle(tmp_path: Path) -> tuple[Path, Path]:
+    """Build a small bundle with valid digests but tiny synthetic bytes."""
+    entries = []
+    pairs = []
+    for provider in ("upstox", "fyers"):
+        entry = METAS[provider]._asdict()
+        original = json.dumps({"provider": provider}).encode("utf-8")
+        decoded = json.dumps({"provider": provider, "decoded": True}).encode(
+            "utf-8"
+        )
+        entry.update(
+            original_bytes=len(original),
+            original_sha256=hashlib.sha256(original).hexdigest(),
+            decoded_bytes=len(decoded),
+            decoded_sha256=hashlib.sha256(decoded).hexdigest(),
+        )
+        entries.append(entry)
+        pairs.append((original, decoded))
+    provenance = tmp_path / "mini-provenance.json"
+    provenance.write_text(
+        json.dumps({"snapshots": entries}, sort_keys=True), encoding="utf-8"
+    )
+    metas = fetcher.load_pins(provenance)
+    bundle = tmp_path / "mini-bundle.zip"
+    with zipfile.ZipFile(bundle, "w") as archive:
+        for meta, (original, decoded) in zip(metas, pairs, strict=True):
+            archive.writestr(fetcher._zip_member_name(meta, False), original)
+            archive.writestr(fetcher._zip_member_name(meta, True), decoded)
+    return provenance, bundle
+
+
+def _rewrite_bundle(
+    source: Path, target: Path, replacements: dict[str, bytes]
+) -> None:
+    """Rewrite a ZIP with selected members replaced by supplied bytes."""
+    with zipfile.ZipFile(source) as original:
+        names = original.namelist()
+        payloads = {name: original.read(name) for name in names}
+    payloads.update(replacements)
+    with zipfile.ZipFile(target, "w") as rewritten:
+        for name, payload in payloads.items():
+            rewritten.writestr(name, payload)
 
 
 def test_provenance_is_canonical_and_digests_match_snapshot_files():
@@ -147,7 +243,6 @@ def test_upstox_parser_extracts_actual_record_fields():
     assert maruti.trading_symbol == "MARUTI"
     assert maruti.exchange_token == "10999"
     assert maruti.lot_size == 1
-    # Upstox reports tick_size in paise; FYERS reports the same tick in rupees.
     assert maruti.tick_size == 100.0
     assert maruti.qty_multiplier == 1.0
     assert maruti.security_type == "NORMAL"
@@ -217,7 +312,6 @@ def test_crosswalk_matches_snapshot_identities_and_marks_eligibility(
     assert instrument.crosswalk_status == im.VERIFIED
     assert instrument.conformance_status == im.PASS
     assert instrument.trading_status == im.ACTIVE
-    # FYERS values are preferred; its tick_size unit is rupees, not paise.
     assert instrument.tick_size == 1.0
     assert im.is_eligible(instrument)
     assert {item.provider for item in instrument.provider_identifiers} == {
@@ -232,9 +326,9 @@ def test_crosswalk_matches_snapshot_identities_and_marks_eligibility(
         im.SUSPENDED: 0,
     }
     assert crosswalk_data.conformance_counts == {
-        im.PASS: 9926,
+        im.PASS: 10100,
         im.CONFLICT: 0,
-        im.INCOMPLETE: 174,
+        im.INCOMPLETE: 0,
     }
     assert crosswalk_data.trading_counts == {
         im.ACTIVE: 10100,
@@ -262,7 +356,7 @@ def test_missing_identity_is_quarantined_from_real_records(
 
 
 def test_identity_collision_is_ambiguous_and_ineligible(upstox_data):
-    """A provider claiming one identity twice must be quarantined."""
+    """A provider claiming one identity twice stays identity-ambiguous."""
     record = next(
         item for item in upstox_data.records if item.provider_key == MARUTI_KEY
     )
@@ -272,7 +366,8 @@ def test_identity_collision_is_ambiguous_and_ineligible(upstox_data):
     assert report.status_counts[im.AMBIGUOUS] == 1
     instrument = report.instruments[0]
     assert instrument.crosswalk_status == im.AMBIGUOUS
-    assert instrument.conformance_status == im.INCOMPLETE
+    # Conformance compares contract fields only; identical duplicates agree.
+    assert instrument.conformance_status == im.PASS
     assert not im.is_eligible(instrument)
     assert any(
         entry.reason == im.IDENTITY_COLLISION for entry in report.quarantine
@@ -353,6 +448,107 @@ def test_field_conflict_is_conformance_conflict_with_verified_identity(
     assert not im.is_eligible(instrument)
 
 
+def test_conformance_evaluates_every_field_independently(
+    upstox_data, fyers_data
+):
+    """One conflict and one missing value must both remain visible."""
+    up, fy = _maruti_pair(upstox_data, fyers_data)
+    report = im.contract_conformance(
+        (up, fy._replace(lot_size=2, listing_id=""))
+    )
+    assert report.status == im.CONFLICT
+    assert len(report.fields) == len(im.CONFORMANCE_FIELDS)
+    assert {item.field for item in report.fields} == set(im.CONFORMANCE_FIELDS)
+    statuses = {item.field: item.status for item in report.fields}
+    assert statuses["lot_size"] == im.CONFLICT
+    assert statuses["listing_id"] == im.INCOMPLETE
+    assert statuses["isin"] == im.PASS
+    assert tuple(item.field for item in report.conflicts) == ("lot_size",)
+    assert tuple(item.field for item in report.incomplete) == ("listing_id",)
+    assert len(report.passed) == len(im.CONFORMANCE_FIELDS) - 2
+    listing = next(item for item in report.fields if item.field == "listing_id")
+    assert listing.missing == ("fyers",)
+    assert dict(listing.observed)["fyers"] == ""
+    assert dict(listing.observed)["upstox"] == "10999"
+
+
+def test_conformance_conflict_survives_a_missing_value(upstox_data, fyers_data):
+    """A disagreement must not be hidden by another provider's gap."""
+    up, fy = _maruti_pair(upstox_data, fyers_data)
+    third = up._replace(
+        provider="third", provider_key="third", tick_size=None, lot_size=9
+    )
+    report = im.contract_conformance((up, fy, third))
+    statuses = {item.field: item.status for item in report.fields}
+    assert report.status == im.CONFLICT
+    assert statuses["lot_size"] == im.CONFLICT
+    assert statuses["tick_size"] == im.INCOMPLETE
+    assert statuses["isin"] == im.PASS
+
+
+def test_conformance_all_fields_agree_is_pass(upstox_data, fyers_data):
+    """Agreement on every comparable field yields a full PASS report."""
+    up, fy = _maruti_pair(upstox_data, fyers_data)
+    report = im.contract_conformance((up, fy))
+    assert report.status == im.PASS
+    assert report.conflicts == ()
+    assert report.incomplete == ()
+    assert report.fields == report.passed
+
+
+def test_conformance_stays_separate_from_unmapped_identity(upstox_data):
+    """A single-provider record can be field-conformant yet unmapped."""
+    up = next(
+        record
+        for record in upstox_data.records
+        if record.provider_key == MARUTI_KEY
+    )
+    report = im.contract_conformance((up,))
+    assert report.status == im.PASS
+    instrument = im.crosswalk([im.ParseResult((up,), (), 1)]).instruments[0]
+    assert instrument.identity_status == im.UNMAPPED
+    assert instrument.conformance_status == im.PASS
+    assert instrument.conformance_report.status == im.PASS
+    assert not im.is_eligible(instrument)
+
+
+def test_quarantine_report_counts_real_records(upstox_data, fyers_data):
+    """The 77,233 withheld records are classified, not all called corrupt."""
+    entries = [*upstox_data.quarantine, *fyers_data.quarantine]
+    report = im.quarantine_report(entries)
+    assert report.total == 77233
+    assert len(entries) == 77233
+    assert report.by_reason == {
+        im.MISSING_ISIN: 130,
+        im.UNSUPPORTED_SEGMENT: 77103,
+    }
+    assert report.by_provider == {"fyers": 130, "upstox": 77103}
+    assert report.by_instrument_class == {
+        im.CASH_EQUITY: 130,
+        im.FUTURE: 912,
+        im.INDEX: 139,
+        im.OPTION: 76024,
+        im.UNSUPPORTED: 28,
+    }
+    assert report.by_reason_provider_class == {
+        im.MISSING_ISIN: {"fyers": {im.CASH_EQUITY: 130}},
+        im.UNSUPPORTED_SEGMENT: {
+            "upstox": {
+                im.FUTURE: 912,
+                im.INDEX: 139,
+                im.OPTION: 76024,
+                im.UNSUPPORTED: 28,
+            }
+        },
+    }
+    assert set(report.by_reason) <= {
+        im.UNSUPPORTED_SEGMENT,
+        im.MISSING_ISIN,
+        im.MISSING_PROVIDER_KEY,
+        im.IDENTITY_COLLISION,
+    }
+
+
 def test_digest_mismatch_is_rejected():
     """Parsing must fail closed when bytes disagree with provenance."""
     context = im.snapshot_context(METAS["upstox"])
@@ -391,11 +587,16 @@ def test_daily_diff_compares_snapshots_by_canonical_id(
         item.canonical_instrument_id: item for item in before.instruments
     }
     current = {
-        item.canonical_instrument_id: item
-        for item in crosswalk_data.instruments
+        item.canonical_instrument_id for item in crosswalk_data.instruments
     }
-    report = im.diff_snapshots(previous, current)
-    assert report.added == tuple(sorted(set(current) - set(previous)))
+    report = im.diff_snapshots(
+        previous,
+        {
+            item.canonical_instrument_id: item
+            for item in crosswalk_data.instruments
+        },
+    )
+    assert report.added == tuple(sorted(current - set(previous)))
     assert len(report.added) == 174
     assert report.removed == ()
     fields = {change.field for change in report.changed}
@@ -412,3 +613,194 @@ def test_effective_dating_is_partial_and_snapshot_derived(crosswalk_data):
     for instrument in crosswalk_data.instruments:
         assert instrument.effective_from == METAS["upstox"].market_date
         assert instrument.effective_to is None
+
+
+def test_verify_cli_checks_local_bytes_without_network(tmp_path):
+    """The verify command exits 0 for valid bytes and 1 for corrupt bytes."""
+    _copy_pinned_bytes(tmp_path)
+    assert fetcher.main(["verify", "--data-root", str(tmp_path)]) == 0
+    meta = METAS["upstox"]
+    decoded = im.snapshot_path(tmp_path, meta)
+    payload = decoded.read_bytes()
+    decoded.write_bytes(payload[:-1] + bytes([payload[-1] ^ 0x01]))
+    assert fetcher.main(["verify", "--data-root", str(tmp_path)]) == 1
+
+
+def test_fetch_command_is_explicit_in_argument_parser():
+    """Retrieval and extraction require their own explicit subcommands."""
+    fetch_args = fetcher.parse_args(["fetch", "--output", "/tmp/out"])
+    assert fetch_args.command == "fetch"
+    assert fetch_args.output == Path("/tmp/out")
+    extract_args = fetcher.parse_args(
+        ["extract", "--from-bundle", "/tmp/bundle.zip"]
+    )
+    assert extract_args.command == "extract"
+    assert extract_args.from_bundle == Path("/tmp/bundle.zip")
+    with pytest.raises(SystemExit):
+        fetcher.parse_args([])
+
+
+def test_non_https_and_unlisted_hosts_are_rejected():
+    """Neither a plain HTTP URL nor an unknown host can be retrieved."""
+    url = METAS["upstox"].url
+    with pytest.raises(ValueError, match="non-HTTPS"):
+        fetcher.validate_url(url.replace("https://", "http://"))
+    with pytest.raises(ValueError, match="allowlisted"):
+        fetcher.validate_url("https://evil.example/NSE.json.gz")
+    handler = fetcher.AllowlistedRedirect()
+    with pytest.raises(ValueError, match="disallowed redirect"):
+        handler.redirect_request(
+            None, None, 302, "Found", {}, url.replace("https://", "http://")
+        )
+    with pytest.raises(ValueError, match="disallowed redirect"):
+        handler.redirect_request(
+            None, None, 302, "Found", {}, "https://evil.example/NSE.json.gz"
+        )
+    assert handler.allowed(url)
+
+
+def test_bad_filename_market_date_and_path_are_rejected(tmp_path):
+    """Provenance paths are validated before any filesystem use."""
+    meta = METAS["upstox"]
+    with pytest.raises(ValueError, match="unsafe snapshot filename"):
+        fetcher.safe_filename("../NSE.json.gz")
+    with pytest.raises(ValueError, match="unsafe snapshot filename"):
+        fetcher.validate_meta(
+            meta._replace(original_filename="../../NSE.json.gz")
+        )
+    with pytest.raises(ValueError, match="invalid market_date"):
+        fetcher.safe_market_date("2026-99-99")
+    with pytest.raises(ValueError, match="escapes output"):
+        fetcher.ensure_contained(tmp_path, tmp_path.parent / "outside.json")
+
+
+def test_oversize_and_unexpected_content_are_rejected():
+    """Streaming limits and declared content types fail closed."""
+    with pytest.raises(ValueError, match="exceeds 10 bytes"):
+        fetcher.read_limited(io.BytesIO(b"x" * 11), "test", 10)
+    payload = gzip.compress(b"x" * 100)
+    with pytest.raises(ValueError, match="gzip declares"):
+        fetcher.decode_original(payload, "NSE.json.gz", 50)
+    with pytest.raises(ValueError, match="decoded data exceeds"):
+        fetcher._append_decoded([], b"x" * 51, 0, 50)
+    with pytest.raises(ValueError, match="SHA-256"):
+        fetcher.verify(b"x" * 8, 8, "0" * 64, "test")
+
+    class Response:
+        """Minimal response stub carrying only HTTP headers."""
+
+        def __init__(self, content_type: str, length: str) -> None:
+            self.headers = Message()
+            self.headers["Content-Length"] = length
+            self.headers["Content-Type"] = content_type
+
+    url = METAS["upstox"].url
+    with pytest.raises(ValueError, match="unexpected content type"):
+        fetcher._check_content_type(Response("text/plain", "1"), url, ".json")
+    with pytest.raises(ValueError, match="Content-Length"):
+        fetcher._check_content_length(
+            Response("application/json", "99"), url, 10
+        )
+
+
+def test_download_rejects_bad_status_and_streams_with_limits(monkeypatch):
+    """Retrieval fails on a bad status and succeeds only with valid headers."""
+
+    class Response:
+        """In-memory response with a status, headers and chunked body."""
+
+        def __init__(self, status: int) -> None:
+            self.status = status
+            self.headers = Message()
+            body = b'{"ok":true}'
+            self.headers["Content-Type"] = "application/json"
+            self.headers["Content-Length"] = str(len(body))
+            self._body = io.BytesIO(body)
+
+        def read(self, count: int) -> bytes:
+            """Return the next body chunk."""
+            return self._body.read(count)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args) -> bool:
+            return False
+
+    class Opener:
+        """Stub opener returning a chosen status for a pinned URL."""
+
+        def open(self, url: str, timeout: int) -> Response:
+            return Response(404 if "bad" in url else 200)
+
+    monkeypatch.setattr(
+        fetcher.urllib.request, "build_opener", lambda *args: Opener()
+    )
+    monkeypatch.setattr(fetcher, "download", REAL_DOWNLOAD)
+    url = METAS["fyers"].url
+    with pytest.raises(ValueError, match="unexpected HTTP status 404"):
+        fetcher.download(f"{url}?bad", 100, ".json")
+    assert fetcher.download(url, 100, ".json") == b'{"ok":true}'
+
+
+def test_bundle_extraction_is_offline_and_digest_checked(tmp_path):
+    """The four pinned snapshots can be restored from a ZIP without network."""
+    provenance, bundle = _mini_bundle(tmp_path)
+    output = tmp_path / "data"
+    extracted = fetcher.extract_from_bundle(bundle, output, provenance)
+    assert len(extracted) == 2
+    assert all(
+        fetcher.verify_local(meta, output)
+        for meta in fetcher.load_pins(provenance)
+    )
+    metas = fetcher.load_pins(provenance)
+    first = fetcher._zip_member_name(metas[0], False)
+    tampered = tmp_path / "tampered.zip"
+    original = b'{"provider": "upstox"}'
+    _rewrite_bundle(bundle, tampered, {first: original[:-2] + b" }"})
+    with pytest.raises(ValueError, match="SHA-256"):
+        fetcher.extract_from_bundle(tampered, tmp_path / "other", provenance)
+
+
+def test_bundle_rejects_duplicate_providers_and_unsafe_members(
+    tmp_path: Path,
+) -> None:
+    """Duplicate provenance and traversal member names fail closed."""
+    provenance, bundle = _mini_bundle(tmp_path)
+    document = json.loads(provenance.read_text(encoding="utf-8"))
+    document["snapshots"].append(document["snapshots"][0])
+    duplicated = tmp_path / "duplicated.json"
+    duplicated.write_text(
+        json.dumps(document, sort_keys=True), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="duplicate provider"):
+        fetcher.load_pins(duplicated)
+    with zipfile.ZipFile(bundle) as archive:
+        with pytest.raises(ValueError, match="unsafe bundle member"):
+            fetcher._read_zip_member(archive, "quant/../outside.json", 100)
+
+
+def test_real_bundle_extraction_restores_all_four_snapshots(tmp_path):
+    """A clean checkout can recover every pinned byte from the release ZIP."""
+    metas = fetcher.load_pins(PROVENANCE)
+    bundle = tmp_path / "real-bundle.zip"
+    with zipfile.ZipFile(bundle, "w") as archive:
+        for meta in metas:
+            for decoded in (False, True):
+                source = fetcher.paths(meta, DATA)[int(decoded)]
+                archive.writestr(
+                    fetcher._zip_member_name(meta, decoded),
+                    source.read_bytes(),
+                )
+    output = tmp_path / "clean" / "data"
+    result = fetcher.main(
+        [
+            "extract",
+            "--from-bundle",
+            str(bundle),
+            "--output",
+            str(output),
+        ]
+    )
+    assert result == 0
+    assert all(fetcher.verify_local(meta, output) for meta in metas)

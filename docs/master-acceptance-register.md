@@ -14,7 +14,8 @@ Statuses: `NOT IMPLEMENTED`, `IMPLEMENTED`, `UNIT-TESTED`,
 Machine-readable release, governance and trading state at the current head.
 The exact current main SHA, CI runs and bundle digest are in `MANIFEST.md`
 of the current final release bundle (external artifact); values marked as
-release history at PR #58 and PR #61 are not immutable current identifiers.
+release history at PR #58, PR #61 and PR #62 are not immutable current
+identifiers.
 
 ```yaml
 release:
@@ -47,7 +48,24 @@ release:
   # At PR #61; hosted CI passed, native q skipped/GATED_NOT_RUN:
   r8_3_head_ci_run: 46007348694
   r8_3_native_q: GATED_NOT_RUN
-  open_prs: 0
+  # Release history at PR #62 (R8.4 COMPLETE), HISTORICAL; current values
+  # are in the bundle MANIFEST.md (external artifact):
+  r8_4_pr: 62
+  r8_4_merge_commit: 66f037cc1d508244a821fef22dd35023d996e2ab
+  r8_4_bundle_sha256:
+    4558f684ca7515054e7301be3c063e7a8e5651705e735d8838cd2792d9d89980
+  r8_4_bundle_manifest_entries: 115
+  r8_4_bundled_w1_snapshots: 4
+  r8_4_status: COMPLETE
+  # At PR #62; hosted CI passed, native q skipped/GATED_NOT_RUN:
+  r8_4_head_ci_run: 46015103880
+  r8_4_native_q: GATED_NOT_RUN
+  # R8.4.1 / PR #63 is in progress; it has no release identifiers yet:
+  r8_4_1_pr: 63
+  r8_4_1_status: IN PROGRESS
+  # At PR #62 merge (HISTORICAL); live inventory is external:
+  open_prs_at_pr_62: 0
+  current_pr_inventory_source: GitHub pull request index (external)
 governance: >-
   model SINGLE_DEVELOPER, required_github_approvals 0,
   self_review_checklist REQUIRED, exact_head_ci REQUIRED,
@@ -66,15 +84,18 @@ release bundle (external artifact), not as immutable identifiers here.
 Release history at PR #58 records `main` as `1a91da2…`
 (full SHA `1a91da2fb08995c9f6ee20e373d004ad28e58a72`) in the then-final
 bundle `MANIFEST.md`; `99bc70c…` was the state at PR #56 and is
-HISTORICAL. Release history at PR #61 records the R8.3 + W1 A/B/C merge
-at `201f5ba602f68fc1370579cefa50b8b599af05d5` (HISTORICAL), with a
-then-final bundle of 108 entries and hosted CI run `46007348694` success;
-the native-q job was skipped/GATED_NOT_RUN. The current digest and CI runs
-are in `MANIFEST.md` of the current bundle (external). R8.4 work —
-native-q conclusion mapping, remote provenance and W1 snapshot
-reproducibility — is IN PROGRESS and is not an exit claim. PRs #47–#61
-are all MERGED; zero PRs are open. Merges use the
-single-developer policy: zero required GitHub approvals, a self-review
+HISTORICAL. Release history at PR #61 (HISTORICAL) records the R8.3 +
+W1 A/B/C merge at `201f5ba602f68fc1370579cefa50b8b599af05d5`, with a
+then-final bundle of 108 entries and hosted CI run `46007348694`
+success; native q was skipped/GATED_NOT_RUN. Release history at PR #62
+(HISTORICAL) records the R8.4 merge at
+`66f037cc1d508244a821fef22dd35023d996e2ab`, a then-final bundle with
+115 entries and four pinned W1 snapshots, hosted CI run `46015103880`
+success and native q skipped/GATED_NOT_RUN. R8.4 is COMPLETE at PR #62;
+R8.4.1 (PR #63) is IN PROGRESS with no exit claim. The exact current
+digest and CI runs are in `MANIFEST.md` of the current bundle (external).
+PRs #47–#62 are all MERGED; the live PR inventory is external. Merges use
+the single-developer policy: zero required GitHub approvals, a self-review
 checklist and exact-head CI with three required checks. Independent
 external technical acceptance is PENDING / NOT RECORDED. The older
 `0b353f84…` SHA is the baseline snapshot retained as historical evidence,
@@ -117,7 +138,7 @@ accepted.
 
 | Workstream | Implementation | Verification | Independent acceptance | Blocked by |
 |---|---|---|---|---|
-| W1 Instrument master | W1-A/B/C implemented from pinned public Upstox and FYERS masters; effective-dated registry (W1-D) still PENDING | 11 offline tests on captured bytes; 9,926 VERIFIED crosswalk matches, 174 UNMAPPED | Pending: W1-D live consistency and effective dating | W1-D live consistency |
+| W1 Instrument master | W1-A/B/C implemented from pinned public Upstox and FYERS masters; effective-dated registry (W1-D) still PENDING | 14 offline tests on captured bytes; 9,926 VERIFIED crosswalk matches, 174 UNMAPPED; four bundled pinned snapshots | Pending: W1-D live consistency and effective dating; no full W1 exit | W1-D live consistency |
 | W2 Upstox V3 | Partial (V2 REST; V3 fixture-schema normalisation only) | Unit-tested corrections | Pending | W1 |
 | W3 FYERS Data Socket | Not implemented | Not tested | Pending | W1, valid token |
 | W4 Provider journal | Not proven | Synthetic coverage only | Pending | W2, W3 |
@@ -133,7 +154,7 @@ contains requirement IDs from the same register.
 | ID | Workstream | Current status | Dependencies | Exit evidence | Release blocking |
 |---|---|---|---|---|---|
 | W0 | Evidence-integrity registers | PARTIAL: four governance CSV registers tracked; no prior W0 definition in repository (UNVERIFIED PROVENANCE) | none | Independent reviewer disposition of the four registers | No for routine merges |
-| W1 | Instrument master and multi-venue identity | PARTIAL: W1-A/B/C implemented from pinned public Upstox/FYERS masters (9,926 VERIFIED / 174 UNMAPPED); W1-D live consistency and effective dating PENDING | none | Effective-dated registry, provider crosswalk report, per-class conformance matrix and live consistency tests | Yes for multi-asset |
+| W1 | Instrument master and multi-venue identity | PARTIAL: W1-A/B/C implemented from pinned public Upstox/FYERS masters (9,926 VERIFIED / 174 UNMAPPED); 14 offline tests and four bundled snapshots; W1-D live consistency and effective dating PENDING | none | Effective-dated registry, provider crosswalk report, per-class conformance matrix and live consistency tests | Yes for multi-asset |
 | W2 | Upstox V3 data adapter | PARTIAL: read-only V2 REST; V3 seven-field candle schema normalisation of fixtures only | W1 | ISO timestamp parsing, V3 seven-field candles, ascending canonical history, raw payload archive, 10-session qualification | Yes for provider certification |
 | W3 | FYERS Data Socket adapter | NOT IMPLEMENTED | W1, fresh token | REST quotes, history, Data Socket only, reconnect and replay evidence | Yes for dual-provider |
 | W4 | Provider-to-journal-to-q path | NOT PROVEN with real events | W2, W3 | Raw and normalised events, durable journal, q replay parity | Yes |
@@ -161,15 +182,15 @@ is mandatory only for defined high-risk release gates, not every merge.
 
 This is the single authoritative dashboard. Statuses and blocked-by edges
 are derived from the Workstreams table above and from
-`governance/requirements-traceability.csv`; R8.1/R8.3/R8.4 are corrective
-work entries, not extra gates. No volatile identifier is pinned here: the
-current main SHA, CI runs and bundle digest are in `MANIFEST.md` of the
-current final release bundle (external artifact).
+`governance/requirements-traceability.csv`; R8.1/R8.3/R8.4/R8.4.1 are
+corrective work entries, not extra gates. No volatile identifier is pinned
+here: current main SHA, CI runs and bundle digest are in the `MANIFEST.md`
+of the current final release bundle (external artifact).
 
 | Gate | Current status | Blocked by |
 |---|---|---|
 | W0 | PARTIAL | independent reviewer (acceptance) |
-| W1 | PARTIAL: W1-A/B/C implemented from pinned public masters; W1-D and effective dating PENDING | none |
+| W1 | PARTIAL: W1-A/B/C pinned public masters; 14 offline tests and four bundled snapshots; W1-D and effective dating PENDING | none |
 | W2 | PARTIAL: V2 REST only; V3 fixture-schema normalisation | W1 |
 | W3 | NOT IMPLEMENTED (FYERS profile probe only) | W1, fresh token |
 | W4 | NOT PROVEN with real events | W2, W3 |
@@ -190,6 +211,15 @@ current final release bundle (external artifact).
 
 No row above claims full W1 exit, independently accepted status, live
 execution authorisation or `READY FOR TRADE`.
+
+### Corrective work status
+
+| Record | Status | Scope and evidence |
+|---|---|---|
+| R8.1 | IMPLEMENTED / MERGED (HISTORICAL at PR #57/#58) | Exact-integer OI and volume parity, integral volume contract, wall-clock journal replay test |
+| R8.3 | COMPLETE at PR #61 (HISTORICAL release record) | Legacy volume validity, leading-zero grammar, W1 A/B/C, bundle totals, provenance guard and portable self-test |
+| R8.4 | COMPLETE at PR #62 (HISTORICAL release record) | Native-q conclusion mapping, remote provenance, governance sync and W1 snapshot reproducibility; 14 W1 tests and four bundled snapshots; native q still GATED_NOT_RUN |
+| R8.4.1 | IN PROGRESS (PR #63) | Bundle validator PASS support, complete report schema, native-q self-provisioning CI, offline W1 fixture and hardened retrieval; no exit claim |
 
 ### R8.1 corrective work (local implementation)
 
@@ -247,11 +277,39 @@ independent security acceptance.
 
 W1 A/B/C are offline evidence from two pinned public masters recorded in
 `governance/instrument-master-snapshots.json`: the Upstox NSE master and
-the FYERS NSE_CM symbol master. W1 pytest ran 11 tests on the captured
-bytes; the crosswalk reported 9,926 VERIFIED and 174 UNMAPPED identities.
-W1-D live consistency and effective dating remain PENDING; full W1 exit
-is NOT claimed. R8.4 work — native-q conclusion mapping, remote
-provenance and W1 snapshot reproducibility — is IN PROGRESS.
+the FYERS NSE_CM symbol master. At PR #61 (HISTORICAL), W1 pytest ran 11
+tests on the captured bytes; the crosswalk reported 9,926 VERIFIED and
+174 UNMAPPED identities. W1-D live consistency and effective dating remain
+PENDING; full W1 exit is NOT claimed. At PR #61 (HISTORICAL), R8.4 was
+still IN PROGRESS; R8.4 is COMPLETE at PR #62 (release record below).
+
+### R8.4 corrective work (PR #62 — COMPLETE, HISTORICAL release record)
+
+R8.4 was MERGED in PR #62 at
+`66f037cc1d508244a821fef22dd35023d996e2ab`. That SHA, hosted CI run
+`46015103880` (success), the 115-entry then-final bundle and its digest
+`4558f684ca7515054e7301be3c063e7a8e5651705e735d8838cd2792d9d89980`
+are HISTORICAL release-history values at PR #62, not current identifiers;
+exact current values are in `MANIFEST.md` of the current bundle (external
+artifact). The hosted CI had three passing jobs and one skipped native-q
+job; the skipped conclusion was mapped as GATED_NOT_RUN, never as passed.
+
+Local verification at PR #62 (HISTORICAL) recorded 14114 C++ checks with
+zero failures, 14114 sanitizer checks with zero failures, 51 portable
+pytest passes, 14 W1 pytest passes, 16 release-bundle passes, 106
+verify-report passes, style 8/8 PASS and zero binding audit findings. The
+release scope was PORTABLE_RESEARCH and native q was GATED_NOT_RUN.
+
+R8.4 closed four code-level items: native-q conclusion mapping, remote
+provenance of the pinned public masters, governance synchronisation and
+W1 snapshot reproducibility. The bundle carries 4 digest-checked pinned W1
+snapshots; the crosswalk still reports 9,926 VERIFIED / 174 UNMAPPED.
+W1-D live consistency and effective dating remain PENDING, full W1 exit is
+NOT claimed and independent acceptance is NOT RECORDED. Native-q runner
+provisioning remains OPEN under TD-015 in the technical debt register.
+R8.4.1 (PR #63) is IN PROGRESS: bundle validator PASS support, complete
+report schema, native-q self-provisioning CI, offline W1 fixture and
+hardened retrieval. It has no exit claim at this release.
 
 ## Data-only testing invariants
 

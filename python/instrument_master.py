@@ -246,6 +246,7 @@ class QuarantineEntry(NamedTuple):
     reason: str
     observed_at_utc: str
     source_digest: str
+    instrument_class: str = UNKNOWN
 
 
 class CanonicalInstrument(NamedTuple):
@@ -276,6 +277,7 @@ class CanonicalInstrument(NamedTuple):
     eligibility_status: str
     source_digest: str
     source_version: str
+    conformance_report: ConformanceReport | None = None
 
     @property
     def identity_status(self) -> str:
@@ -306,6 +308,47 @@ class DiffReport(NamedTuple):
     added: tuple[str, ...]
     removed: tuple[str, ...]
     changed: tuple[FieldChange, ...]
+
+
+class FieldConformance(NamedTuple):
+    """One comparable field evaluated independently across providers."""
+
+    field: str
+    status: str
+    observed: tuple[tuple[str, object], ...]
+    missing: tuple[str, ...]
+
+
+class ConformanceReport(NamedTuple):
+    """Per-field contract conformance, separate from identity corroboration."""
+
+    status: str
+    fields: tuple[FieldConformance, ...]
+
+    @property
+    def conflicts(self) -> tuple[FieldConformance, ...]:
+        """Return fields on which providers disagree."""
+        return tuple(item for item in self.fields if item.status == CONFLICT)
+
+    @property
+    def incomplete(self) -> tuple[FieldConformance, ...]:
+        """Return fields with at least one missing provider value."""
+        return tuple(item for item in self.fields if item.status == INCOMPLETE)
+
+    @property
+    def passed(self) -> tuple[FieldConformance, ...]:
+        """Return fields on which every provider agrees."""
+        return tuple(item for item in self.fields if item.status == PASS)
+
+
+class QuarantineReport(NamedTuple):
+    """Counts of withheld records, never a claim that bytes are corrupt."""
+
+    total: int
+    by_reason: dict[str, int]
+    by_provider: dict[str, int]
+    by_instrument_class: dict[str, int]
+    by_reason_provider_class: dict[str, dict[str, dict[str, int]]]
 
 
 class CrosswalkReport(NamedTuple):
@@ -512,11 +555,20 @@ def _option_type(value: str) -> str | None:
 
 
 def _quarantine(
-    provider: str, key: str, reason: str, context: SnapshotContext
+    provider: str,
+    key: str,
+    reason: str,
+    context: SnapshotContext,
+    instrument_class: str = UNKNOWN,
 ) -> QuarantineEntry:
     """Build a quarantine entry for a withheld provider record."""
     return QuarantineEntry(
-        provider, key, reason, context.observed_at_utc, context.source_digest
+        provider,
+        key,
+        reason,
+        context.observed_at_utc,
+        context.source_digest,
+        instrument_class,
     )
 
 
@@ -610,7 +662,13 @@ def _admit(
         records.append(record)
         return
     quarantine.append(
-        _quarantine(record.provider, record.provider_key, reason, context)
+        _quarantine(
+            record.provider,
+            record.provider_key,
+            reason,
+            context,
+            record.instrument_class,
+        )
     )
 
 
@@ -624,7 +682,13 @@ def parse_upstox(payload: bytes, context: SnapshotContext) -> ParseResult:
         record = _upstox_provider(item, context)
         if not record.provider_key:
             quarantine.append(
-                _quarantine(PROVIDER_UPSTOX, "", MISSING_PROVIDER_KEY, context)
+                _quarantine(
+                    PROVIDER_UPSTOX,
+                    "",
+                    MISSING_PROVIDER_KEY,
+                    context,
+                    record.instrument_class,
+                )
             )
             continue
         _admit(record, context, records, quarantine)
@@ -641,7 +705,13 @@ def parse_fyers(payload: bytes, context: SnapshotContext) -> ParseResult:
         record = _fyers_provider(item, context)
         if not record.provider_key:
             quarantine.append(
-                _quarantine(PROVIDER_FYERS, "", MISSING_PROVIDER_KEY, context)
+                _quarantine(
+                    PROVIDER_FYERS,
+                    "",
+                    MISSING_PROVIDER_KEY,
+                    context,
+                    record.instrument_class,
+                )
             )
             continue
         _admit(record, context, records, quarantine)
@@ -760,20 +830,45 @@ def _values_agree(left: object, right: object) -> bool:
     return left == right
 
 
-def contract_conformance(
-    group: Sequence[ProviderInstrument], identity_status: str
-) -> str:
-    """Compare contract terms; an ISIN match alone is not conformance."""
-    if identity_status != VERIFIED:
-        return INCOMPLETE
+def _field_conformance(
+    field: str, group: Sequence[ProviderInstrument]
+) -> FieldConformance:
+    """Evaluate a field, preserving missing and differing values."""
     ordered = sorted(group, key=lambda item: item.provider)
-    for field in CONFORMANCE_FIELDS:
-        values = [_conformance_value(item, field) for item in ordered]
-        if any(value is None or value == "" for value in values):
-            return INCOMPLETE
-        if not all(_values_agree(values[0], value) for value in values[1:]):
-            return CONFLICT
-    return PASS
+    observed = tuple(
+        (item.provider, _conformance_value(item, field)) for item in ordered
+    )
+    missing = tuple(
+        provider for provider, value in observed if value is None or value == ""
+    )
+    present = [
+        value for _, value in observed if value is not None and value != ""
+    ]
+    status = PASS
+    if present and any(
+        not _values_agree(present[0], value) for value in present[1:]
+    ):
+        status = CONFLICT
+    if status == PASS and missing:
+        status = INCOMPLETE
+    return FieldConformance(field, status, observed, missing)
+
+
+def contract_conformance(
+    group: Sequence[ProviderInstrument],
+) -> ConformanceReport:
+    """Evaluate every comparable field independently of identity status."""
+    fields = tuple(
+        _field_conformance(field, group) for field in CONFORMANCE_FIELDS
+    )
+    statuses = {item.status for item in fields}
+    if CONFLICT in statuses:
+        status = CONFLICT
+    elif INCOMPLETE in statuses:
+        status = INCOMPLETE
+    else:
+        status = PASS
+    return ConformanceReport(status, fields)
 
 
 def eligibility_status(
@@ -794,7 +889,7 @@ def _build_canonical(
     group: Sequence[ProviderInstrument],
     identity_status: str,
     trading_status: str,
-    conformance: str,
+    conformance: ConformanceReport,
 ) -> CanonicalInstrument:
     """Build one canonical instrument from its provider observations."""
     identifiers = tuple(
@@ -814,7 +909,7 @@ def _build_canonical(
     series = _first_value(group, "trading_series")
     tick_size = _first_value(group, "tick_size")
     eligibility = eligibility_status(
-        identity_status, conformance, trading_status
+        identity_status, conformance.status, trading_status
     )
     return CanonicalInstrument(
         canonical_instrument_id=identity,
@@ -844,10 +939,11 @@ def _build_canonical(
         last_observed_at=max(item.observed_at_utc for item in group),
         trading_status=trading_status,
         crosswalk_status=identity_status,
-        conformance_status=conformance,
+        conformance_status=conformance.status,
         eligibility_status=eligibility,
         source_digest=_merged_digest(group),
         source_version=SCHEMA_VERSION,
+        conformance_report=conformance,
     )
 
 
@@ -870,6 +966,7 @@ def _collision_entries(
     """Quarantine all records of an identity claimed twice by one provider."""
     seen: set[str] = set()
     entries = []
+    instrument_class = group[0].instrument_class if group else UNKNOWN
     for item in group:
         if item.provider in seen:
             entries.append(
@@ -879,6 +976,7 @@ def _collision_entries(
                     IDENTITY_COLLISION,
                     min(row.observed_at_utc for row in group),
                     _merged_digest(group),
+                    instrument_class,
                 )
             )
         seen.add(item.provider)
@@ -908,14 +1006,14 @@ def crosswalk(
         quarantine.extend(collisions)
         identity_status = AMBIGUOUS if collisions else _identity_status(group)
         trading_status = _combined_status(group, identity, suspended)
-        conformance = contract_conformance(group, identity_status)
+        conformance = contract_conformance(group)
         instruments.append(
             _build_canonical(
                 identity, group, identity_status, trading_status, conformance
             )
         )
         counts[identity_status] += 1
-        conformance_counts[conformance] += 1
+        conformance_counts[conformance.status] += 1
         trading_counts[trading_status] += 1
         if trading_status in counts:
             counts[trading_status] += 1
@@ -925,6 +1023,45 @@ def crosswalk(
         counts,
         conformance_counts,
         trading_counts,
+    )
+
+
+def quarantine_report(
+    entries: Sequence[QuarantineEntry],
+) -> QuarantineReport:
+    """Count withheld records by reason, provider and instrument class.
+
+    Quarantine records are withheld for identity or contract reasons such as
+    unsupported segments, missing ISINs or collisions. They are not a claim
+    that snapshot bytes are corrupt or that a provider is dishonest.
+    """
+    by_reason: dict[str, int] = {}
+    by_provider: dict[str, int] = {}
+    by_class: dict[str, int] = {}
+    nested: dict[str, dict[str, dict[str, int]]] = {}
+    for entry in entries:
+        by_reason[entry.reason] = by_reason.get(entry.reason, 0) + 1
+        by_provider[entry.provider] = by_provider.get(entry.provider, 0) + 1
+        by_class[entry.instrument_class] = (
+            by_class.get(entry.instrument_class, 0) + 1
+        )
+        providers = nested.setdefault(entry.reason, {})
+        classes = providers.setdefault(entry.provider, {})
+        classes[entry.instrument_class] = (
+            classes.get(entry.instrument_class, 0) + 1
+        )
+    return QuarantineReport(
+        len(entries),
+        dict(sorted(by_reason.items())),
+        dict(sorted(by_provider.items())),
+        dict(sorted(by_class.items())),
+        {
+            reason: {
+                provider: dict(sorted(class_counts.items()))
+                for provider, class_counts in sorted(providers.items())
+            }
+            for reason, providers in sorted(nested.items())
+        },
     )
 
 
