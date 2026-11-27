@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Offline tests for the canonical release-state validator.
 
-The fixture uses a deliberately fictional release identity and counts. A
+The fixture uses a fictional release identity and counts. A
 validator that pins any real-world version, PR, commit or test total fails
 these tests, so governance can advance without rewriting the checker.
 """
