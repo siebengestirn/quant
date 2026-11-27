@@ -1149,10 +1149,10 @@ def test_runner_status_fields_are_explicit_for_skipped_job(
     assert "runner executed" not in str(counts).lower()
 
 
-def write_evidence_files(root: Path, *, mutate: str | None = None) -> bytes:
-    """Write a valid disposition report and review into a temp checkout."""
+def evidence_findings() -> list:
+    """Return two synthetic findings used by the evidence gate tests."""
     tool = AUDIT_DISPOSITION
-    findings = [
+    return [
         tool.Finding(
             source="docs/a.md",
             line=1,
@@ -1168,11 +1168,22 @@ def write_evidence_files(root: Path, *, mutate: str | None = None) -> bytes:
             context="Some wording requires review.",
         ),
     ]
-    raw = json.dumps([item.as_dict() for item in findings], indent=2).encode()
+
+
+def write_evidence_files(
+    root: Path,
+    *,
+    mutate: str | None = None,
+    findings: list | None = None,
+) -> bytes:
+    """Write a valid disposition report and review into a temp checkout."""
+    tool = AUDIT_DISPOSITION
+    selected = evidence_findings() if findings is None else findings
+    raw = json.dumps([item.as_dict() for item in selected], indent=2).encode()
     audit = root / VERIFY_REPORT.AUDIT_RELATIVE
     audit.parent.mkdir(parents=True, exist_ok=True)
     audit.write_bytes(raw)
-    report = tool.build_report(raw, findings, source=str(audit))
+    report = tool.build_report(raw, selected, source=str(audit))
     review = tool.build_review_report(raw, report, source=str(audit))
     if mutate == "stale-digest":
         report["source_digest"] = "0" * 64
@@ -1194,6 +1205,8 @@ def write_evidence_files(root: Path, *, mutate: str | None = None) -> bytes:
         report["dispositions"].append(duplicate)
     tool.write_report(report, root / VERIFY_REPORT.DISPOSITIONS_RELATIVE)
     tool.write_report(review, root / VERIFY_REPORT.REVIEW_RELATIVE)
+    if mutate == "malformed-audit":
+        audit.write_bytes(b"{ not JSON\n")
     return raw
 
 
@@ -1260,11 +1273,71 @@ def test_evidence_gate_passes_with_exact_evidence(
 @pytest.mark.parametrize(
     "mutate", ["stale-digest", "missing-finding", "extra-finding"]
 )
-def test_evidence_gate_fails_on_stale_or_incomplete_evidence(
+def test_evidence_gate_corrects_stale_or_incomplete_evidence(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mutate: str
 ) -> None:
-    """A stale digest, missing finding or extra finding never passes."""
-    write_evidence_files(tmp_path, mutate=mutate)
+    """Dispositions are rebuilt from the audit before they are verified."""
+    raw = write_evidence_files(tmp_path, mutate=mutate)
+    monkeypatch.setattr(VERIFY_REPORT, "ROOT", tmp_path)
+    gate = VERIFY_REPORT.run_audit_disposition_evidence()
+    assert gate["result"] == PASS, gate["reason"]
+    counts = gate["counts"]
+    assert counts["applicable"] is True
+    assert counts["source_digest"] == hashlib.sha256(raw).hexdigest()
+    assert counts["finding_count"] == 2
+    assert counts["disposition_count"] == 2
+    report = json.loads(
+        (tmp_path / VERIFY_REPORT.DISPOSITIONS_RELATIVE).read_text()
+    )
+    review = json.loads((tmp_path / VERIFY_REPORT.REVIEW_RELATIVE).read_text())
+    assert report["source_digest"] == counts["source_digest"]
+    assert review["source_digest"] == counts["source_digest"]
+
+
+def test_evidence_gate_corrects_stale_disposition_after_audit_change(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A disposition left by an older audit is replaced before verification."""
+    old_findings = evidence_findings()
+    write_evidence_files(tmp_path, findings=old_findings)
+    stale = json.loads(
+        (tmp_path / VERIFY_REPORT.DISPOSITIONS_RELATIVE).read_text()
+    )
+    assert stale["advisory_findings"] == len(old_findings)
+
+    new_findings = old_findings + [
+        AUDIT_DISPOSITION.Finding(
+            source="docs/c.md",
+            line=3,
+            category="informal_verb",
+            phrase="stuff",
+            context="Some wording requires review.",
+        )
+    ]
+    raw = json.dumps(
+        [item.as_dict() for item in new_findings], indent=2
+    ).encode()
+    (tmp_path / VERIFY_REPORT.AUDIT_RELATIVE).write_bytes(raw)
+    monkeypatch.setattr(VERIFY_REPORT, "ROOT", tmp_path)
+    gate = VERIFY_REPORT.run_audit_disposition_evidence()
+    assert gate["result"] == PASS, gate["reason"]
+    counts = gate["counts"]
+    assert counts["source_digest"] == hashlib.sha256(raw).hexdigest()
+    assert counts["finding_count"] == len(new_findings)
+    assert counts["disposition_count"] == len(new_findings)
+    refreshed = json.loads(
+        (tmp_path / VERIFY_REPORT.DISPOSITIONS_RELATIVE).read_text()
+    )
+    assert refreshed["source_digest"] == counts["source_digest"]
+    assert refreshed["advisory_findings"] == len(new_findings)
+    assert len(refreshed["dispositions"]) == len(new_findings)
+
+
+def test_evidence_gate_fails_when_audit_cannot_be_regenerated(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unreadable audit cannot be silently replaced with stale evidence."""
+    write_evidence_files(tmp_path, mutate="malformed-audit")
     monkeypatch.setattr(VERIFY_REPORT, "ROOT", tmp_path)
     gate = VERIFY_REPORT.run_audit_disposition_evidence()
     assert gate["result"] == FAIL

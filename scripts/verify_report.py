@@ -737,20 +737,20 @@ def run_audit_disposition_evidence() -> dict:
         "--review",
         str(paths[2]),
     ]
-    step = step_result("audit disposition evidence", run_argv)
-    step["command"] = command_text(argv)
-    counts: dict = {"applicable": True}
+    counts: dict = {
+        "applicable": True,
+        **audit_disposition.empty_evidence_summary(),
+    }
     problem = ""
     try:
-        raw = paths[0].read_bytes()
-        report = json.loads(paths[1].read_text(encoding="utf-8"))
-        review = json.loads(paths[2].read_text(encoding="utf-8"))
-        counts = {
-            "applicable": True,
-            **audit_disposition.verify_payloads(raw, report, review),
-        }
+        summary = audit_disposition.regenerate_evidence(
+            paths[0], paths[1], paths[2]
+        )
+        counts = {"applicable": True, **summary}
     except audit_disposition.EVIDENCE_ERRORS as exc:
         problem = str(exc)
+    step = step_result("audit disposition evidence", run_argv)
+    step["command"] = command_text(argv)
     step = finalize(step, step["exit_code"] == 0 and not problem)
     if problem:
         step["output"] = f"{step['output']}\n{problem}".strip()
@@ -1239,6 +1239,8 @@ def run_gates(
         run_native_q_checker_tests(allowed),
         run_ci_security_tests(allowed),
         run_audit_disposition_tests(allowed),
+        # Dispositions are rebuilt from the source audit bytes before the
+        # offline verification step, so stale files cannot be recorded.
         run_audit_disposition_evidence(),
         run_runner_attestation_tests(allowed),
         run_style(),

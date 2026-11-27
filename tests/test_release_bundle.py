@@ -826,6 +826,33 @@ def test_bundle_scope_mismatch_fails(
     assert any("report release scope" in error for error in result["errors"])
 
 
+def evidence_summary(audit_path: Path) -> dict:
+    """Return the exact summary of dispositions regenerated from an audit."""
+    raw = audit_path.read_bytes()
+    findings = AUDIT_DISPOSITION.parse_findings(json.loads(raw))
+    report = AUDIT_DISPOSITION.build_report(raw, findings)
+    review = AUDIT_DISPOSITION.build_review_report(raw, report)
+    return AUDIT_DISPOSITION.verify_payloads(raw, report, review)
+
+
+def coherent_report(findings: list[dict] | None = None) -> dict:
+    """Return a sample report whose audit gate describes the given findings."""
+    report = sample_report(COMMIT)
+    raw = json.dumps(
+        findings if findings is not None else audit_findings(), indent=2
+    ).encode("utf-8")
+    parsed = AUDIT_DISPOSITION.parse_findings(json.loads(raw))
+    dispositions = AUDIT_DISPOSITION.build_report(raw, parsed)
+    review = AUDIT_DISPOSITION.build_review_report(raw, dispositions)
+    summary = AUDIT_DISPOSITION.verify_payloads(raw, dispositions, review)
+    gate = named_gate(report, "audit_disposition_evidence")
+    gate["counts"] = {"applicable": True, **summary}
+    gate["result"] = "PASS"
+    gate["reason"] = EVIDENCE_REASON
+    gate["steps"][0]["output"] = "verify: PASS"
+    return report
+
+
 def write_test_bundle(
     workspace: Path,
     snapshots: SnapshotFixture,
@@ -834,32 +861,59 @@ def write_test_bundle(
     report: dict | None = None,
     scope: str = RELEASE_SCOPE,
     audit_evidence: bool | str | None = None,
+    sync_evidence: bool = True,
 ) -> Path:
-    """Write a small bundle with a report, provenance and snapshots."""
+    """Write a small bundle with a report, provenance and snapshots.
+
+    By default the report's audit gate is kept coherent with the evidence
+    staged in the bundle. ``sync_evidence=False`` lets a caller write a stale
+    report for negative coherence tests.
+    """
     quant_root = workspace / "quant"
     quant_root.mkdir()
     evidence = quant_root / "evidence"
     evidence.mkdir()
     if report is None:
         report = sample_report(COMMIT)
-    (evidence / "verification-report.json").write_text(
-        json.dumps(report), encoding="utf-8"
-    )
+    audit_path: Path | None = None
     if audit_evidence is not None:
         assurance = evidence / "assurance"
         assurance.mkdir(parents=True, exist_ok=True)
-        (assurance / "english-audit.json").write_bytes(
+        audit_path = assurance / "english-audit.json"
+        audit_path.write_bytes(
             json.dumps(audit_findings(), indent=2).encode("utf-8")
         )
         RELEASE_BUNDLE.regenerate_audit_dispositions(quant_root)
         if audit_evidence == "stale":
-            path = evidence / "assurance" / "audit-dispositions.json"
+            path = assurance / "audit-dispositions.json"
             payload = json.loads(path.read_text(encoding="utf-8"))
             payload["source_digest"] = "0" * 64
             path.write_text(
                 json.dumps(payload, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
             )
+    if sync_evidence:
+        gate = named_gate(report, "audit_disposition_evidence")
+        if audit_path is None:
+            gate["result"] = "NOT_APPLICABLE"
+            gate["counts"] = {
+                "applicable": False,
+                **AUDIT_DISPOSITION.empty_evidence_summary(),
+                "missing_files": ["evidence/assurance/english-audit.json"],
+            }
+            gate["reason"] = (
+                "generated audit evidence is absent from this bundle"
+            )
+            gate["steps"][0]["output"] = gate["reason"]
+        else:
+            summary = evidence_summary(audit_path)
+            gate["counts"] = {"applicable": True, **summary}
+            gate["result"] = "PASS"
+            gate["reason"] = EVIDENCE_REASON
+            gate["steps"][0]["output"] = "verify: PASS"
+    (evidence / "verification-report.json").write_text(
+        json.dumps(report), encoding="utf-8"
+    )
     governance = quant_root / "governance"
     governance.mkdir()
     (governance / "instrument-master-snapshots.json").write_text(
@@ -1605,3 +1659,108 @@ def test_bundle_verify_without_evidence_is_not_applicable(
     assert result["ok"], result["errors"]
     assert result["audit_evidence"]["status"] == "NOT_APPLICABLE"
     assert "absent from this bundle" in result["audit_evidence"]["reason"]
+    assert result["report_evidence_coherence"] == "NOT_APPLICABLE"
+
+
+def test_report_evidence_coherence_passes_for_coherent_bundle(
+    snapshots: SnapshotFixture,
+    workspace: Path,
+) -> None:
+    """A report describing the exact bundled evidence is coherent."""
+    bundle = write_test_bundle(
+        workspace, snapshots, corrupt=False, audit_evidence=True
+    )
+    result = RELEASE_BUNDLE.verify_bundle(bundle)
+    assert result["ok"], result["errors"]
+    assert result["audit_evidence"]["status"] == "PASS"
+    assert result["report_evidence_coherence"] == "PASS"
+
+
+def test_summary_prints_coherence_verdict(
+    snapshots: SnapshotFixture,
+    workspace: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The verify summary prints the cross-artifact coherence verdict."""
+    bundle = write_test_bundle(
+        workspace, snapshots, corrupt=False, audit_evidence=True
+    )
+    RELEASE_BUNDLE.print_summary(bundle, RELEASE_BUNDLE.verify_bundle(bundle))
+    assert "Report/evidence coherence: PASS" in capsys.readouterr().out
+
+
+def mutate_evidence_count(report: dict, field: str) -> None:
+    """Change one recorded evidence field of a coherent report."""
+    counts = named_gate(report, "audit_disposition_evidence")["counts"]
+    if field == "source_digest":
+        counts[field] = "0" * 64
+    elif field in ("finding_count", "disposition_count"):
+        counts[field] += 1
+    else:
+        counts["counts_by_class"]["CORRECT_WORDING"] += 1
+
+
+@pytest.mark.parametrize(
+    ("field", "match"),
+    [
+        ("source_digest", "source_digest mismatch"),
+        ("finding_count", "finding_count mismatch"),
+        ("disposition_count", "disposition_count mismatch"),
+        ("counts_by_class", "counts_by_class mismatch"),
+    ],
+)
+def test_report_evidence_coherence_rejects_changed_counts(
+    snapshots: SnapshotFixture,
+    workspace: Path,
+    field: str,
+    match: str,
+) -> None:
+    """A report contradicting the ZIP evidence fails verification."""
+    report = coherent_report()
+    mutate_evidence_count(report, field)
+    bundle = write_test_bundle(
+        workspace,
+        snapshots,
+        corrupt=False,
+        audit_evidence=True,
+        report=report,
+        sync_evidence=False,
+    )
+    result = RELEASE_BUNDLE.verify_bundle(bundle)
+    assert not result["ok"]
+    assert any(match in error for error in result["errors"]), result["errors"]
+    assert result["report_evidence_coherence"] == "FAIL"
+
+
+def test_old_report_with_new_audit_fails_verification(
+    snapshots: SnapshotFixture,
+    workspace: Path,
+) -> None:
+    """The reported digest and counts must come from the bundled audit."""
+    old_findings = [
+        {**item, "source": item["source"] + ".old"} for item in audit_findings()
+    ]
+    old_findings.append(
+        {
+            "source": "docs/old-only.md",
+            "line": 9,
+            "category": "informal_verb",
+            "phrase": "stuff",
+            "context": "Old wording requires review.",
+        }
+    )
+    bundle = write_test_bundle(
+        workspace,
+        snapshots,
+        corrupt=False,
+        audit_evidence=True,
+        report=coherent_report(old_findings),
+        sync_evidence=False,
+    )
+    result = RELEASE_BUNDLE.verify_bundle(bundle)
+    assert not result["ok"]
+    errors = result["errors"]
+    assert any("source_digest mismatch" in error for error in errors)
+    assert any("finding_count mismatch" in error for error in errors)
+    assert any("disposition_count mismatch" in error for error in errors)
+    assert result["report_evidence_coherence"] == "FAIL"
