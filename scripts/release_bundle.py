@@ -30,8 +30,8 @@ The portable pytest gate records the canonical ``build-ci/quant_contract``
 binary path, its SHA-256, its build directory and the report commit. Verify
 checks those fields and renders them in the verification section, so a stale
 or fabricated binary claim cannot support a release. The mandatory
-``ci_security_tests`` gate is versioned and validated like every other
-Python suite.
+``ci_security_tests`` and ``audit_disposition_tests`` gates are versioned and
+validated like every other Python suite.
 """
 
 from __future__ import annotations
@@ -87,6 +87,7 @@ GATE_NAMES = (
     "terminology_audit",
     "portable_pytest",
     "w1",
+    "audit_disposition_tests",
     "release_bundle_tests",
     "verify_report_tests",
     "native_q_checker_tests",
@@ -108,6 +109,7 @@ REQUIRED_COUNTS = {
     "verify_report_tests": PYTEST_COUNT_KEYS,
     "native_q_checker_tests": PYTEST_COUNT_KEYS,
     "ci_security_tests": PYTEST_COUNT_KEYS,
+    "audit_disposition_tests": PYTEST_COUNT_KEYS,
     "style": ("pass_checks", "checks_total"),
     "state_freshness": ("findings",),
     "terminology_audit": ("findings", "binding", "advisory"),
@@ -130,6 +132,7 @@ PYTHON_GATES = (
     "w1",
     "verify_report_tests",
     "release_bundle_tests",
+    "audit_disposition_tests",
 )
 ALLOWED_SKIPS_KEY = "allowed_skips"
 REPORT_CONFIG_KEYS = frozenset({ALLOWED_SKIPS_KEY})
@@ -1221,6 +1224,7 @@ def render_verification(report: dict) -> list[str]:
     report_tests = gate_counts(report, "verify_report_tests")
     checker_tests = gate_counts(report, "native_q_checker_tests")
     security_tests = gate_counts(report, "ci_security_tests")
+    disposition_tests = gate_counts(report, "audit_disposition_tests")
     style = gate_counts(report, "style")
     freshness = gate_counts(report, "state_freshness")
     audit = gate_counts(report, "terminology_audit")
@@ -1262,6 +1266,9 @@ def render_verification(report: dict) -> list[str]:
         "(passed/failed/errors/skipped/total).",
         "- CI security suite (offline): "
         f"{pytest_totals(security_tests)} "
+        "(passed/failed/errors/skipped/total).",
+        "- Audit disposition suite (offline): "
+        f"{pytest_totals(disposition_tests)} "
         "(passed/failed/errors/skipped/total).",
         f"- Python gate skip policy: "
         f"{len(report_skip_entries(report))} allowlisted skip(s): "

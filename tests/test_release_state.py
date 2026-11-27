@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Offline tests for the canonical release-state validator."""
+"""Offline tests for the canonical release-state validator.
+
+The fixture uses a deliberately fictional release identity and counts. A
+validator that pins any real-world version, PR, commit or test total fails
+these tests, so governance can advance without rewriting the checker.
+"""
 
 from __future__ import annotations
 
@@ -24,6 +29,17 @@ _SPEC.loader.exec_module(CHECK)
 
 COMMIT = "a" * 40
 STALE_COMMIT = "b" * 40
+VERSION = "R9.0.1"
+PR = 77
+HISTORICAL_VERSION = "R9.0.0"
+HISTORICAL_PR = 76
+PR_RANGE = f"47-{PR}"
+RELEASE_ID = f"{VERSION}-PR{PR}"
+SCOPE = "PORTABLE_RESEARCH"
+NATIVE = "GATED_NOT_RUN"
+W1_TESTS = 47
+OLD_W1_TESTS = 14
+REQUIRED_CHECKS = 4
 DOC_PATHS = CHECK.DOC_PATHS
 GATE_NAMES = (
     "ci_security_tests",
@@ -34,21 +50,30 @@ GATE_NAMES = (
     "release_bundle_tests",
     "sanitizer",
     "state_freshness",
-    "style",
     "terminology_audit",
     "verify_report_tests",
     "w1",
 )
 GATE_COUNTS = {
-    "ci_security_tests": {"passed": 11},
-    "hosted_ci": {"native_q_result": "GATED_NOT_RUN"},
-    "native_q_checker_tests": {"passed": 8},
-    "portable_cpp": {"checks": 14114},
-    "portable_pytest": {"passed": 51},
-    "release_bundle_tests": {"passed": 121},
-    "sanitizer": {"sanitizer_checks": 14114},
-    "verify_report_tests": {"passed": 161},
-    "w1": {"passed": 36},
+    "ci_security_tests": {"passed": 13},
+    "hosted_ci": {"native_q_result": NATIVE},
+    "native_q_checker_tests": {"passed": 7},
+    "portable_cpp": {"checks": 901},
+    "portable_pytest": {"passed": 52},
+    "release_bundle_tests": {"passed": 142},
+    "sanitizer": {"sanitizer_checks": 901},
+    "verify_report_tests": {"passed": 172},
+    "w1": {"passed": W1_TESTS},
+}
+INVENTORY_KEYS = {
+    "ci_security_tests": "ci_security_tests",
+    "native_q_checker_tests": "native_q_checker_tests",
+    "portable_cpp": "cpp_checks",
+    "portable_pytest": "portable_pytest",
+    "release_bundle_tests": "release_bundle_tests",
+    "sanitizer": "sanitizer_checks",
+    "verify_report_tests": "verify_report_tests",
+    "w1": "w1",
 }
 CSV_HEADERS = {
     "governance/requirements-traceability.csv": (
@@ -98,12 +123,14 @@ CSV_HEADERS = {
     ),
 }
 CURRENT_RECORD = (
-    "R8.4.2 / PR #66 is COMPLETE; 36 W1 tests; 4 required checks; "
-    "PORTABLE_RESEARCH; native q GATED_NOT_RUN.\n"
+    f"{VERSION} / PR #{PR} is COMPLETE; {W1_TESTS} W1 tests; "
+    f"{REQUIRED_CHECKS} required checks; {SCOPE}; "
+    f"native q {NATIVE}.\n"
 )
 HISTORICAL_RECORD = (
     "\n## HISTORICAL release history\n\n"
-    "R8.4.2 IN PROGRESS; PR #64; W1 14 tests; 28 offline tests.\n"
+    f"{HISTORICAL_VERSION} IN PROGRESS; PR #{HISTORICAL_PR}; "
+    f"W1 {OLD_W1_TESTS} tests; 12 offline tests.\n"
 )
 
 
@@ -132,8 +159,8 @@ def write_csv(root: Path, relative: str, header: tuple[str, ...]) -> None:
     path = root / relative
     path.parent.mkdir(parents=True, exist_ok=True)
     row = [
-        "CURRENT R8.4.2 PR #66 COMPLETE 36 W1 tests "
-        "4 required checks PORTABLE_RESEARCH GATED_NOT_RUN"
+        f"CURRENT {VERSION} PR #{PR} COMPLETE {W1_TESTS} W1 tests "
+        f"{REQUIRED_CHECKS} required checks {SCOPE} {NATIVE}"
     ] * len(header)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
@@ -142,7 +169,7 @@ def write_csv(root: Path, relative: str, header: tuple[str, ...]) -> None:
 
 
 def make_report(commit: str = COMMIT) -> dict:
-    """Build a minimal, valid assurance report."""
+    """Build a minimal, valid assurance report with fixture counts."""
     gates = []
     for name in GATE_NAMES:
         gates.append(
@@ -157,7 +184,7 @@ def make_report(commit: str = COMMIT) -> dict:
         )
     return {
         "schema_version": 1,
-        "release_scope": "PORTABLE_RESEARCH",
+        "release_scope": SCOPE,
         "commit": commit,
         "overall": "PASS",
         "gates": gates,
@@ -172,41 +199,42 @@ def make_state(commit: str, digest: str) -> dict:
             "required_approvals": 0,
             "required_checks": list(CHECK.REQUIRED_CHECKS),
         },
-        "captured_state_basis": "captured fixture evidence",
+        "capture_context": f"Point-in-time capture at PR #{PR}",
+        "captured_state_basis": f"captured fixture evidence at PR #{PR}",
         "current_workstreams": {
             name: "PARTIAL" for name in CHECK.REQUIRED_WORKSTREAMS
         },
         "gate_results": {name: "PASS" for name in GATE_NAMES},
         "historical_releases": [
             {
-                "note": "HISTORICAL fixture release",
-                "pr": 63,
-                "release_version": "R8.4.1",
-                "scope": "PORTABLE_RESEARCH",
+                "note": f"HISTORICAL fixture release at PR #{HISTORICAL_PR}",
+                "pr": HISTORICAL_PR,
+                "release_version": HISTORICAL_VERSION,
+                "scope": SCOPE,
                 "status": "COMPLETE",
             }
         ],
-        "main_captured_basis": "captured fixture commit",
+        "independent_acceptance": "PENDING",
+        "main_captured_basis": f"captured fixture commit at PR #{PR}",
         "main_commit": commit,
         "manifest_basis": "captured fixture manifest",
         "manifest_sha256": "0" * 64,
-        "merged_pull_requests": "47-66",
-        "native_q_status": "GATED_NOT_RUN",
-        "release_id": "R8.4.2-PR66",
-        "release_scope": "PORTABLE_RESEARCH",
+        "merged_pull_requests": PR_RANGE,
+        "native_q_status": NATIVE,
+        "release_id": RELEASE_ID,
+        "release_scope": SCOPE,
         "release_status": "COMPLETE",
-        "release_version": "R8.4.2",
+        "release_version": VERSION,
         "report_basis": "captured fixture report",
         "required_gate_set": list(GATE_NAMES),
         "test_inventory": {
-            "ci_security_tests": 11,
-            "cpp_checks": 14114,
-            "native_q_checker_tests": 8,
-            "portable_pytest": 51,
-            "release_bundle_tests": 121,
-            "sanitizer_checks": 14114,
-            "verify_report_tests": 161,
-            "w1": 36,
+            inventory_key: GATE_COUNTS[gate]["passed"]
+            for gate, inventory_key in INVENTORY_KEYS.items()
+            if "passed" in GATE_COUNTS[gate]
+        }
+        | {
+            "cpp_checks": GATE_COUNTS["portable_cpp"]["checks"],
+            "sanitizer_checks": GATE_COUNTS["sanitizer"]["sanitizer_checks"],
         },
         "trading_authorization": {
             "decision": "NO_TRADE",
@@ -271,8 +299,15 @@ def _sandbox(tmp_path: Path) -> Path:
     head = git(tmp_path, "rev-parse", "HEAD")
     write_json(tmp_path, CHECK.REPORT_RELATIVE, make_report(head))
     write_state(tmp_path)
-    git(tmp_path, "add", CHECK.STATE_RELATIVE)
     return tmp_path
+
+
+def update_state(sandbox: Path, **changes: object) -> dict:
+    """Apply fixture state changes and persist canonical JSON."""
+    state = json.loads((sandbox / CHECK.STATE_RELATIVE).read_text())
+    state.update(changes)
+    write_json(sandbox, CHECK.STATE_RELATIVE, state)
+    return state
 
 
 def test_valid_state_passes(sandbox: Path) -> None:
@@ -280,13 +315,49 @@ def test_valid_state_passes(sandbox: Path) -> None:
     assert CHECK.check(sandbox) == []
 
 
+def test_identity_is_derived_not_hardcoded(sandbox: Path) -> None:
+    """A fictional release identity passes, proving no pinned real release."""
+    assert VERSION != "R8.4.2" and PR != 66
+    assert CHECK.check(sandbox) == []
+
+
+def test_bound_identity_fails(sandbox: Path) -> None:
+    """A release id that disagrees with version and PR fails closed."""
+    update_state(sandbox, release_id="R9.9.9-PR99")
+    errors = CHECK.check(sandbox)
+    assert any("release_id is not bound to version and PR" in e for e in errors)
+
+
 def test_stale_commit_fails(sandbox: Path) -> None:
     """A commit that no longer matches git HEAD fails closed."""
-    state = json.loads((sandbox / CHECK.STATE_RELATIVE).read_text())
-    state["main_commit"] = STALE_COMMIT
-    write_json(sandbox, CHECK.STATE_RELATIVE, state)
+    update_state(sandbox, main_commit=STALE_COMMIT)
     errors = CHECK.check(sandbox)
     assert any("main_commit does not match git HEAD" in e for e in errors)
+
+
+def test_pr_range_binding_fails(sandbox: Path) -> None:
+    """A changed PR range breaks the derived release-id binding."""
+    update_state(sandbox, merged_pull_requests=f"47-{HISTORICAL_PR}")
+    errors = CHECK.check(sandbox)
+    assert any("release_id is not bound to version and PR" in e for e in errors)
+
+
+def test_test_inventory_must_match_report(sandbox: Path) -> None:
+    """A recorded count that disagrees with the generated report fails."""
+    state = json.loads((sandbox / CHECK.STATE_RELATIVE).read_text())
+    state["test_inventory"]["w1"] = W1_TESTS + 1
+    write_json(sandbox, CHECK.STATE_RELATIVE, state)
+    errors = CHECK.check(sandbox)
+    assert any("w1 test count differs" in e for e in errors)
+
+
+def test_gate_result_must_match_report(sandbox: Path) -> None:
+    """A changed gate result fails against the current report."""
+    state = json.loads((sandbox / CHECK.STATE_RELATIVE).read_text())
+    state["gate_results"]["w1"] = "FAIL"
+    write_json(sandbox, CHECK.STATE_RELATIVE, state)
+    errors = CHECK.check(sandbox)
+    assert any("gate w1 result differs" in e for e in errors)
 
 
 def test_stale_test_count_in_current_doc_fails(sandbox: Path) -> None:
@@ -294,11 +365,43 @@ def test_stale_test_count_in_current_doc_fails(sandbox: Path) -> None:
     path = sandbox / DOC_PATHS[0]
     text = path.read_text(encoding="utf-8")
     path.write_text(
-        text.replace(CURRENT_RECORD, CURRENT_RECORD + "W1 14 tests.\n"),
+        text.replace(
+            CURRENT_RECORD, CURRENT_RECORD + f"W1 {OLD_W1_TESTS} tests.\n"
+        ),
         encoding="utf-8",
     )
     errors = CHECK.check(sandbox)
-    assert any("stale W1 14 tests" in e for e in errors)
+    assert any(f"stale W1 {OLD_W1_TESTS} tests" in e for e in errors)
+
+
+def test_stale_pr_claim_in_current_doc_fails(sandbox: Path) -> None:
+    """A historical PR claimed as a current release fails."""
+    path = sandbox / DOC_PATHS[0]
+    text = path.read_text(encoding="utf-8")
+    path.write_text(
+        text.replace(
+            CURRENT_RECORD,
+            CURRENT_RECORD + f"PR #{HISTORICAL_PR} is the current release.\n",
+        ),
+        encoding="utf-8",
+    )
+    errors = CHECK.check(sandbox)
+    assert any(f"stale PR #{HISTORICAL_PR} current claim" in e for e in errors)
+
+
+def test_stale_version_claim_in_current_doc_fails(sandbox: Path) -> None:
+    """A historical version claimed as a current release fails."""
+    path = sandbox / DOC_PATHS[0]
+    text = path.read_text(encoding="utf-8")
+    path.write_text(
+        text.replace(
+            CURRENT_RECORD,
+            CURRENT_RECORD + f"{HISTORICAL_VERSION} is the current release.\n",
+        ),
+        encoding="utf-8",
+    )
+    errors = CHECK.check(sandbox)
+    assert any(f"stale {HISTORICAL_VERSION} current claim" in e for e in errors)
 
 
 def test_historical_section_with_old_values_passes(sandbox: Path) -> None:
@@ -339,10 +442,10 @@ def test_show_reports_the_canonical_state(sandbox: Path) -> None:
 
 def mark_historical(sandbox: Path) -> dict:
     """Label the fixture state as a historical capture and return it."""
-    state = json.loads((sandbox / CHECK.STATE_RELATIVE).read_text())
-    state["capture_context"] = "HISTORICAL capture at PR #66"
-    write_json(sandbox, CHECK.STATE_RELATIVE, state)
-    return state
+    return update_state(
+        sandbox,
+        capture_context=f"HISTORICAL capture at PR #{HISTORICAL_PR}",
+    )
 
 
 def test_historical_state_without_generated_report_passes(
@@ -374,6 +477,15 @@ def test_historical_state_with_invalid_report_fails(sandbox: Path) -> None:
     assert any("invalid JSON" in error for error in errors)
 
 
+def test_current_state_with_invalid_report_fails(sandbox: Path) -> None:
+    """A malformed generated report fails closed for a current record."""
+    (sandbox / CHECK.REPORT_RELATIVE).write_text(
+        "{not valid json", encoding="utf-8"
+    )
+    errors = CHECK.check(sandbox)
+    assert any("invalid JSON" in error for error in errors)
+
+
 def test_historical_state_keeps_checking_current_doc_values(
     sandbox: Path,
 ) -> None:
@@ -382,11 +494,13 @@ def test_historical_state_keeps_checking_current_doc_values(
     path = sandbox / DOC_PATHS[0]
     text = path.read_text(encoding="utf-8")
     path.write_text(
-        text.replace(CURRENT_RECORD, CURRENT_RECORD + "W1 14 tests.\n"),
+        text.replace(
+            CURRENT_RECORD, CURRENT_RECORD + f"W1 {OLD_W1_TESTS} tests.\n"
+        ),
         encoding="utf-8",
     )
     errors = CHECK.check(sandbox)
-    assert any("stale W1 14 tests" in error for error in errors)
+    assert any(f"stale W1 {OLD_W1_TESTS} tests" in e for e in errors)
 
 
 def test_historical_state_keeps_checking_required_fields(

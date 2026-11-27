@@ -110,15 +110,19 @@ jobs:
     # - third-party Actions pinned to full commit SHAs, never tags;
     # - destroy the runner after qualification, on success and on failure.
     if: github.event_name != 'pull_request' && vars.QUANT_NATIVE_Q_ENABLED == 'true'
-    runs-on: [self-hosted, quant-native-q]
+    runs-on:
+      group: quant-native-q
+      labels: [self-hosted, quant-native-q]
     env:
       QUANT_NATIVE_Q_REQUIRED: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       # GitHub does not expose runner labels as an environment variable; the
-      # label set below mirrors this job's runs-on requirement and is checked
-      # against the exact HEAD SHA by the capture script.
+      # label set below mirrors this job's explicit runs-on group/labels and
+      # is checked against the exact HEAD SHA by the capture script. These
+      # values are declared, not observed: the separate runner-attestation
+      # job below reads the actual runner identity from the GitHub API.
       - name: Capture dedicated runner evidence
         env:
           QHOME: ${{ secrets.QUANT_QHOME }}
@@ -298,6 +302,57 @@ jobs:
           path: data/assurance/runner-evidence.json
           if-no-files-found: warn
 
+  runner-attestation:
+    name: Runner attestation (post-job API evidence)
+    # GitHub-hosted and always attempted after native-q. The native-q tier is
+    # gated and is NOT a required status check for PORTABLE_RESEARCH; when it
+    # is skipped (pull_request or disabled variable), every step here is
+    # skipped too so attestation cannot fail a portable event.
+    needs: native-q
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      EXPECTED_SHA: ${{ github.sha }}
+      NATIVE_Q_RESULT: ${{ needs.native-q.result }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Resolve native-q job database id
+        if: env.NATIVE_Q_RESULT != 'skipped'
+        run: |
+          set -eu
+          job_id=$(
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs" \
+              --jq '.jobs | map(select(.name == "Native KDB-X recovery (gated tier)")) | max_by(.id) | .id' \
+              | head -n 1
+          )
+          if ! printf '%s' "$job_id" | grep -Eq '^[0-9]+$'; then
+            printf 'could not resolve the native-q job database id\n' >&2
+            exit 1
+          fi
+          printf 'NATIVE_Q_JOB_ID=%s\n' "$job_id" >> "$GITHUB_ENV"
+
+      - name: Attest observed runner identity from GitHub API
+        if: env.NATIVE_Q_RESULT != 'skipped'
+        run: |
+          python3 scripts/attest_runner.py attest \
+            --run-id "${{ github.run_id }}" \
+            --job-id "$NATIVE_Q_JOB_ID" \
+            --expected-sha "$EXPECTED_SHA" \
+            --output data/assurance/runner-attestation.json
+
+      - name: Upload runner attestation
+        if: env.NATIVE_Q_RESULT != 'skipped'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: runner-attestation
+          path: data/assurance/runner-attestation.json
+          if-no-files-found: warn
+
   release-assurance:
     name: Release assurance (offline)
     # Hosted-only tier for push to main and pull_request. Every suite runs
@@ -354,12 +409,17 @@ jobs:
             tests/test_verify_report.py \
             tests/test_native_q_ci.py \
             tests/test_ci_security.py \
+            tests/test_runner_evidence.py \
+            tests/test_clean_room.py \
+            tests/test_release_state.py \
+            tests/test_audit_disposition.py \
             -o addopts='' -q
 
       - name: Governance schema validation
         run: |
           python3 scripts/style_contract.py
           python3 scripts/state_freshness.py
+          python3 scripts/check_release_state.py check
 
       - name: Release bundle manifest and evidence verification
         run: |

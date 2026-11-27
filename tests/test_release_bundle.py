@@ -23,6 +23,7 @@ SPEC = importlib.util.spec_from_file_location(
 assert SPEC is not None and SPEC.loader is not None
 LOADER = SPEC.loader
 RELEASE_BUNDLE = importlib.util.module_from_spec(SPEC)
+sys.modules["release_bundle"] = RELEASE_BUNDLE
 LOADER.exec_module(RELEASE_BUNDLE)
 
 COMMIT = "a" * 40
@@ -42,6 +43,7 @@ GATE_TEST_FILES = {
     "verify_report_tests": "tests/test_verify_report.py",
     "native_q_checker_tests": "tests/test_native_q_ci.py",
     "ci_security_tests": "tests/test_ci_security.py",
+    "audit_disposition_tests": "tests/test_audit_disposition.py",
 }
 BINARY_DIGEST = hashlib.sha256(b"fresh build-ci contract binary\n").hexdigest()
 STALE_DIGEST = hashlib.sha256(b"stale build contract binary\n").hexdigest()
@@ -362,6 +364,7 @@ def sample_report(commit: str, *, native: dict | None = None) -> dict:
         "verify_report_tests": pytest_counts(122),
         "native_q_checker_tests": pytest_counts(8),
         "ci_security_tests": pytest_counts(11),
+        "audit_disposition_tests": pytest_counts(31),
         "style": {"pass_checks": 8, "checks_total": 8},
         "state_freshness": {"self_test": "PASS", "findings": 0},
         "terminology_audit": {"findings": 0, "binding": 0, "advisory": 0},
@@ -829,6 +832,7 @@ def write_test_bundle(
 ALLOWED_SKIP_ID = "tests/test_dataset_contract.py::test_skipped_case"
 OTHER_SKIP_ID = "tests/test_dataset_contract.py::test_other_case"
 CI_SKIP_ID = "tests/test_ci_security.py::test_skipped_case"
+DISPOSITION_SKIP_ID = "tests/test_audit_disposition.py::test_skipped_case"
 SKIP_REASON = "governed fixture unavailable"
 
 
@@ -932,6 +936,57 @@ def test_unapproved_ci_security_skip_fails(test_id: str | None) -> None:
     if test_id == CI_SKIP_ID:
         report["config"]["allowed_skips"] = [
             {"test_id": CI_SKIP_ID, "reason": SKIP_REASON}
+        ]
+        assert RELEASE_BUNDLE.validate_report(report, COMMIT) is report
+
+
+def test_audit_disposition_gate_is_versioned() -> None:
+    """The disposition gate cannot be omitted, duplicated or renamed."""
+    report = sample_report(COMMIT)
+    report["gates"] = [
+        gate
+        for gate in report["gates"]
+        if gate["name"] != "audit_disposition_tests"
+    ]
+    with pytest.raises(ValueError, match="missing required gates"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+    report = sample_report(COMMIT)
+    report["gates"].append(dict(named_gate(report, "audit_disposition_tests")))
+    with pytest.raises(ValueError, match="duplicate gate names"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+    report = sample_report(COMMIT)
+    named_gate(report, "audit_disposition_tests")["name"] = "unlisted"
+    with pytest.raises(ValueError, match="unknown gate names"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+def test_audit_disposition_gate_has_exact_pinned_command() -> None:
+    """The mandated offline command is recorded as evidence."""
+    gate = named_gate(sample_report(COMMIT), "audit_disposition_tests")
+    assert gate["command"] == (
+        "python3 -m pytest tests/test_audit_disposition.py -o addopts='' -q"
+    )
+    assert gate["counts"] == pytest_counts(31)
+    assert "audit_disposition_tests" in RELEASE_BUNDLE.PYTHON_GATES
+
+
+@pytest.mark.parametrize("test_id", [None, DISPOSITION_SKIP_ID, OTHER_SKIP_ID])
+def test_unapproved_audit_disposition_skip_fails(test_id: str | None) -> None:
+    """A skip in the disposition suite needs an authored, matching reason."""
+    report = sample_report(COMMIT)
+    gate = named_gate(report, "audit_disposition_tests")
+    baseline = gate["counts"]["passed"]
+    gate["counts"] = pytest_counts(baseline - 1, skipped=1)
+    if test_id is not None:
+        gate["steps"][0]["output"] = (
+            f"SKIPPED [1] {test_id}:42: {SKIP_REASON}\n"
+            f"{baseline - 1} passed, 1 skipped in 0.1s"
+        )
+    with pytest.raises(ValueError, match="unapproved skip"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+    if test_id == DISPOSITION_SKIP_ID:
+        report["config"]["allowed_skips"] = [
+            {"test_id": test_id, "reason": SKIP_REASON}
         ]
         assert RELEASE_BUNDLE.validate_report(report, COMMIT) is report
 
@@ -1128,6 +1183,10 @@ def test_manifest_reports_new_gate_and_skip_counts() -> None:
     manifest = manifest_for(sample_report(COMMIT))
     assert (
         "Native-q checker suite (offline): 8/0/0/0/8 "
+        "(passed/failed/errors/skipped/total)."
+    ) in manifest
+    assert (
+        "Audit disposition suite (offline): 31/0/0/0/31 "
         "(passed/failed/errors/skipped/total)."
     ) in manifest
     assert (

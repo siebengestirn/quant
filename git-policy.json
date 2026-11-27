@@ -15,7 +15,17 @@
     "must_not_rewrite_history": true,
     "must_not_stash_or_discard_changes": true,
     "prune_may_delete_remote_tracking_refs_only": true,
-    "remote_tracking_prune": "git fetch --prune origin"
+    "remote_tracking_prune": "git fetch --prune origin",
+    "runner_group_control": {
+      "attestation_script": "scripts/attest_runner.py",
+      "declared_group": "quant-native-q",
+      "deregistration": "The external runner operator must deregister and destroy the governed runner after each single job, on success and on failure; the GitHub job API cannot verify deregistration, so no attestation may claim it without API evidence.",
+      "ephemeral_single_job_runner_required": true,
+      "evidence_file": "data/assurance/runner-attestation.json",
+      "post_job_api_attestation_required": true,
+      "required_label": "quant-native-q",
+      "workflow_selection": "The native-q job selects group quant-native-q with labels [self-hosted, quant-native-q] and is gated off pull_request events."
+    }
   },
   "branch": {
     "active_topic_branches": [],

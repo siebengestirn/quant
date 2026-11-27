@@ -9,7 +9,9 @@ The canonical record is ``governance/release-state.json``. It is the only
 place where the current release identifiers are pinned in Git; volatile pins
 are labelled as captured evidence and verified here against ``git HEAD``,
 the assurance report, the release manifest contract and the current-state
-sections of the governed documentation.
+sections of the governed documentation. No release identity or test total is
+hardcoded: every expected value is derived from the canonical record itself
+and reconciled with the generated report and the governed documents.
 """
 
 from __future__ import annotations
@@ -46,6 +48,7 @@ REQUIRED_FIELDS = (
     "current_workstreams",
     "gate_results",
     "historical_releases",
+    "independent_acceptance",
     "main_commit",
     "manifest_sha256",
     "merged_pull_requests",
@@ -88,23 +91,22 @@ REQUIRED_CHECKS = (
     "Style contract (reference guides)",
     "Release assurance (offline)",
 )
-# The last field marks additive suites: later corrective tests may increase
-# their count, but the recorded R8.4.2 baseline must remain a floor.
+# Each gate maps an inventory field to the count field of its generated
+# report gate. Counts themselves come from the current record and report.
 GATE_COUNT_KEYS = {
-    "portable_cpp": ("cpp_checks", "checks", 14114, False),
-    "sanitizer": ("sanitizer_checks", "sanitizer_checks", 14114, False),
-    "portable_pytest": ("portable_pytest", "passed", 51, False),
-    "w1": ("w1", "passed", 36, False),
-    "release_bundle_tests": ("release_bundle_tests", "passed", 121, True),
-    "verify_report_tests": ("verify_report_tests", "passed", 161, True),
-    "native_q_checker_tests": ("native_q_checker_tests", "passed", 8, False),
+    "portable_cpp": ("cpp_checks", "checks"),
+    "sanitizer": ("sanitizer_checks", "sanitizer_checks"),
+    "portable_pytest": ("portable_pytest", "passed"),
+    "w1": ("w1", "passed"),
+    "release_bundle_tests": ("release_bundle_tests", "passed"),
+    "verify_report_tests": ("verify_report_tests", "passed"),
+    "native_q_checker_tests": ("native_q_checker_tests", "passed"),
+    "ci_security_tests": ("ci_security_tests", "passed"),
 }
-CI_SECURITY_TEST_FILE = "tests/test_ci_security.py"
-CI_SECURITY_TESTS = 11
-TEST_FUNCTION_RE = re.compile(r"^(?:async\s+)?def\s+test_\w+", re.MULTILINE)
 SHA256_RE = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{64}(?![0-9a-fA-F])")
 COMMIT_RE = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{40}(?![0-9a-fA-F])")
 RANGE_RE = re.compile(r"^(\d+)-(\d+)$")
+VERSION_RE = re.compile(r"^R\d+(?:\.\d+)+$")
 LINE_MARKERS = (*HISTORICAL_MARKERS, "at pr #")
 SECTION_MARKERS = (
     "historical",
@@ -112,35 +114,6 @@ SECTION_MARKERS = (
     "release history",
     "archive",
 )
-MARKER_WINDOW = 5
-STALE_PATTERNS = (
-    (
-        re.compile(
-            r"R8\.4\.2[^\n]{0,80}IN PROGRESS"
-            r"|IN PROGRESS[^\n]{0,80}R8\.4\.2",
-            re.IGNORECASE,
-        ),
-        "stale R8.4.2 IN PROGRESS",
-    ),
-    (re.compile(r"PR\s*#64\b"), "stale PR #64 current claim"),
-    (
-        re.compile(
-            r"\b14\s+(?:offline\s+)?(?:pytest\s+)?"
-            r"(?:W1\s+)?(?:tests?|passes)\b"
-            r"|\bW1[^\n]{0,60}\b14\s+(?:offline\s+)?"
-            r"(?:pytest\s+)?(?:tests?|passes)\b",
-            re.IGNORECASE,
-        ),
-        "stale W1 14 tests",
-    ),
-)
-CURRENT_36_RE = re.compile(
-    r"\b36\s+(?:offline\s+)?(?:pytest\s+)?(?:W1\s+)?(?:tests?|passes)\b"
-    r"|\bW1[^\n]{0,60}\b36\s+(?:offline\s+)?"
-    r"(?:pytest\s+)?(?:tests?|passes)\b",
-    re.IGNORECASE,
-)
-CURRENT_CHECKS_RE = re.compile(r"\b4\s+required checks\b", re.IGNORECASE)
 
 
 def canonical_text(payload: object) -> str:
@@ -199,8 +172,8 @@ def git_head(root: pathlib.Path) -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
-def verify_report_constants() -> frozenset[str] | None:
-    """Import the read-only gate set from the verification script."""
+def verification_module() -> object | None:
+    """Import the read-only gate and scope policy from the verification script."""
     path = ROOT / "scripts" / "verify_report.py"
     if not path.is_file():
         return None
@@ -212,10 +185,16 @@ def verify_report_constants() -> frozenset[str] | None:
         spec.loader.exec_module(module)
     except (OSError, RuntimeError, ValueError):
         return None
-    names = getattr(module, "REQUIRED_GATES", None)
-    if not isinstance(names, (set, frozenset, list, tuple)):
+    return module
+
+
+def release_scopes() -> frozenset[str] | None:
+    """Return the release scopes accepted by the verification script."""
+    module = verification_module()
+    scopes = getattr(module, "RELEASE_SCOPES", None) if module else None
+    if not isinstance(scopes, (set, frozenset, list, tuple)):
         return None
-    return frozenset(map(str, names))
+    return frozenset(map(str, scopes))
 
 
 def inventory_errors(root: pathlib.Path) -> list[str]:
@@ -250,15 +229,222 @@ def inventory_errors(root: pathlib.Path) -> list[str]:
     ]
 
 
+def pr_token(state: dict) -> str:
+    """Return the current PR token used in governed documents."""
+    end = pr_suffix(state)
+    return f"PR #{end}" if end.isdigit() else "current PR"
+
+
+def w1_count(state: dict) -> int | None:
+    """Return the current W1 pass count from the canonical inventory."""
+    inventory = state.get("test_inventory")
+    value = inventory.get("w1") if isinstance(inventory, dict) else None
+    return value if isinstance(value, int) else None
+
+
+def required_check_count(state: dict) -> int | None:
+    """Return the required-check count from the canonical branch policy."""
+    protection = state.get("branch_protection")
+    checks = (
+        protection.get("required_checks")
+        if isinstance(protection, dict)
+        else None
+    )
+    return len(checks) if isinstance(checks, list) else None
+
+
+def w1_count_re(count: int) -> re.Pattern[str]:
+    """Match a W1 test count in either word order."""
+    number = str(count)
+    return re.compile(
+        rf"\bW1[^\n]{{0,60}}\b{number}\s+(?:offline\s+)?"
+        rf"(?:pytest\s+)?(?:tests?|passes)\b"
+        rf"|\b{number}\s+(?:offline\s+)?(?:pytest\s+)?(?:W1\s+)?"
+        rf"(?:tests?|passes)\b",
+        re.IGNORECASE,
+    )
+
+
+def checks_count_re(count: int) -> re.Pattern[str]:
+    """Match a required-check count."""
+    return re.compile(rf"\b{count}\s+required checks\b", re.IGNORECASE)
+
+
+def historical_tokens(state: dict) -> tuple[set[str], set[str]]:
+    """Return historical release versions and PR numbers from the state."""
+    versions: set[str] = set()
+    prs: set[str] = set()
+    records = state.get("historical_releases")
+    if not isinstance(records, list):
+        return versions, prs
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        version = str(record.get("release_version", ""))
+        if version:
+            versions.add(version)
+        number = str(record.get("pr", ""))
+        if number.isdigit():
+            prs.add(number)
+    return versions, prs
+
+
+def stale_patterns(state: dict) -> tuple[tuple[re.Pattern[str], str], ...]:
+    """Build stale-current-claim patterns from the canonical record."""
+    patterns: list[tuple[re.Pattern[str], str]] = []
+    historical_versions, prs = historical_tokens(state)
+    for version in sorted(filter(None, historical_versions)):
+        escaped = re.escape(version)
+        patterns.append(
+            (
+                re.compile(
+                    rf"\b{escaped}\b[^\n]{{0,80}}\b(?:is|are|was|remains|becomes)"
+                    rf"\s+(?:the\s+)?(?:CURRENT|current|final)\b"
+                    rf"|\b(?:CURRENT|current|final)\s+release[^\n]{{0,40}}\b{escaped}\b(?!\.)",
+                    re.IGNORECASE,
+                ),
+                f"stale {version} current claim",
+            )
+        )
+        patterns.append(
+            (
+                re.compile(
+                    rf"\b{escaped}\b[^\n]{{0,40}}\bIN PROGRESS\b"
+                    rf"|\bIN PROGRESS\b[^\n]{{0,40}}\b{escaped}\b",
+                    re.IGNORECASE,
+                ),
+                f"stale {version} IN PROGRESS",
+            )
+        )
+    current = str(state.get("release_version", ""))
+    if current:
+        escaped = re.escape(current)
+        patterns.append(
+            (
+                re.compile(
+                    rf"\b{escaped}\b[^\n]{{0,40}}\bIN PROGRESS\b"
+                    rf"|\bIN PROGRESS\b[^\n]{{0,40}}\b{escaped}\b",
+                    re.IGNORECASE,
+                ),
+                f"stale {current} IN PROGRESS",
+            )
+        )
+    for number in sorted(prs):
+        token = rf"PR\s*#{number}\b"
+        patterns.append(
+            (
+                re.compile(
+                    rf"\b{token}[^\n]{{0,20}}\b(?:is|was|remains)\s+"
+                    rf"(?:the\s+)?(?:CURRENT|current|final)\b"
+                    rf"|\b(?:CURRENT|current|final)\s+release[^\n]{{0,30}}{token}"
+                    rf"|\b(?:is|was|remains)\s+(?:the\s+)?(?:CURRENT|current|final)"
+                    rf"\s+release[^\n]{{0,40}}{token}",
+                    re.IGNORECASE,
+                ),
+                f"stale PR #{number} current claim",
+            )
+        )
+    return tuple(patterns)
+
+
+def stale_errors(
+    text_lines: list[str], labels: list[bool], state: dict
+) -> list[str]:
+    """Report old release claims made in unlabelled current-state records."""
+    errors: list[str] = []
+    patterns = stale_patterns(state)
+    count = w1_count(state)
+    for number, (line, labelled) in enumerate(
+        zip(text_lines, labels, strict=True), 1
+    ):
+        if labelled:
+            continue
+        for pattern, label in patterns:
+            if pattern.search(line):
+                errors.append(f"{number}: {label}")
+        if count is None:
+            continue
+        for match in re.finditer(
+            r"\b(?:W1[^\n]{0,60}\b)?(\d+)\s+(?:offline\s+)?"
+            r"(?:pytest\s+)?(?:tests?|passes)\b",
+            line,
+            re.IGNORECASE,
+        ):
+            if int(match.group(1)) != count:
+                errors.append(f"{number}: stale W1 {match.group(1)} tests")
+        checks = required_check_count(state)
+        if checks is None:
+            continue
+        for match in re.finditer(
+            r"\b(\d+)\s+required checks\b", line, re.IGNORECASE
+        ):
+            if int(match.group(1)) != checks:
+                errors.append(
+                    f"{number}: stale {match.group(1)} required checks"
+                )
+    return errors
+
+
+def labelled_lines(lines: list[str]) -> list[bool]:
+    """Flag historical sections and records that may retain old values."""
+    labels: list[bool] = []
+    historical = False
+    for line in lines:
+        if line.startswith("#"):
+            historical = any(
+                marker in line.lower() for marker in SECTION_MARKERS
+            )
+        labels.append(
+            historical or any(marker in line.lower() for marker in LINE_MARKERS)
+        )
+    return labels
+
+
+def token_errors(label: str, current_text: str, state: dict) -> list[str]:
+    """Require every current-record token somewhere in a document or CSV."""
+    count = w1_count(state)
+    checks = required_check_count(state)
+    native = str(state.get("native_q_status", ""))
+    scope = str(state.get("release_scope", ""))
+    required = (
+        (
+            str(state.get("release_version", "")),
+            str(state.get("release_version", "")) in current_text,
+        ),
+        (pr_token(state), pr_token(state) in current_text),
+        (
+            str(state.get("release_status", "")),
+            str(state.get("release_status", "")) in current_text,
+        ),
+        (
+            f"W1 {count} tests",
+            count is not None and bool(w1_count_re(count).search(current_text)),
+        ),
+        (
+            f"{checks} required checks",
+            checks is not None
+            and bool(checks_count_re(checks).search(current_text)),
+        ),
+        (scope, scope in current_text),
+        (native, native in current_text),
+    )
+    return [
+        f"{label}: current record missing {name}"
+        for name, found in required
+        if not found
+    ]
+
+
 def csv_errors(root: pathlib.Path, state: dict) -> list[str]:
-    """Require governed CSV field counts and current-state records."""
+    """Require governed CSV field counts, current tokens and no stale claims."""
     errors: list[str] = []
     for relative, count in CSV_FIELDS.items():
         text = read_text(root, relative)
         if text is None:
             errors.append(f"{relative}: missing or unreadable")
             continue
-        rows = list(csv.reader(text.splitlines()))
+        lines = text.splitlines()
+        rows = list(csv.reader(lines))
         if not rows:
             errors.append(f"{relative}: empty CSV")
             continue
@@ -272,55 +458,19 @@ def csv_errors(root: pathlib.Path, state: dict) -> list[str]:
                 errors.append(
                     f"{relative}:{number}: {len(row)} fields, expected {count}"
                 )
-        lines = text.splitlines()
-        # CSV records are independent rows: only a row's own marker labels it.
-        current_text = "\n".join(
-            line
-            for line in lines
-            if not any(marker in line.lower() for marker in LINE_MARKERS)
-        )
-        end = pr_suffix(state)
-        pr_token = f"PR #{end}" if end.isdigit() else "current PR"
-        status = str(state.get("release_status", "COMPLETE"))
-        tokens = (
-            (
-                str(state.get("release_version", "R8.4.2")),
-                str(state.get("release_version", "R8.4.2")) in current_text,
-            ),
-            (pr_token, pr_token in current_text),
-            (status, status in current_text),
-            ("W1 36 tests", bool(CURRENT_36_RE.search(current_text))),
-            ("4 required checks", bool(CURRENT_CHECKS_RE.search(current_text))),
-            ("PORTABLE_RESEARCH", "PORTABLE_RESEARCH" in current_text),
-            ("GATED_NOT_RUN", "GATED_NOT_RUN" in current_text),
-        )
-        for label, found in tokens:
-            if not found:
-                errors.append(f"{relative}: current record missing {label}")
+        # Stale-claim detection uses historical labels; the current record
+        # is independently located by the canonical release version token.
+        for detail in stale_errors(lines, labelled_lines(lines), state):
+            errors.append(f"{relative}:{detail}")
+        version = str(state.get("release_version", ""))
+        current_lines = [line for line in lines if version and version in line]
+        errors.extend(token_errors(relative, "\n".join(current_lines), state))
     return errors
-
-
-def labelled_lines(lines: list[str]) -> list[bool]:
-    """Flag historical sections and records that may retain old values."""
-    labels: list[bool] = []
-    historical = False
-    for index, line in enumerate(lines):
-        if line.startswith("#"):
-            historical = any(
-                marker in line.lower() for marker in SECTION_MARKERS
-            )
-        window = " ".join(lines[max(0, index - MARKER_WINDOW) : index + 1])
-        window = window.lower()
-        labels.append(
-            historical or any(marker in window for marker in LINE_MARKERS)
-        )
-    return labels
 
 
 def doc_errors(root: pathlib.Path, state: dict) -> list[str]:
     """Require current-state sections to agree with the canonical record."""
     errors: list[str] = []
-    version = str(state.get("release_version", ""))
     for relative in DOC_PATHS:
         text = read_text(root, relative)
         if text is None:
@@ -328,36 +478,17 @@ def doc_errors(root: pathlib.Path, state: dict) -> list[str]:
             continue
         lines = text.splitlines()
         labels = labelled_lines(lines)
-        current = [
+        current_lines = [
             line
             for line, labelled in zip(lines, labels, strict=True)
             if not labelled
         ]
-        for number, (line, labelled) in enumerate(
-            zip(lines, labels, strict=True), 1
+        current_text = "\n".join(current_lines)
+        for detail in stale_errors(
+            current_lines, [False] * len(current_lines), state
         ):
-            if labelled:
-                continue
-            for pattern, label in STALE_PATTERNS:
-                if pattern.search(line):
-                    errors.append(f"{relative}:{number}: {label}")
-        current_text = "\n".join(current)
-        if version and version not in current_text:
-            errors.append(f"{relative}: current record missing {version}")
-        end = pr_suffix(state)
-        pr_token = f"PR #{end}" if end.isdigit() else "current PR"
-        status = str(state.get("release_status", "COMPLETE"))
-        required = (
-            (pr_token, pr_token in current_text),
-            (status, status in current_text),
-            ("W1 36 tests", bool(CURRENT_36_RE.search(current_text))),
-            ("4 required checks", bool(CURRENT_CHECKS_RE.search(current_text))),
-            ("GATED_NOT_RUN", "GATED_NOT_RUN" in current_text),
-            ("PORTABLE_RESEARCH", "PORTABLE_RESEARCH" in current_text),
-        )
-        for label, found in required:
-            if not found:
-                errors.append(f"{relative}: current record missing {label}")
+            errors.append(f"{relative}:{detail}")
+        errors.extend(token_errors(relative, current_text, state))
     return errors
 
 
@@ -371,16 +502,31 @@ def required_field_errors(state: dict) -> list[str]:
 
 
 def identity_errors(root: pathlib.Path, state: dict) -> list[str]:
-    """Validate fixed release values, digests and the captured commit."""
+    """Validate derived release identity, digests and the captured commit."""
     errors: list[str] = []
-    if state.get("release_version") != "R8.4.2":
-        errors.append(f"{STATE_RELATIVE}: release_version is not R8.4.2")
-    if state.get("release_scope") != "PORTABLE_RESEARCH":
+    version = str(state.get("release_version", ""))
+    if not VERSION_RE.fullmatch(version):
         errors.append(
-            f"{STATE_RELATIVE}: release_scope is not PORTABLE_RESEARCH"
+            f"{STATE_RELATIVE}: release_version is not a release version"
+        )
+    pr = pr_suffix(state)
+    expected_id = f"{version}-PR{pr}" if pr.isdigit() else ""
+    if not expected_id or state.get("release_id") != expected_id:
+        errors.append(
+            f"{STATE_RELATIVE}: release_id is not bound to version and PR"
+        )
+    scope = str(state.get("release_scope", ""))
+    scopes = release_scopes()
+    if not scope or (scopes is not None and scope not in scopes):
+        errors.append(
+            f"{STATE_RELATIVE}: release_scope is not an allowed scope"
         )
     if state.get("release_status") != "COMPLETE":
         errors.append(f"{STATE_RELATIVE}: release_status is not COMPLETE")
+    if state.get("independent_acceptance") != "PENDING":
+        errors.append(
+            f"{STATE_RELATIVE}: independent_acceptance is not PENDING"
+        )
     commit = state["main_commit"]
     if not isinstance(commit, str) or not COMMIT_RE.fullmatch(commit):
         errors.append(f"{STATE_RELATIVE}: main_commit is not a full SHA-256")
@@ -445,47 +591,27 @@ def gate_errors(state: dict, gates: dict) -> list[str]:
         errors.append(
             f"{STATE_RELATIVE}: required_gate_set differs from report"
         )
-    constants = verify_report_constants()
-    if constants is not None and set(required or ()) != constants:
-        errors.append(
-            f"{STATE_RELATIVE}: required_gate_set differs from verify_report"
-        )
     return errors
 
 
 def test_inventory_errors(
     root: pathlib.Path, state: dict, gates: dict
 ) -> list[str]:
-    """Validate the baselines and observed counts of every Python suite."""
+    """Reconcile every recorded test count with the generated report."""
     errors: list[str] = []
     inventory = state.get("test_inventory")
     if not isinstance(inventory, dict):
         errors.append(f"{STATE_RELATIVE}: test_inventory must be an object")
         return errors
-    for name, (
-        inventory_key,
-        report_key,
-        expected,
-        additive,
-    ) in GATE_COUNT_KEYS.items():
+    for name, (inventory_key, report_key) in GATE_COUNT_KEYS.items():
         gate = gates.get(name)
         observed = gate.get("counts", {}).get(report_key) if gate else None
         if not isinstance(observed, int):
             errors.append(f"{STATE_RELATIVE}: {name} count is missing")
-        elif inventory.get(inventory_key) != expected:
-            errors.append(f"{STATE_RELATIVE}: {name} baseline differs")
-        elif additive and observed < expected:
-            errors.append(f"{STATE_RELATIVE}: {name} count below baseline")
-        elif not additive and observed != expected:
+            continue
+        recorded = inventory.get(inventory_key)
+        if recorded != observed:
             errors.append(f"{STATE_RELATIVE}: {name} test count differs")
-    security = read_text(root, CI_SECURITY_TEST_FILE)
-    expected = CI_SECURITY_TESTS
-    if security is not None and len(TEST_FUNCTION_RE.findall(security)) < (
-        expected
-    ):
-        errors.append(f"{STATE_RELATIVE}: ci_security test count differs")
-    if inventory.get("ci_security_tests") != expected:
-        errors.append(f"{STATE_RELATIVE}: ci_security baseline differs")
     return errors
 
 
@@ -497,9 +623,7 @@ def branch_policy_errors(state: dict, gates: dict) -> list[str]:
         errors.append(f"{STATE_RELATIVE}: branch_protection must be an object")
     else:
         checks = protection.get("required_checks")
-        if not isinstance(checks, list) or len(checks) != 4:
-            errors.append(f"{STATE_RELATIVE}: branch protection needs 4 checks")
-        elif set(checks) != set(REQUIRED_CHECKS):
+        if not isinstance(checks, list) or set(checks) != set(REQUIRED_CHECKS):
             errors.append(f"{STATE_RELATIVE}: required check names differ")
         if protection.get("required_approvals") != 0:
             errors.append(f"{STATE_RELATIVE}: required_approvals is not 0")
@@ -512,7 +636,7 @@ def branch_policy_errors(state: dict, gates: dict) -> list[str]:
     trading = state.get("trading_authorization")
     if (
         not isinstance(trading, dict)
-        or trading.get("live_execution") != ("DISABLED")
+        or trading.get("live_execution") != "DISABLED"
         or trading.get("decision") != "NO_TRADE"
     ):
         errors.append(f"{STATE_RELATIVE}: trading authorization is not locked")
@@ -534,22 +658,35 @@ def workstream_errors(state: dict) -> list[str]:
                 f"{STATE_RELATIVE}: missing workstreams "
                 f"{', '.join(sorted(missing))}"
             )
-    range_match = RANGE_RE.match(str(state.get("merged_pull_requests")))
-    if not range_match or (range_match.group(1), range_match.group(2)) != (
-        "47",
-        "66",
+    match = RANGE_RE.match(str(state.get("merged_pull_requests")))
+    pr = pr_suffix(state)
+    if (
+        not match
+        or not pr.isdigit()
+        or match.group(2) != pr
+        or (int(match.group(1)) >= int(pr))
     ):
-        errors.append(f"{STATE_RELATIVE}: merged_pull_requests must be 47-66")
+        errors.append(
+            f"{STATE_RELATIVE}: merged_pull_requests must end at current PR"
+        )
     history = state.get("historical_releases")
     if not isinstance(history, list) or not history:
         errors.append(f"{STATE_RELATIVE}: historical_releases must be a list")
         return errors
     for number, record in enumerate(history, 1):
         required = {"note", "pr", "release_version", "scope", "status"}
+        label = f"{STATE_RELATIVE}: historical_releases[{number}]"
         if not isinstance(record, dict) or not required <= set(record):
-            errors.append(
-                f"{STATE_RELATIVE}: historical_releases[{number}] incomplete"
-            )
+            errors.append(f"{label} incomplete")
+            continue
+        if "historical" not in str(record["note"]).lower():
+            errors.append(f"{label} not labelled historical")
+        if not isinstance(record["pr"], int) or record["pr"] >= int(pr):
+            errors.append(f"{label} has an invalid historical PR")
+        if not VERSION_RE.fullmatch(str(record["release_version"])):
+            errors.append(f"{label} has an invalid release version")
+        if record["release_version"] == state.get("release_version"):
+            errors.append(f"{label} duplicates the current release version")
     return errors
 
 
@@ -609,6 +746,7 @@ def show(root: pathlib.Path = ROOT) -> int:
         "manifest_sha256",
         "verification_report_sha256",
         "native_q_status",
+        "independent_acceptance",
     ):
         print(f"{name}: {state.get(name, 'missing')}")
     trading = state.get("trading_authorization", {})

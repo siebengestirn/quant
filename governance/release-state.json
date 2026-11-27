@@ -9,8 +9,8 @@
       "core build and tests"
     ]
   },
-  "capture_context": "HISTORICAL capture at PR #66; current volatile identifiers are in the external final bundle MANIFEST.md",
-  "captured_state_basis": "Captured at PR #66; volatile pins are verified against git HEAD, the assurance report and the current release manifest",
+  "capture_context": "Point-in-time capture at PR #67; volatile pins are verified against git HEAD, the assurance report and the current release manifest, not a claim about later live state",
+  "captured_state_basis": "Captured at PR #67; verified against git HEAD, the assurance report and the current release manifest",
   "current_workstreams": {
     "W1": "PARTIAL",
     "W1-D": "PENDING",
@@ -76,18 +76,26 @@
       "release_version": "R8.4.1",
       "scope": "PORTABLE_RESEARCH",
       "status": "COMPLETE"
+    },
+    {
+      "note": "HISTORICAL release history at PR #66: R8.4.2 COMPLETE with 36 W1 tests, 121 release-bundle tests, 161 verify-report tests, 11 CI security tests, 4 required checks and native q GATED_NOT_RUN; merge 83b6e435fc574f33f538c4b2a97e66976eac7989; bundle digest 0deebdd099912cfc4e2045d8a2c377ca4825f8382b50d600aa86f7dfa724adc3",
+      "pr": 66,
+      "release_version": "R8.4.2",
+      "scope": "PORTABLE_RESEARCH",
+      "status": "COMPLETE"
     }
   ],
-  "main_captured_basis": "captured at PR #66; verified against git HEAD by scripts/check_release_state.py",
-  "main_commit": "83b6e435fc574f33f538c4b2a97e66976eac7989",
-  "manifest_basis": "captured from the R8.4.2 final release manifest; verified against the current bundle",
-  "manifest_sha256": "0deebdd099912cfc4e2045d8a2c377ca4825f8382b50d600aa86f7dfa724adc3",
-  "merged_pull_requests": "47-66",
+  "independent_acceptance": "PENDING",
+  "main_captured_basis": "captured at PR #67; verified against git HEAD by scripts/check_release_state.py",
+  "main_commit": "8ab4b6747fcd0daa79f9cdd54f2addd21b3b3e2e",
+  "manifest_basis": "captured from the R8.4.3 final release manifest; verified against the current bundle",
+  "manifest_sha256": "8edb3ccb7be34fdb65d76605a818cb65621e6be34549f6297c3549cc7766349c",
+  "merged_pull_requests": "47-67",
   "native_q_status": "GATED_NOT_RUN",
-  "release_id": "R8.4.2-PR66",
+  "release_id": "R8.4.3-PR67",
   "release_scope": "PORTABLE_RESEARCH",
   "release_status": "COMPLETE",
-  "release_version": "R8.4.2",
+  "release_version": "R8.4.3",
   "report_basis": "captured from data/assurance/verification-report.json; verified byte for byte",
   "required_gate_set": [
     "ci_security_tests",
@@ -104,19 +112,19 @@
     "w1"
   ],
   "test_inventory": {
-    "ci_security_tests": 11,
+    "ci_security_tests": 14,
     "cpp_checks": 14114,
     "native_q_checker_tests": 8,
     "portable_pytest": 51,
-    "release_bundle_tests": 121,
+    "release_bundle_tests": 141,
     "sanitizer_checks": 14114,
-    "verify_report_tests": 161,
-    "w1": 36
+    "verify_report_tests": 171,
+    "w1": 46
   },
   "trading_authorization": {
     "decision": "NO_TRADE",
     "live_execution": "DISABLED"
   },
   "verification_captured_basis": "captured from data/assurance/verification-report.json; verified byte for byte",
-  "verification_report_sha256": "44e1e4c2fd8e98b5530e50fb9e8019e5c7712bc977a1961b7ef95764cb1b862f"
+  "verification_report_sha256": "057240cc875da3b8d839e06d99763218af86b0ee5c92fe1ff32caf6f3dc9d47c"
 }

@@ -1,38 +1,40 @@
-# QUANT release status — 27 November 2026 (record through PR #66)
+# QUANT release status — 28 November 2026 (record through PR #67)
 
 ## CURRENT RELEASE RECORD (authoritative)
 
 Canonical machine-readable state: `governance/release-state.json`, checked
-by `scripts/check_release_state.py`. R8.4.2 / PR #66 is COMPLETE; merged
-PRs 47-66; scope PORTABLE_RESEARCH; 4 required checks with zero GitHub
-approvals; native q GATED_NOT_RUN; trading DISABLED / NO TRADE. W1 is
-PARTIAL with 36 offline tests and W1-D PENDING. The exact current main SHA,
-CI runs and bundle digest are in `MANIFEST.md` of the current final release
-bundle (external artifact), with captured pins in the canonical state file.
-PR #64 was an intermediate R8.4.2 step and is HISTORICAL.
+by `scripts/check_release_state.py`. R8.4.3 / PR #67 is COMPLETE; merged
+PRs 47-67; scope PORTABLE_RESEARCH; 4 required checks with zero GitHub
+approvals; native q GATED_NOT_RUN; trading DISABLED / NO TRADE; independent
+acceptance PENDING. W1 is PARTIAL with 46 offline tests and W1-D PENDING.
+The exact current main SHA, CI runs and bundle digest are in `MANIFEST.md`
+of the current final release bundle (external artifact), with captured pins
+in the canonical state file. R8.4.2 / PR #66 and PR #64 are HISTORICAL.
 
 ## Release history (HISTORICAL)
 
 The exact current main SHA, hosted CI runs and bundle digest are recorded in
 `MANIFEST.md` of the current final release bundle (external artifact,
-regenerated after R8.4.2), not as immutable identifiers in this document.
-Values labelled "at PR #58", "at PR #61", "at PR #62" or "at PR #63" are
-HISTORICAL release records; they do not claim the current head after
-reorganization. PR #61 merged the R8.3 + W1 A/B/C work (HISTORICAL). PR #62
-merged R8.4, which is COMPLETE at that release: native-q conclusion
+regenerated after R8.4.3), not as immutable identifiers in this document.
+Values labelled "at PR #58", "at PR #61", "at PR #62", "at PR #63" or
+"at PR #66" are HISTORICAL release records; they do not claim the current
+head after reorganization. PR #61 merged the R8.3 + W1 A/B/C work
+(HISTORICAL). PR #62 merged R8.4, which is COMPLETE at that release:
+native-q conclusion
 mapping, remote provenance, governance sync and W1 snapshot reproducibility.
 PR #63 merged R8.4.1, which is COMPLETE at
 `399652ca6803d65b1c460f0c57419f619c6a950d`: hosted CI run `46023401318`
 succeeded with native-q skipped/GATED_NOT_RUN, the 117-entry bundle digest
 `f67054a7586e26219c21e3b25682bb79ea70fa3dd9b2159d212dd97813b7c795` is
 HISTORICAL, 28 W1 offline tests were recorded and the scope was
-PORTABLE_RESEARCH. PR #64 was the intermediate R8.4.2 step; the final R8.4.2
-merge is PR #66 (shown in the current record above). The public web PR index
+PORTABLE_RESEARCH. PR #64 was the intermediate R8.4.2 step and PR #66 was
+the final R8.4.2 merge; both are HISTORICAL. The final R8.4.3 merge is
+PR #67 (shown in the current record above). The public web PR index
 showed "29 closed" because it was not fully paginated; it is not the
 authoritative inventory. PR #44 was an earlier technical remediation and
 PR #45 enforced branch protection. PR #58 was the closeout at that time;
-PR #56, PR #57, PR #58, PR #61, PR #62, PR #63, PR #64, PR #65 and PR #66
-are merged corrections.
+PR #56, PR #57, PR #58, PR #61, PR #62, PR #63, PR #64, PR #65, PR #66
+and PR #67 are merged corrections.
 
 SUPERSEDED — historical policy before 2026-11-27: open PRs after PR #46: 0;
 branches: `main` only. This is a historical inventory snapshot, not the live
@@ -80,13 +82,16 @@ as evidence.
 | final `main` (at PR #58) | run `45969624206`, all three required jobs pass | HISTORICAL post-merge success at PR #58 on `1a91da2…`; current head in bundle `MANIFEST.md` |
 | #61 | run `46007348694`, three jobs pass and native-q skipped | HISTORICAL at PR #61: R8.3 + W1 A/B/C merge `201f5ba…`; native-q GATED_NOT_RUN, never reported as passed |
 | #62 | run `46015103880`, three jobs pass and native-q skipped | HISTORICAL at PR #62: R8.4 merge `66f037c…`; native-q GATED_NOT_RUN, never reported as passed |
-| #63 | run `46023401318`, three jobs pass and native-q skipped | HISTORICAL at PR #63: R8.4.1 merge `399652ca…`; native-q GATED_NOT_RUN, never reported as passed; current release until PR #64 merges |
+| #63 | run `46023401318`, three jobs pass and native-q skipped | HISTORICAL at PR #63: R8.4.1 merge `399652ca…`; native-q GATED_NOT_RUN, never reported as passed |
+| #66 | four required checks pass, native-q skipped | HISTORICAL at PR #66: R8.4.2 merge `83b6e435…`; native-q GATED_NOT_RUN, never reported as passed |
+| #67 | run `46049228842`, 4 required checks pass, native-q skipped | CURRENT at PR #67: R8.4.3 merge `8ab4b674…`; native-q GATED_NOT_RUN, never reported as passed |
 
 It is therefore **not** true that every PR head was green: PR #34 was merged
 with a red style check and was repaired by PR #35. Hosted CI at PR #62 and
 PR #63 (both HISTORICAL) succeeded with native-q skipped/GATED_NOT_RUN;
-the current head is in `MANIFEST.md` of the current final release bundle
-(external artifact, regenerated after R8.4.2).
+at PR #67 four required checks passed on hosted run `46049228842` with
+native q GATED_NOT_RUN. The current head is in `MANIFEST.md` of the current
+final release bundle (external artifact, regenerated after R8.4.3).
 
 ## Governance — SUPERSEDED historical policy before 2026-11-27
 
@@ -146,8 +151,8 @@ independent acceptance.
 Research INCONCLUSIVE/negative; White Reality Check and Hansen SPA unavailable;
 cost model GROSS_ONLY; final holdout SEALED_NOT_EVALUATED. Provider streaming,
 contract-note reconciliation, corporate-action ingestion and operational paper
-trading NOT IMPLEMENTED. W1-A/B/C map pinned public masters offline: 36
-tests at PR #66, four bundled snapshots and 9,926 VERIFIED / 174 UNMAPPED
+trading NOT IMPLEMENTED. W1-A/B/C map pinned public masters offline: 46
+tests at PR #67, four bundled snapshots and 9,926 VERIFIED / 174 UNMAPPED
 identities, but W1-D live consistency and effective dating are PENDING;
 no full W1 exit is claimed. Native q hosted required check GATED/NOT REQUIRED
 (skipped/GATED_NOT_RUN at PR #61, PR #62 and PR #63, all HISTORICAL);
@@ -156,7 +161,8 @@ conformance NOT ESTABLISHED; independent reviewer acceptance for recorded
 releases NOT RECORDED; live execution DISABLED; trading decision NO TRADE.
 The R8.4 and R8.4.1 release scopes were PORTABLE_RESEARCH (HISTORICAL).
 R8.4.1 is COMPLETE at PR #63 (HISTORICAL release record). R8.4.2 / PR #66
-is COMPLETE with 4 required checks and native q GATED_NOT_RUN.
+is COMPLETE (HISTORICAL). R8.4.3 / PR #67 is COMPLETE with 4 required
+checks and native q GATED_NOT_RUN.
 
 ## Governance evidence refresh (27 November 2026) — SUPERSEDED
 
@@ -173,17 +179,19 @@ export of the endpoint as configured at that time, not the live configuration.
 The JSON export is untouched evidence. `git-policy.json` declares policy;
 only an authenticated API export proves live GitHub configuration.
 
-## ACTIVE POLICY — Integration record — 27 November 2026 (updated through PR #66) <!-- https://github.com/siebengestirn/quant/pull/66 -->
+## ACTIVE POLICY — Integration record — 28 November 2026 (updated through PR #67) <!-- https://github.com/siebengestirn/quant/pull/67 -->
 
 This section is the ACTIVE POLICY. It supersedes the one-approval governance
-material above; zero PRs were open at the PR #62 merge (HISTORICAL); PR #63
-and PR #66 were merged under the same policy. `main` is the sole branch.
+material above; zero PRs were open at the PR #62 merge (HISTORICAL); PR #63,
+PR #66 and PR #67 were merged under the same policy. `main` is the sole
+branch.
 The live PR inventory is external.
 
 All seven remediation PRs #47–#53 were merged sequentially with merge commits
 after fresh exact-head CI on each synced head; PRs #56–#58, #61 (R8.3/W1),
 #62 (R8.4), #63 (R8.4.1), #64 (intermediate R8.4.2 step, HISTORICAL),
-#65 and #66 (R8.4.2 final) were later merged under the same policy.
+#65, #66 (R8.4.2 final) and #67 (R8.4.3 final) were later merged under the
+same policy.
 `main` is the sole integration branch. Branch protection was corrected to
 the single-developer policy used in the sibling repositories: zero required
 GitHub approvals, explicit self-review checklist, exact-head CI evidence,
@@ -194,16 +202,16 @@ This record supersedes the earlier seven-open-PR snapshot. Operating status
 remains: research INCONCLUSIVE/negative; holdout SEALED_NOT_EVALUATED;
 provider streaming, contract-note reconciliation, corporate actions and
 operational paper trading NOT IMPLEMENTED; W1-A/B/C offline public-master
-evidence only (36 tests at PR #66, four bundled snapshots, 9,926 VERIFIED /
+evidence only (46 tests at PR #67, four bundled snapshots, 9,926 VERIFIED /
 174 UNMAPPED), with W1-D effective dating and live consistency PENDING and
 no full W1 exit; native q hosted tier GATED (skipped/GATED_NOT_RUN at
 PR #62 and PR #63, both HISTORICAL); power-loss durability NOT PROVEN;
 intraday/HFT UNSUPPORTED; multi-asset venue conformance NOT ESTABLISHED;
-live execution DISABLED; decision NO TRADE. The R8.4, R8.4.1 and R8.4.2
-release scopes were PORTABLE_RESEARCH. R8.4.1 is COMPLETE at PR #63
-(HISTORICAL release record). R8.4.2 / PR #66 is COMPLETE with 4 required
-checks, 36 W1 tests and native q GATED_NOT_RUN; the intermediate PR #64
-runner and assurance work is HISTORICAL.
+live execution DISABLED; decision NO TRADE. The R8.4, R8.4.1, R8.4.2 and
+R8.4.3 release scopes were PORTABLE_RESEARCH. R8.4.1 is COMPLETE at PR #63
+(HISTORICAL release record). R8.4.2 / PR #66 is COMPLETE (HISTORICAL).
+R8.4.3 / PR #67 is COMPLETE with 4 required checks, 46 W1 tests and native q
+GATED_NOT_RUN; the intermediate PR #64 runner work and PR #66 are HISTORICAL.
 
 ### Active release-bundle policy (R8.1 corrective release)
 
@@ -298,25 +306,28 @@ Local verification recorded 28 W1 offline tests on captured bytes; W1 is
 PARTIAL with 9,926 VERIFIED / 174 UNMAPPED identities and four bundled
 pinned snapshots, W1-D effective dating and live consistency remain
 PENDING, and no full W1 exit is claimed. The release scope was
-PORTABLE_RESEARCH and native q remained GATED_NOT_RUN. R8.4.1 is COMPLETE
-and is the CURRENT RELEASE until PR #64 merges; R8.4.2 / PR #64 is IN
-PROGRESS (runner isolation, native_q_checker gate, skip enforcement,
-explicit W1 evidence and hosted release assurance) with no exit claim.
-Independent acceptance is NOT RECORDED and native-q runner provisioning
-remains OPEN under TD-015.
+PORTABLE_RESEARCH and native q remained GATED_NOT_RUN. R8.4.1 was the
+CURRENT RELEASE until PR #64 merges; R8.4.2 was IN PROGRESS at PR #64
+(runner isolation, native_q_checker gate, skip enforcement, explicit W1
+evidence and hosted release assurance). Both are HISTORICAL; the current
+release is R8.4.3 / PR #67. Independent acceptance remains PENDING and
+native-q runner provisioning stays OPEN under TD-015.
 
 Branch protection was captured from the authenticated endpoint
 `https://api.github.com/repos/siebengestirn/quant/branches/main/protection`
-at `2026-11-27T16:10:19Z` with HTTP 200, API version `2022-11-28` and
-response SHA-256
+at `2026-11-27T18:55:49Z` with HTTP 200 (HTTP/2.0), API version
+`2022-11-28` and response SHA-256
 `de633dabfe3016d17f2885c1179282d68736f50692cacd51e9cbdb31acf02356`.
-The capture recorded `main` as `47b75c246671c71accefcce8840532f9e7f01c0a`
-at capture time; later heads are in the bundle `MANIFEST.md`. It
-records `required_approvals` 0 and four required checks (`core build and
-tests`, `ASan/UBSan`, `Style contract (reference guides)`,
-`Release assurance (offline)`). The tracked
-record is `governance/branch-protection-capture.json` in the repository;
-the bundle copy is `evidence/branch-protection.json` in the external
-final bundle. `git-policy.json` declares policy; only an authenticated
-API export proves the live GitHub configuration. The historical JSON
-exports do not establish the current zero-approval setting.
+The capture is a point-in-time snapshot at PR #67 and records `main` as
+`8ab4b6747fcd0daa79f9cdd54f2addd21b3b3e2e`, the current main SHA; later
+heads are in the bundle `MANIFEST.md`. It records `required_approvals` 0,
+`required_conversation_resolution` true, `required_linear_history` false,
+force pushes and branch deletion disabled, `enforce_admins` true and four
+strict required checks (`core build and tests`, `ASan/UBSan`,
+`Style contract (reference guides)`, `Release assurance (offline)`). The
+tracked record is `governance/branch-protection-capture.json`; the earlier
+PR #64 capture is retained under its `historical_captures` array. The
+bundle copy is `evidence/branch-protection.json` in the external final
+bundle. `git-policy.json` declares policy; only an authenticated API
+export proves the live GitHub configuration. The historical JSON exports
+do not establish the current zero-approval setting.
