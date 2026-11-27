@@ -403,7 +403,7 @@ def stage_tracked(quant_root: Path, head: str) -> None:
 def stage_optional_evidence(quant_root: Path) -> None:
     """Copy optional data evidence directories when they exist.
 
-    Disposition files from the working tree are deliberately excluded: they
+    Disposition files from the working tree are excluded: they
     are regenerated from the staged audit bytes by
     ``regenerate_audit_dispositions`` and must never be bundled stale.
     """

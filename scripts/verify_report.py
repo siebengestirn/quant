@@ -31,7 +31,7 @@ The ``ci_security_tests``, ``audit_disposition_tests`` and
 ``runner_attestation_tests`` gates are mandatory and enforce the same skip
 policy.
 
-The ``audit_disposition_evidence`` gate is deliberately distinct from the
+The ``audit_disposition_evidence`` gate is distinct from the
 disposition *test* gate: it executes the offline audit evidence verification
 command on the generated JSON files. In a clean checkout those generated
 files are absent, so the gate is NOT_APPLICABLE with an explicit reason. It
