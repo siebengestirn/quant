@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Capture verifiable runner evidence for the gated native-q tier.
+"""Capture in-job runner evidence for the gated native-q tier.
 
-The licensed qualification job must show which runner executed it, on which
-event and exact commit, and with which q runtime. GitHub does not publish
-runner labels through an environment variable, so the workflow supplies the
-label set that its ``runs-on`` declaration requires. Evidence is written
-before validation so a failing qualification still leaves an auditable
-artifact.
+The licensed qualification job records the event, exact commit, declared
+runner labels and q runtime. GitHub does not publish runner labels or the
+runner group through environment variables, so these values are declared by
+the workflow, not observed here. The authoritative observed identity is
+attested after the job by ``scripts/attest_runner.py`` through the GitHub API.
+Evidence is written before validation so a failing qualification still leaves
+an auditable artifact.
 
 Usage:
   python3 scripts/capture_runner_evidence.py --output PATH
@@ -35,6 +36,13 @@ EVIDENCE_FIELDS = (
     "repository",
     "workflow",
     "job",
+)
+ATTESTATION_PATH = "data/assurance/runner-attestation.json"
+DEREGISTRATION_REQUIREMENT = (
+    "The governed native-q runner must be deregistered and destroyed by the "
+    "external runner operator after every single job, on success and on "
+    "failure. This in-job capture cannot verify deregistration; the separate "
+    "post-job API attestation does not claim it without API evidence."
 )
 
 
@@ -111,11 +119,19 @@ def capture(
         "runner_labels": parse_labels(
             env.get("RUNNER_LABELS", env.get("QUANT_RUNNER_LABELS", ""))
         ),
+        "runner_labels_source": "workflow-declared; not API-observed",
         "repository": env.get("GITHUB_REPOSITORY", ""),
         "workflow": env.get("GITHUB_WORKFLOW", ""),
         "job": env.get("GITHUB_JOB", ""),
-        "runner_group": RUNNER_GROUP_EXPECTATION,
+        "runner_group_expected": RUNNER_GROUP_EXPECTATION,
         "runner_group_observed": env.get("RUNNER_GROUP", "").strip(),
+        "identity_attestation_required": True,
+        "identity_attestation_path": ATTESTATION_PATH,
+        "ephemeral_lifecycle": {
+            "deregistration_verified": False,
+            "deregistration_evidence": "",
+            "requirement": DEREGISTRATION_REQUIREMENT,
+        },
         "qhome": env.get("QHOME", ""),
         "q_version": version.strip(),
         "q_runtime_version": version.strip(),
@@ -149,11 +165,21 @@ def validate(evidence: Mapping[str, object]) -> list[str]:
     for field in EVIDENCE_FIELDS:
         if not str(evidence.get(field, "")).strip():
             problems.append(f"missing runner evidence: {field}")
+    expected_group = str(evidence.get("runner_group_expected", "")).strip()
+    if expected_group != RUNNER_GROUP_EXPECTATION:
+        problems.append("runner group expectation is not quant-native-q")
     observed = str(evidence.get("runner_group_observed", "")).strip()
-    if observed and observed != str(evidence.get("runner_group", "")):
+    if observed and observed != expected_group:
         problems.append(
             "runner group differs from the dedicated-runner expectation"
         )
+    lifecycle = evidence.get("ephemeral_lifecycle")
+    if isinstance(lifecycle, dict):
+        if (
+            lifecycle.get("deregistration_verified") is True
+            and not str(lifecycle.get("deregistration_evidence", "")).strip()
+        ):
+            problems.append("deregistration claimed without evidence")
     return problems
 
 

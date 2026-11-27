@@ -179,7 +179,7 @@
       "class": "policy",
       "owner": "maintainer",
       "path": "governance/release-state.json",
-      "purpose": "Canonical machine-readable R8.4.2 release and governance state",
+      "purpose": "Canonical machine-readable R8.4.3 release and governance state",
       "retention": "current"
     },
     {

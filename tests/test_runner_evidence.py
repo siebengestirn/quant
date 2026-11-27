@@ -80,7 +80,15 @@ def test_valid_evidence_is_captured_and_accepted(tmp_path: Path) -> None:
     assert payload["head_sha"] == SHA
     assert payload["expected_sha"] == SHA
     assert payload["runner_labels"] == ["self-hosted", "quant-native-q"]
-    assert payload["runner_group"] == "quant-native-q"
+    assert payload["runner_labels_source"] == (
+        "workflow-declared; not API-observed"
+    )
+    assert payload["runner_group_expected"] == "quant-native-q"
+    assert "runner_group" not in payload
+    assert payload["identity_attestation_required"] is True
+    assert payload["identity_attestation_path"] == (
+        "data/assurance/runner-attestation.json"
+    )
     assert payload["qhome"] == "/opt/kx/q"
     assert payload["q_version"] == "4.1.0"
     assert runner_evidence.validate(payload) == []
@@ -100,6 +108,10 @@ def test_evidence_records_runner_identity_and_scope() -> None:
     assert evidence["job"] == "native-q"
     assert evidence["scope"] == "Q_PERSISTENCE"
     assert evidence["required_for_portable_research"] is False
+    lifecycle = evidence["ephemeral_lifecycle"]
+    assert lifecycle["deregistration_verified"] is False
+    assert lifecycle["deregistration_evidence"] == ""
+    assert "external runner operator" in lifecycle["requirement"]
 
 
 def test_missing_dedicated_label_fails_closed(tmp_path: Path) -> None:
@@ -171,3 +183,38 @@ def test_json_array_labels_are_accepted() -> None:
     """Runner labels may also arrive as a JSON array string."""
     labels = runner_evidence.parse_labels('["self-hosted", "quant-native-q"]')
     assert labels == ["self-hosted", "quant-native-q"]
+
+
+def test_missing_environment_group_is_not_claimed_as_observed(
+    tmp_path: Path,
+) -> None:
+    """An absent runner group env value is not reported as observed proof."""
+    result, output = run_capture(tmp_path, runner_env())
+    assert result.returncode == 0, result.stderr
+    assert read_payload(output)["runner_group_observed"] == ""
+
+
+def test_observed_group_mismatch_fails_closed(tmp_path: Path) -> None:
+    """An observed group outside the dedicated group is rejected."""
+    result, _ = run_capture(tmp_path, runner_env(RUNNER_GROUP="default"))
+    assert result.returncode == 1
+    assert "runner group differs" in result.stderr
+
+
+def test_deregistration_cannot_be_claimed_without_evidence() -> None:
+    """Lifecycle evidence cannot assert deregistration without API proof."""
+    evidence = runner_evidence.capture(
+        runner_env(), q_version="4.1.0", head_sha=SHA
+    )
+    lifecycle = evidence["ephemeral_lifecycle"]
+    assert isinstance(lifecycle, dict)
+    lifecycle["deregistration_verified"] = True
+    assert (
+        "deregistration claimed without evidence"
+        in runner_evidence.validate(evidence)
+    )
+    lifecycle["deregistration_evidence"] = "api-deactivated-at-2026-11-28"
+    assert (
+        "deregistration claimed without evidence"
+        not in runner_evidence.validate(evidence)
+    )

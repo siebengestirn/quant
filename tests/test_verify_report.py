@@ -18,6 +18,7 @@ _SPEC = importlib.util.spec_from_file_location(
 )
 assert _SPEC is not None and _SPEC.loader is not None
 VERIFY_REPORT = importlib.util.module_from_spec(_SPEC)
+sys.modules["verify_report"] = VERIFY_REPORT
 _SPEC.loader.exec_module(VERIFY_REPORT)
 
 PASS = VERIFY_REPORT.PASS
@@ -571,6 +572,11 @@ def test_report_has_versioned_schema_and_all_gates(
             "ci_security_tests",
             "tests/test_ci_security.py",
         ),
+        (
+            VERIFY_REPORT.run_audit_disposition_tests,
+            "audit_disposition_tests",
+            "tests/test_audit_disposition.py",
+        ),
     ],
 )
 def test_new_pytest_gates_reset_addopts(
@@ -874,6 +880,7 @@ def test_run_gates_includes_every_required_gate(
         "run_verify_report_tests": "verify_report_tests",
         "run_native_q_checker_tests": "native_q_checker_tests",
         "run_ci_security_tests": "ci_security_tests",
+        "run_audit_disposition_tests": "audit_disposition_tests",
         "run_style": "style",
         "run_freshness": "state_freshness",
         "run_audit": "terminology_audit",
@@ -1040,3 +1047,80 @@ def test_ci_security_gate_enforces_skip_policy(
     capture_pytest_steps(monkeypatch, output)
     gate = VERIFY_REPORT.run_ci_security_tests(allowed)
     assert gate["result"] == expected
+
+
+def test_audit_disposition_gate_is_required_and_command_is_exact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The disposition evidence suite is mandatory with the pinned command."""
+    calls = capture_pytest_steps(monkeypatch, "31 passed in 0.1s")
+    gate = VERIFY_REPORT.run_audit_disposition_tests()
+    assert "audit_disposition_tests" in REQUIRED_GATES
+    assert gate["name"] == "audit_disposition_tests"
+    assert gate["result"] == PASS
+    assert calls[0][0] == [
+        "python3",
+        "-m",
+        "pytest",
+        "tests/test_audit_disposition.py",
+        "-o",
+        "addopts=",
+        "-q",
+    ]
+    assert gate["command"] == (
+        "python3 -m pytest tests/test_audit_disposition.py -o addopts='' -q"
+    )
+    assert gate["counts"] == {
+        "passed": 31,
+        "failed": 0,
+        "errors": 0,
+        "skipped": 0,
+        "total": 31,
+    }
+
+
+@pytest.mark.parametrize(
+    ("output", "allowed", "expected"),
+    [
+        ("31 passed in 0.1s", (), PASS),
+        ("no tests ran in 0.05s", (), FAIL),
+        ("30 passed, 1 failed in 0.1s", (), FAIL),
+        ("30 passed, 1 error in 0.1s", (), FAIL),
+        (
+            "SKIPPED [1] tests/test_audit_disposition.py::test_x:42: reason\n"
+            "30 passed, 1 skipped in 0.1s",
+            (),
+            FAIL,
+        ),
+        (
+            "SKIPPED [1] tests/test_audit_disposition.py::test_x:42: reason\n"
+            "30 passed, 1 skipped in 0.1s",
+            (
+                {
+                    "test_id": "tests/test_audit_disposition.py::test_x",
+                    "reason": "documented review",
+                },
+            ),
+            PASS,
+        ),
+    ],
+    ids=[
+        "clean",
+        "zero-tests",
+        "failed",
+        "error",
+        "unapproved-skip",
+        "approved-skip",
+    ],
+)
+def test_audit_disposition_gate_enforces_skip_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    output: str,
+    allowed: tuple[dict[str, str], ...],
+    expected: str,
+) -> None:
+    """The new gate requires executed tests and approved skips only."""
+    capture_pytest_steps(monkeypatch, output)
+    gate = VERIFY_REPORT.run_audit_disposition_tests(allowed)
+    assert gate["result"] == expected
+    assert set(VERIFY_REPORT.PYTEST_COUNT_KEYS) <= gate["counts"].keys()

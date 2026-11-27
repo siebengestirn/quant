@@ -13,18 +13,27 @@ POLICY = ROOT / "git-policy.json"
 RELEASE_CHECK = "Release assurance (offline)"
 SELF_HOSTED = "self-hosted"
 NATIVE_LABEL = "quant-native-q"
-NATIVE_RUNS_ON = [SELF_HOSTED, NATIVE_LABEL]
+NATIVE_GROUP = "quant-native-q"
+NATIVE_RUNS_ON = {
+    "group": NATIVE_GROUP,
+    "labels": [SELF_HOSTED, NATIVE_LABEL],
+}
 SELF_HOSTED_GUARD = (
     "github.event_name != 'pull_request' && "
     "vars.QUANT_NATIVE_Q_ENABLED == 'true'"
 )
 PR_EXACT_REF = "${{ github.event.pull_request.head.sha || github.sha }}"
 FULL_SHA_RE = re.compile(r"@[0-9a-f]{40}$")
-OFFLINE_SUITES = (
+ALL_ASSURANCE_MODULES = (
+    "tests/test_instrument_master.py",
     "tests/test_release_bundle.py",
     "tests/test_verify_report.py",
     "tests/test_native_q_ci.py",
     "tests/test_ci_security.py",
+    "tests/test_runner_evidence.py",
+    "tests/test_clean_room.py",
+    "tests/test_release_state.py",
+    "tests/test_audit_disposition.py",
 )
 ASSURANCE = ROOT / "scripts" / "assurance.py"
 NATIVE_Q_SKIP_REASON = (
@@ -140,6 +149,11 @@ def commands(job: dict[str, Any]) -> str:
 def is_self_hosted(job: dict[str, Any]) -> bool:
     """Report whether a job declares a self-hosted runner or label set."""
     value = job.get("runs-on")
+    if isinstance(value, dict):
+        labels = value.get("labels")
+        if isinstance(labels, list):
+            return SELF_HOSTED in {str(item) for item in labels}
+        return str(value.get("group", "")) == NATIVE_GROUP
     if isinstance(value, list):
         return SELF_HOSTED in {str(item) for item in value}
     return str(value) == SELF_HOSTED
@@ -174,6 +188,7 @@ def test_workflow_subset_parses_jobs_triggers_and_permissions():
         "core",
         "sanitizers",
         "native-q",
+        "runner-attestation",
         "release-assurance",
         "style-contract",
     } <= set(jobs(document))
@@ -185,6 +200,8 @@ def test_native_q_has_explicit_pr_guard():
     """The licensed job carries the exact required pull_request guard."""
     native = jobs(workflow())["native-q"]
     assert native["runs-on"] == NATIVE_RUNS_ON
+    assert native["runs-on"]["group"] == NATIVE_GROUP
+    assert native["runs-on"]["labels"] == [SELF_HOSTED, NATIVE_LABEL]
     assert str(native["if"]) == SELF_HOSTED_GUARD
     assert not pr_can_reach(native)
 
@@ -192,7 +209,8 @@ def test_native_q_has_explicit_pr_guard():
 def test_native_q_uses_dedicated_runner_and_uploads_evidence():
     """The licensed job runs only on the labelled runner and records proof."""
     native = jobs(workflow())["native-q"]
-    assert NATIVE_LABEL in str(native["runs-on"])
+    assert NATIVE_LABEL in str(native["runs-on"]["labels"])
+    assert native["runs-on"]["group"] == NATIVE_GROUP
     assert "QUANT_NATIVE_Q_ENABLED" in str(native["if"])
     assert (
         "NOT a required status check for PORTABLE_RESEARCH"
@@ -216,6 +234,33 @@ def test_native_q_uses_dedicated_runner_and_uploads_evidence():
         for step in steps(native)
         if "upload-artifact@" in str(step.get("uses", ""))
         and "runner-evidence.json" in str(step.get("with", ""))
+    ]
+    assert uploads
+
+
+def test_runner_attestation_job_records_observed_api_identity():
+    """A hosted post-job attest reads the real runner id, group and labels."""
+    job = jobs(workflow())["runner-attestation"]
+    assert job["needs"] == "native-q"
+    assert str(job["if"]) == "always()"
+    assert job["runs-on"] == "ubuntu-latest"
+    assert not is_self_hosted(job)
+    assert job["permissions"] == {"actions": "read", "contents": "read"}
+    text = commands(job)
+    assert "scripts/attest_runner.py attest" in text
+    assert '--run-id "${{ github.run_id }}"' in text
+    assert '--job-id "$NATIVE_Q_JOB_ID"' in text
+    assert '--expected-sha "$EXPECTED_SHA"' in text
+    assert "--output data/assurance/runner-attestation.json" in text
+    assert "actions/runs/${GITHUB_RUN_ID}/jobs" in text
+    assert "max_by(.id)" in text
+    assert "NATIVE_Q_JOB_ID=%s" in text
+    assert '>> "$GITHUB_ENV"' in text
+    uploads = [
+        step
+        for step in steps(job)
+        if "upload-artifact@" in str(step.get("uses", ""))
+        and "runner-attestation.json" in str(step.get("with", ""))
     ]
     assert uploads
 
@@ -303,9 +348,11 @@ def test_release_assurance_runs_only_offline_suites():
         "python3 -m pytest tests/test_instrument_master.py -o addopts='' -q"
         in text
     )
-    for suite in OFFLINE_SUITES:
-        assert suite in text
+    for suite in ALL_ASSURANCE_MODULES:
+        assert suite in text, suite
     assert "-o addopts='' -q" in text
+    assert "python3 scripts/fetch_instrument_snapshots.py verify" in text
+    assert "python3 scripts/check_release_state.py check" in text
     assert "python3 scripts/style_contract.py" in text
     assert "python3 scripts/state_freshness.py" in text
     assert "python3 scripts/release_bundle.py verify" in text
@@ -313,11 +360,13 @@ def test_release_assurance_runs_only_offline_suites():
 
 
 def test_ci_security_suite_is_in_hosted_release_assurance():
-    """CI security invariants run in the required hosted assurance job."""
+    """Every offline assurance module runs in the hosted release job."""
     text = commands(jobs(workflow())["release-assurance"])
-    assert "tests/test_ci_security.py" in text
     offline_block = text[text.index("tests/test_release_bundle.py") :]
-    assert "tests/test_ci_security.py" in offline_block
+    for suite in ALL_ASSURANCE_MODULES:
+        assert suite in text, suite
+    for suite in ALL_ASSURANCE_MODULES[1:]:
+        assert suite in offline_block, suite
     assert "-o addopts='' -q" in offline_block
 
 
@@ -358,6 +407,27 @@ def test_required_checks_include_release_assurance():
     ]
     assert len(checks) == 4
     assert "native-q" not in checks
+    assert "runner-attestation" not in checks
+    assert document["pr_review"]["required_approving_reviews"] == 0
+
+
+def test_git_policy_documents_runner_group_control():
+    """Policy records group selection, API attestation and ephemeral lifecycle."""
+    document = json.loads(POLICY.read_text(encoding="utf-8"))
+    control = document["automation"]["runner_group_control"]
+    assert control["declared_group"] == NATIVE_GROUP
+    assert control["required_label"] == NATIVE_LABEL
+    assert control["workflow_selection"].startswith(
+        "The native-q job selects group quant-native-q"
+    )
+    assert control["attestation_script"] == "scripts/attest_runner.py"
+    assert control["evidence_file"] == (
+        "data/assurance/runner-attestation.json"
+    )
+    assert control["post_job_api_attestation_required"] is True
+    assert control["ephemeral_single_job_runner_required"] is True
+    assert "deregister and destroy" in control["deregistration"]
+    assert "cannot verify deregistration" in control["deregistration"]
     assert document["pr_review"]["required_approving_reviews"] == 0
 
 

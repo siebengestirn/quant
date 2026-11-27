@@ -93,6 +93,7 @@ REQUIRED_GATES = frozenset(
         "verify_report_tests",
         "native_q_checker_tests",
         "ci_security_tests",
+        "audit_disposition_tests",
         "hosted_ci",
     }
 )
@@ -102,6 +103,7 @@ PYTEST_FILES = (
     "tests/test_dataset_adversarial.py",
 )
 CI_SECURITY_TEST_FILES = ("tests/test_ci_security.py",)
+AUDIT_DISPOSITION_TEST_FILES = ("tests/test_audit_disposition.py",)
 W1_TEST_FILES = ("tests/test_instrument_master.py",)
 RELEASE_BUNDLE_TEST_FILES = ("tests/test_release_bundle.py",)
 VERIFY_REPORT_TEST_FILES = ("tests/test_verify_report.py",)
@@ -626,6 +628,16 @@ def run_ci_security_tests(allowed_skips: object = None) -> dict:
     )
 
 
+def run_audit_disposition_tests(allowed_skips: object = None) -> dict:
+    """Run the mandatory audit disposition evidence suite."""
+    return pytest_gate(
+        "audit_disposition_tests",
+        AUDIT_DISPOSITION_TEST_FILES,
+        "audit disposition tests",
+        allowed_skips,
+    )
+
+
 def run_style() -> dict:
     """Run the style contract and count passing checks."""
     test = step_result(
@@ -1087,6 +1099,7 @@ def run_gates(
         run_verify_report_tests(allowed),
         run_native_q_checker_tests(allowed),
         run_ci_security_tests(allowed),
+        run_audit_disposition_tests(allowed),
         run_style(),
         run_freshness(),
         run_audit(),

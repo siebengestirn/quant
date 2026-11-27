@@ -3,11 +3,21 @@
 
 Usage:
   python3 scripts/audit_disposition.py classify [--input PATH] [--output PATH]
+      [--review PATH] [--force]
+  python3 scripts/audit_disposition.py verify [--input PATH] [--path PATH]
+      [--review PATH]
   python3 scripts/audit_disposition.py summary [--path PATH]
 
 The audit findings are never edited or suppressed. This tool only reads the
 JSON produced by the assurance terminology audit and records a disposition and
 a short reason for every advisory finding. Binding categories stay separate.
+
+Every record carries a stable ``finding_id`` derived from the audit fields
+(source, line, category and phrase). The generated report and its machine-
+readable review are exact evidence: ``verify`` checks the bundled files against
+the raw audit bytes without regenerating or rewriting them. A ``classify`` run
+that would replace an existing report whose source digest is stale is rejected
+unless ``--force`` is given explicitly.
 """
 
 from __future__ import annotations
@@ -26,7 +36,9 @@ from quant_common import Finding, run_cli
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_INPUT = ROOT / "data" / "assurance" / "english-audit.json"
 DEFAULT_OUTPUT = ROOT / "data" / "assurance" / "audit-dispositions.json"
+DEFAULT_REVIEW = ROOT / "data" / "assurance" / "audit-disposition-review.json"
 SCHEMA_VERSION = 1
+REVIEW_SCHEMA_VERSION = 1
 BINDING_CATEGORIES = frozenset({"tautology", "audit_ignore"})
 DISPOSITIONS = (
     "CORRECT_WORDING",
@@ -36,6 +48,36 @@ DISPOSITIONS = (
     "POTENTIALLY_MISLEADING_CLAIM",
     "DOCUMENTATION_DEFECT",
 )
+OPEN_OWNER = "maintainer/documentation"
+# Named owner class and explicit resolution state for each disposition
+# category. Only the three resolved classes are closed; open wording needs a
+# documentation maintainer decision and is never presented as accepted.
+DISPOSITION_OWNERS = {
+    "ACCEPTED_DOMAIN_TERMINOLOGY": {
+        "owner_class": "domain-terminology",
+        "resolution_status": "resolved",
+    },
+    "CORRECT_WORDING": {
+        "owner_class": "terminology-audit",
+        "resolution_status": "resolved",
+    },
+    "HISTORICAL_STATEMENT": {
+        "owner_class": "historical-record",
+        "resolution_status": "resolved",
+    },
+    "AMBIGUOUS_REQUIREMENT": {
+        "owner_class": OPEN_OWNER,
+        "resolution_status": "OPEN",
+    },
+    "POTENTIALLY_MISLEADING_CLAIM": {
+        "owner_class": OPEN_OWNER,
+        "resolution_status": "OPEN",
+    },
+    "DOCUMENTATION_DEFECT": {
+        "owner_class": OPEN_OWNER,
+        "resolution_status": "OPEN",
+    },
+}
 
 INFORMAL = re.compile(
     r"\b(?:do the needful|make sure|works fine|goes wrong|fix it|"
@@ -200,6 +242,11 @@ def utc_now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def digest(raw: bytes) -> str:
+    """Return the SHA-256 of the exact audit bytes."""
+    return hashlib.sha256(raw).hexdigest()
+
+
 def classify(finding: Finding) -> tuple[str, str]:
     """Return one disposition and its reason for an advisory finding."""
     text = finding.context.lower()
@@ -211,6 +258,33 @@ def classify(finding: Finding) -> tuple[str, str]:
         if rule.matches(source):
             return rule.disposition, rule.reason
     return "AMBIGUOUS_REQUIREMENT", FALLBACK_REASON
+
+
+def finding_id(finding: Finding) -> str:
+    """Return a stable ID from source, line, category and phrase."""
+    identity = ":".join(
+        (
+            finding.source,
+            str(finding.line),
+            finding.category,
+            finding.phrase,
+        )
+    )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def audit_record(finding: Finding) -> dict:
+    """Return one audit-derived record with its stable finding ID."""
+    return {**finding.as_dict(), "finding_id": finding_id(finding)}
+
+
+def advisory_findings(findings: list[Finding]) -> list[Finding]:
+    """Return findings that require an explicit disposition."""
+    return [
+        finding
+        for finding in findings
+        if finding.category not in BINDING_CATEGORIES
+    ]
 
 
 def required_text(item: dict, key: str, index: int) -> str:
@@ -256,6 +330,17 @@ def load_findings(path: Path) -> tuple[bytes, list[Finding]]:
     return raw, parse_findings(payload)
 
 
+def load_json(path: Path, label: str) -> dict:
+    """Read one evidence JSON object, failing closed on malformed input."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"unreadable {label} at {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"{label} must be a JSON object")
+    return payload
+
+
 def build_report(
     raw: bytes,
     findings: list[Finding],
@@ -264,17 +349,13 @@ def build_report(
     generated_at: str | None = None,
 ) -> dict:
     """Build the disposition report without mutating the audit findings."""
-    advisory = [
-        finding
-        for finding in findings
-        if finding.category not in BINDING_CATEGORIES
-    ]
+    advisory = advisory_findings(findings)
     records = []
     for finding in advisory:
         disposition, reason = classify(finding)
         records.append(
             {
-                **finding.as_dict(),
+                **audit_record(finding),
                 "disposition": disposition,
                 "reason": reason,
             }
@@ -286,12 +367,61 @@ def build_report(
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at or utc_now(),
         "source": source,
-        "source_digest": hashlib.sha256(raw).hexdigest(),
+        "source_digest": digest(raw),
         "binding_categories": sorted(BINDING_CATEGORIES),
         "binding_findings": len(findings) - len(advisory),
         "advisory_findings": len(advisory),
+        "findings": [audit_record(finding) for finding in advisory],
         "counts": counts,
         "dispositions": records,
+    }
+
+
+def build_review_report(
+    raw: bytes,
+    report: dict,
+    *,
+    source: str = "",
+    generated_at: str | None = None,
+) -> dict:
+    """Build the machine-readable owner and resolution decision record."""
+    records = report["dispositions"]
+    categories = {}
+    open_ids: list[str] = []
+    for name in DISPOSITIONS:
+        owner = DISPOSITION_OWNERS[name]
+        ids = [
+            record["finding_id"]
+            for record in records
+            if record["disposition"] == name
+        ]
+        categories[name] = {
+            "owner_class": owner["owner_class"],
+            "owner": owner["owner_class"],
+            "resolution_status": owner["resolution_status"],
+            "count": len(ids),
+            "finding_ids": ids,
+        }
+        if owner["resolution_status"] == "OPEN":
+            open_ids.extend(ids)
+    resolved = sum(
+        item["count"]
+        for item in categories.values()
+        if item["resolution_status"] == "resolved"
+    )
+    return {
+        "schema_version": REVIEW_SCHEMA_VERSION,
+        "generated_at": generated_at or utc_now(),
+        "source": source,
+        "source_digest": digest(raw),
+        "total_findings": report["advisory_findings"],
+        "counts": dict(report["counts"]),
+        "categories": categories,
+        "resolution_counts": {
+            "resolved": resolved,
+            "OPEN": len(open_ids),
+        },
+        "open_finding_ids": sorted(open_ids),
     }
 
 
@@ -303,11 +433,207 @@ def write_report(report: dict, path: Path) -> None:
     )
 
 
-def classify_file(input_path: Path, output_path: Path) -> dict:
+def check_ids(ids: list[str], label: str) -> None:
+    """Reject duplicate IDs in either evidence list."""
+    repeated = sorted({item for item in ids if ids.count(item) > 1})
+    if repeated:
+        raise ValueError(f"duplicate finding_id in {label}: {repeated[0]}")
+
+
+def expected_findings(findings: list[Finding]) -> dict:
+    """Map every advisory finding ID to its source and audit record."""
+    expected = {}
+    for finding in advisory_findings(findings):
+        identifier = finding_id(finding)
+        if identifier in expected:
+            raise ValueError(f"duplicate finding_id in audit: {identifier}")
+        expected[identifier] = (finding, audit_record(finding))
+    return expected
+
+
+def validate_audit_records(report: dict, expected: dict) -> None:
+    """Require each audit-derived record exactly once, unaltered."""
+    recorded = report.get("findings")
+    if not isinstance(recorded, list):
+        raise ValueError("disposition report is missing audit findings")
+    finding_ids = []
+    for record in recorded:
+        if not isinstance(record, dict):
+            raise ValueError("audit finding record must be a JSON object")
+        identifier = record.get("finding_id")
+        if identifier not in expected:
+            raise ValueError(f"extra finding_id in audit records: {identifier}")
+        if record != expected[identifier][1]:
+            raise ValueError(f"altered audit record: {identifier}")
+        finding_ids.append(identifier)
+    check_ids(finding_ids, "audit records")
+    missing = set(expected) - set(finding_ids)
+    if missing:
+        raise ValueError(f"missing audit record: {sorted(missing)[0]}")
+
+
+def validate_disposition_records(report: dict, expected: dict) -> None:
+    """Require one correct, unaltered disposition per advisory finding."""
+    dispositions = report.get("dispositions")
+    if not isinstance(dispositions, list):
+        raise ValueError("disposition report has no dispositions list")
+    seen: list[str] = []
+    counts = {name: 0 for name in DISPOSITIONS}
+    for record in dispositions:
+        if not isinstance(record, dict):
+            raise ValueError("disposition record must be a JSON object")
+        identifier = record.get("finding_id")
+        if identifier in seen:
+            raise ValueError(
+                f"duplicate finding_id in dispositions: {identifier}"
+            )
+        if identifier not in expected:
+            raise ValueError(f"extra finding_id in dispositions: {identifier}")
+        finding, source_record = expected[identifier]
+        for key, value in source_record.items():
+            if record.get(key) != value:
+                raise ValueError(
+                    f"altered disposition field {key}: {identifier}"
+                )
+        disposition, reason = classify(finding)
+        if record.get("disposition") != disposition:
+            raise ValueError(f"incorrect disposition: {identifier}")
+        if record.get("reason") != reason:
+            raise ValueError(f"incorrect disposition reason: {identifier}")
+        seen.append(identifier)
+        counts[disposition] += 1
+    missing = set(expected) - set(seen)
+    if missing:
+        raise ValueError(f"missing disposition: {sorted(missing)[0]}")
+    if report.get("counts") != counts:
+        raise ValueError("disposition counts disagree with records")
+
+
+def validate_report(
+    raw: bytes, findings: list[Finding], report: object
+) -> None:
+    """Check bundled evidence against the exact audit bytes."""
+    if not isinstance(report, dict):
+        raise ValueError("disposition report must be a JSON object")
+    if report.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError("unexpected disposition schema version")
+    expected_digest = digest(raw)
+    if report.get("source_digest") != expected_digest:
+        raise ValueError(
+            "stale source digest: "
+            f"report={report.get('source_digest')!r} audit={expected_digest}"
+        )
+    advisory = advisory_findings(findings)
+    if report.get("advisory_findings") != len(advisory):
+        raise ValueError("advisory finding count disagrees with audit")
+    if report.get("binding_findings") != len(findings) - len(advisory):
+        raise ValueError("binding finding count disagrees with audit")
+    expected = expected_findings(findings)
+    validate_audit_records(report, expected)
+    validate_disposition_records(report, expected)
+
+
+def validate_review_categories(
+    categories: dict, report: dict
+) -> tuple[int, list[str]]:
+    """Validate every category's owner, state and finding IDs."""
+    open_ids: list[str] = []
+    resolved = 0
+    for name in DISPOSITIONS:
+        entry = categories[name]
+        owner = DISPOSITION_OWNERS[name]
+        if not isinstance(entry, dict):
+            raise ValueError(f"invalid review category: {name}")
+        if entry.get("owner_class") != owner["owner_class"]:
+            raise ValueError(f"wrong owner class: {name}")
+        if entry.get("resolution_status") != owner["resolution_status"]:
+            raise ValueError(f"wrong resolution status: {name}")
+        ids = [
+            record["finding_id"]
+            for record in report["dispositions"]
+            if record["disposition"] == name
+        ]
+        if entry.get("finding_ids") != ids or entry.get("count") != len(ids):
+            raise ValueError(f"review finding IDs disagree: {name}")
+        if owner["resolution_status"] == "resolved":
+            resolved += len(ids)
+        else:
+            open_ids.extend(ids)
+    return resolved, open_ids
+
+
+def validate_review_report(review: object, report: dict, raw: bytes) -> None:
+    """Check owner classes, resolution states and counts of the review."""
+    if not isinstance(review, dict):
+        raise ValueError("review report must be a JSON object")
+    if review.get("schema_version") != REVIEW_SCHEMA_VERSION:
+        raise ValueError("unexpected review schema version")
+    if review.get("source_digest") != digest(raw):
+        raise ValueError("stale review source digest")
+    if review.get("counts") != report.get("counts"):
+        raise ValueError("review counts disagree with dispositions")
+    categories = review.get("categories")
+    if not isinstance(categories, dict) or set(categories) != set(DISPOSITIONS):
+        raise ValueError("review must cover every disposition category")
+    resolved, open_ids = validate_review_categories(categories, report)
+    if review.get("resolution_counts") != {
+        "resolved": resolved,
+        "OPEN": len(open_ids),
+    }:
+        raise ValueError("review resolution counts disagree")
+    if review.get("open_finding_ids") != sorted(open_ids):
+        raise ValueError("review open finding IDs disagree")
+    if review.get("total_findings") != report["advisory_findings"]:
+        raise ValueError("review total disagrees with dispositions")
+
+
+def output_is_stale(output: Path, raw: bytes) -> bool:
+    """Report whether an existing output refers to different audit bytes."""
+    if not output.exists():
+        return False
+    try:
+        payload = json.loads(output.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return True
+    return (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != SCHEMA_VERSION
+        or payload.get("source_digest") != digest(raw)
+    )
+
+
+def classify_file(
+    input_path: Path,
+    output_path: Path,
+    *,
+    review_path: Path | None = None,
+    force: bool = False,
+) -> dict:
     """Classify an audit file and write the generated disposition report."""
     raw, findings = load_findings(input_path)
+    if not force and output_is_stale(output_path, raw):
+        raise ValueError(
+            f"stale disposition report at {output_path}; "
+            "pass --force to overwrite"
+        )
     report = build_report(raw, findings, source=str(input_path))
     write_report(report, output_path)
+    if review_path is not None:
+        review = build_review_report(raw, report, source=str(input_path))
+        write_report(review, review_path)
+    return report
+
+
+def verify_bundle(
+    input_path: Path, path: Path, review_path: Path | None = None
+) -> dict:
+    """Validate bundled evidence without regenerating it."""
+    raw, findings = load_findings(input_path)
+    report = load_json(path, "disposition report")
+    validate_report(raw, findings, report)
+    if review_path is not None and review_path.is_file():
+        review = load_json(review_path, "review report")
+        validate_review_report(review, report, raw)
     return report
 
 
@@ -334,6 +660,26 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     classify_parser.add_argument(
         "--output", type=Path, default=DEFAULT_OUTPUT, help="report JSON path"
     )
+    classify_parser.add_argument(
+        "--review", type=Path, help="review report JSON path"
+    )
+    classify_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite a report whose source digest is stale",
+    )
+    verify_parser = subparsers.add_parser(
+        "verify", help="check bundled evidence without regenerating"
+    )
+    verify_parser.add_argument(
+        "--input", type=Path, default=DEFAULT_INPUT, help="audit JSON path"
+    )
+    verify_parser.add_argument(
+        "--path", type=Path, default=DEFAULT_OUTPUT, help="report JSON path"
+    )
+    verify_parser.add_argument(
+        "--review", type=Path, help="review report JSON path"
+    )
     summary_parser = subparsers.add_parser("summary", help="print counts")
     summary_parser.add_argument(
         "--path", type=Path, default=DEFAULT_OUTPUT, help="report JSON path"
@@ -342,12 +688,26 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 
 def dispatch(argv: list[str] | None) -> int:
-    """Run the requested classification or summary command."""
+    """Run the requested classification, verification or summary command."""
     args = parse_args(argv)
     if args.command == "classify":
-        report = classify_file(args.input, args.output)
+        review = args.review or (
+            DEFAULT_REVIEW if args.output == DEFAULT_OUTPUT else None
+        )
+        report = classify_file(
+            args.input,
+            args.output,
+            review_path=review,
+            force=args.force,
+        )
+    elif args.command == "verify":
+        review = args.review or (
+            DEFAULT_REVIEW if args.path == DEFAULT_OUTPUT else None
+        )
+        report = verify_bundle(args.input, args.path, review)
+        print("verify: PASS")
     else:
-        report = json.loads(args.path.read_text(encoding="utf-8"))
+        report = load_json(args.path, "disposition report")
     summarize(report)
     return 0
 
