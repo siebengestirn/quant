@@ -1,0 +1,122 @@
+{
+  "branch_protection": {
+    "native_q_gated": true,
+    "required_approvals": 0,
+    "required_checks": [
+      "ASan/UBSan",
+      "Release assurance (offline)",
+      "Style contract (reference guides)",
+      "core build and tests"
+    ]
+  },
+  "capture_context": "HISTORICAL capture at PR #66; current volatile identifiers are in the external final bundle MANIFEST.md",
+  "captured_state_basis": "Captured at PR #66; volatile pins are verified against git HEAD, the assurance report and the current release manifest",
+  "current_workstreams": {
+    "W1": "PARTIAL",
+    "W1-D": "PENDING",
+    "W10": "NOT IMPLEMENTED",
+    "W11": "GATED",
+    "W12": "NOT PROVEN",
+    "W13": "FUTURE",
+    "W14": "FUTURE",
+    "W15": "FUTURE",
+    "W16": "PENDING",
+    "W17": "DISABLED",
+    "W18": "PENDING",
+    "W19": "PROPOSED",
+    "W2": "PARTIAL",
+    "W20": "PROPOSED",
+    "W3": "NOT IMPLEMENTED",
+    "W4": "NOT PROVEN",
+    "W5": "PARTIAL",
+    "W6": "NOT IMPLEMENTED",
+    "W7": "INCONCLUSIVE",
+    "W8": "PARTIAL",
+    "W9": "NOT QUALIFIED"
+  },
+  "gate_results": {
+    "ci_security_tests": "PASS",
+    "hosted_ci": "PASS",
+    "native_q_checker_tests": "PASS",
+    "portable_cpp": "PASS",
+    "portable_pytest": "PASS",
+    "release_bundle_tests": "PASS",
+    "sanitizer": "PASS",
+    "state_freshness": "PASS",
+    "style": "PASS",
+    "terminology_audit": "PASS",
+    "verify_report_tests": "PASS",
+    "w1": "PASS"
+  },
+  "historical_releases": [
+    {
+      "note": "HISTORICAL release history at PR #58: exact-integer OI/volume corrections; 98-entry bundle; native q GATED_NOT_RUN",
+      "pr": 58,
+      "release_version": "R8.1",
+      "scope": "PORTABLE_RESEARCH",
+      "status": "COMPLETE"
+    },
+    {
+      "note": "HISTORICAL release history at PR #61: R8.3 and W1 A/B/C, 11 offline W1 tests; native q GATED_NOT_RUN",
+      "pr": 61,
+      "release_version": "R8.3",
+      "scope": "PORTABLE_RESEARCH",
+      "status": "COMPLETE"
+    },
+    {
+      "note": "HISTORICAL release history at PR #62: conclusion mapping, provenance and W1 snapshot reproducibility; 14 offline W1 tests; native q GATED_NOT_RUN",
+      "pr": 62,
+      "release_version": "R8.4",
+      "scope": "PORTABLE_RESEARCH",
+      "status": "COMPLETE"
+    },
+    {
+      "note": "HISTORICAL release history at PR #63: bundle validator PASS path, report schema, offline W1 fixture and hardened retrieval; 28 offline W1 tests; native q GATED_NOT_RUN",
+      "pr": 63,
+      "release_version": "R8.4.1",
+      "scope": "PORTABLE_RESEARCH",
+      "status": "COMPLETE"
+    }
+  ],
+  "main_captured_basis": "captured at PR #66; verified against git HEAD by scripts/check_release_state.py",
+  "main_commit": "83b6e435fc574f33f538c4b2a97e66976eac7989",
+  "manifest_basis": "captured from the R8.4.2 final release manifest; verified against the current bundle",
+  "manifest_sha256": "0deebdd099912cfc4e2045d8a2c377ca4825f8382b50d600aa86f7dfa724adc3",
+  "merged_pull_requests": "47-66",
+  "native_q_status": "GATED_NOT_RUN",
+  "release_id": "R8.4.2-PR66",
+  "release_scope": "PORTABLE_RESEARCH",
+  "release_status": "COMPLETE",
+  "release_version": "R8.4.2",
+  "report_basis": "captured from data/assurance/verification-report.json; verified byte for byte",
+  "required_gate_set": [
+    "ci_security_tests",
+    "hosted_ci",
+    "native_q_checker_tests",
+    "portable_cpp",
+    "portable_pytest",
+    "release_bundle_tests",
+    "sanitizer",
+    "state_freshness",
+    "style",
+    "terminology_audit",
+    "verify_report_tests",
+    "w1"
+  ],
+  "test_inventory": {
+    "ci_security_tests": 11,
+    "cpp_checks": 14114,
+    "native_q_checker_tests": 8,
+    "portable_pytest": 51,
+    "release_bundle_tests": 121,
+    "sanitizer_checks": 14114,
+    "verify_report_tests": 161,
+    "w1": 36
+  },
+  "trading_authorization": {
+    "decision": "NO_TRADE",
+    "live_execution": "DISABLED"
+  },
+  "verification_captured_basis": "captured from data/assurance/verification-report.json; verified byte for byte",
+  "verification_report_sha256": "44e1e4c2fd8e98b5530e50fb9e8019e5c7712bc977a1961b7ef95764cb1b862f"
+}

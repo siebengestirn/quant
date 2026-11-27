@@ -497,9 +497,10 @@ class Gate:
         if not ok:
             self.failed = True
 
-    def skip(self, label: str, reason: str) -> None:
+    def skip(self, label: str, reason: str, code: str | None = None) -> None:
         """Record a gate check that is explicitly not applicable."""
-        print(f"== {label}: skipped ({reason})")
+        marker = f" SKIP {code}" if code else " skipped"
+        print(f"== {label}:{marker} ({reason})")
         self.rows.append((label, "SKIP", 0.0))
 
     def summary(self) -> int:
@@ -645,11 +646,16 @@ def run_checks(gate: Gate, allow_dirty: bool) -> None:
                 "pytest",
                 "tests/test_dataset_contract.py",
                 "tests/test_research.py",
-                "tests/test_kdbx.py",
                 "-q",
             ]
         ).returncode
         == 0,
+    )
+    gate.skip(
+        "native q tests",
+        "KDB-X disabled in portable build; native-q qualification is a "
+        "separate gated tier",
+        code="NOT_APPLICABLE",
     )
     gate.run(
         "sanitizer build",

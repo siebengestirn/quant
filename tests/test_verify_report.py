@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -34,6 +35,8 @@ REQUIRED_NAMES = (
 )
 ALLOWED_STATUSES = {PASS, FAIL, GATED, NOT_APPLICABLE}
 COMMIT = "abc123def456"
+FRESH_BINARY = b"fresh build-ci contract binary\n"
+STALE_BINARY = b"stale build contract binary\n"
 SKIP_ID = "tests/test_native_q_ci.py::test_skipped_case"
 OTHER_SKIP_ID = "tests/test_native_q_ci.py::test_other_case"
 APPROVED_REASON = "governed fixture unavailable"
@@ -71,6 +74,29 @@ CONCLUSION_IDS = [
     "malformed-number",
     "malformed-string",
 ]
+
+
+def make_binary_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    executable: bool = True,
+    fresh: bool = True,
+) -> tuple[Path, Path]:
+    """Build an isolated checkout with a fresh CI and a stale build binary."""
+    root = tmp_path / "checkout"
+    build_ci = root / "build-ci"
+    build_ci.mkdir(parents=True)
+    binary = build_ci / "quant_contract"
+    if fresh:
+        binary.write_bytes(FRESH_BINARY)
+        binary.chmod(0o755 if executable else 0o644)
+    stale = root / "build" / "quant_contract"
+    stale.parent.mkdir(parents=True)
+    stale.write_bytes(STALE_BINARY)
+    stale.chmod(0o755)
+    monkeypatch.setattr(VERIFY_REPORT, "ROOT", root)
+    return binary, stale
 
 
 def make_jobs(
@@ -538,6 +564,11 @@ def test_report_has_versioned_schema_and_all_gates(
             "native_q_checker_tests",
             "tests/test_native_q_ci.py",
         ),
+        (
+            VERIFY_REPORT.run_ci_security_tests,
+            "ci_security_tests",
+            "tests/test_ci_security.py",
+        ),
     ],
 )
 def test_new_pytest_gates_reset_addopts(
@@ -840,6 +871,7 @@ def test_run_gates_includes_every_required_gate(
         "run_release_bundle_tests": "release_bundle_tests",
         "run_verify_report_tests": "verify_report_tests",
         "run_native_q_checker_tests": "native_q_checker_tests",
+        "run_ci_security_tests": "ci_security_tests",
         "run_style": "style",
         "run_freshness": "state_freshness",
         "run_audit": "terminology_audit",
@@ -857,4 +889,152 @@ def test_run_gates_includes_every_required_gate(
         monkeypatch.setattr(VERIFY_REPORT, runner, make_fake(gate_name))
     gates = VERIFY_REPORT.run_gates(COMMIT)
     assert {gate["name"] for gate in gates} == set(REQUIRED_GATES)
-    assert len(gates) == 11
+    assert len(gates) == len(REQUIRED_GATES)
+
+
+def capture_pytest_steps(
+    monkeypatch: pytest.MonkeyPatch, output: str
+) -> list[tuple[list[str], dict[str, str]]]:
+    """Capture pytest argv and environment while returning fixed output."""
+    calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def step(name: str, argv: list[str], env=None) -> dict:
+        del name
+        calls.append((list(argv), dict(env or {})))
+        return {
+            "name": "pytest",
+            "command": VERIFY_REPORT.command_text(argv),
+            "exit_code": 0,
+            "counts": {},
+            "result": PASS,
+            "output": output,
+        }
+
+    monkeypatch.setattr(VERIFY_REPORT, "step_result", step)
+    return calls
+
+
+def test_portable_pytest_gate_sets_canonical_binary_env_and_digest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The portable gate routes tests to the fresh build-ci binary."""
+    binary, stale = make_binary_checkout(monkeypatch, tmp_path)
+    monkeypatch.setenv(VERIFY_REPORT.BINARY_ENV, str(stale))
+    calls = capture_pytest_steps(monkeypatch, "12 passed in 0.1s")
+    gate = VERIFY_REPORT.run_pytest([], COMMIT)
+    assert gate["result"] == PASS
+    assert gate["counts"]["passed"] == 12
+    assert gate["counts"][VERIFY_REPORT.BINARY_PATH_KEY] == (
+        VERIFY_REPORT.CANONICAL_BINARY_PATH
+    )
+    assert (
+        gate["counts"][VERIFY_REPORT.BINARY_DIGEST_KEY]
+        == hashlib.sha256(FRESH_BINARY).hexdigest()
+    )
+    assert gate["counts"][VERIFY_REPORT.BINARY_BUILD_DIR_KEY] == (
+        VERIFY_REPORT.CANONICAL_BUILD_DIR
+    )
+    assert gate["counts"][VERIFY_REPORT.BINARY_COMMIT_KEY] == COMMIT
+    assert calls[0][1][VERIFY_REPORT.BINARY_ENV] == str(binary)
+    assert f"{VERIFY_REPORT.BINARY_ENV}=" in gate["command"]
+    assert str(stale) not in gate["command"]
+    assert gate["steps"][0]["result"] == PASS
+
+
+@pytest.mark.parametrize(
+    ("fresh", "executable", "expected"),
+    [(False, True, FAIL), (True, False, FAIL), (True, True, PASS)],
+    ids=["missing", "not-executable", "executable"],
+)
+def test_portable_pytest_gate_validates_binary_presence_and_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fresh: bool,
+    executable: bool,
+    expected: str,
+) -> None:
+    """A missing or non-executable canonical binary fails the gate."""
+    make_binary_checkout(
+        monkeypatch, tmp_path, fresh=fresh, executable=executable
+    )
+    capture_pytest_steps(monkeypatch, "12 passed in 0.1s")
+    gate = VERIFY_REPORT.run_pytest([], COMMIT)
+    assert gate["result"] == expected
+    assert gate["steps"][0]["result"] == expected
+    if expected == FAIL:
+        assert gate["counts"][VERIFY_REPORT.BINARY_DIGEST_KEY] == ""
+    else:
+        assert gate["counts"][VERIFY_REPORT.BINARY_DIGEST_KEY]
+
+
+def test_stale_binary_digest_is_never_recorded_as_fresh(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The recorded digest comes from build-ci, never from build/."""
+    _binary, stale = make_binary_checkout(monkeypatch, tmp_path)
+    monkeypatch.setenv(VERIFY_REPORT.BINARY_ENV, str(stale))
+    capture_pytest_steps(monkeypatch, "12 passed in 0.1s")
+    gate = VERIFY_REPORT.run_pytest([], COMMIT)
+    stale_digest = hashlib.sha256(stale.read_bytes()).hexdigest()
+    assert gate["counts"][VERIFY_REPORT.BINARY_DIGEST_KEY] != stale_digest
+
+
+def test_ci_security_gate_is_required_and_command_is_exact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CI security suite is mandatory and runs the pinned command."""
+    calls = capture_pytest_steps(monkeypatch, "11 passed in 0.1s")
+    gate = VERIFY_REPORT.run_ci_security_tests()
+    assert "ci_security_tests" in REQUIRED_GATES
+    assert gate["name"] == "ci_security_tests"
+    assert gate["result"] == PASS
+    assert calls[0][0] == [
+        "python3",
+        "-m",
+        "pytest",
+        "tests/test_ci_security.py",
+        "-o",
+        "addopts=",
+        "-q",
+    ]
+    assert gate["command"] == (
+        "python3 -m pytest tests/test_ci_security.py -o addopts='' -q"
+    )
+    assert gate["counts"] == {
+        "passed": 11,
+        "failed": 0,
+        "errors": 0,
+        "skipped": 0,
+        "total": 11,
+    }
+
+
+@pytest.mark.parametrize(
+    ("output", "allowed", "expected"),
+    [
+        ("11 passed in 0.1s", (), PASS),
+        (
+            "SKIPPED [1] tests/test_ci_security.py::test_x:42: reason\n"
+            "10 passed, 1 skipped in 0.1s",
+            (),
+            FAIL,
+        ),
+        (
+            "SKIPPED [1] tests/test_ci_security.py::test_x:42: reason\n"
+            "10 passed, 1 skipped in 0.1s",
+            ({"test_id": "tests/test_ci_security.py::test_x", "reason": "ok"},),
+            PASS,
+        ),
+    ],
+    ids=["clean", "unapproved-skip", "approved-skip"],
+)
+def test_ci_security_gate_enforces_skip_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    output: str,
+    allowed: tuple[dict[str, str], ...],
+    expected: str,
+) -> None:
+    """An unapproved skip in the CI security suite fails its gate."""
+    capture_pytest_steps(monkeypatch, output)
+    gate = VERIFY_REPORT.run_ci_security_tests(allowed)
+    assert gate["result"] == expected

@@ -1,15 +1,25 @@
-"""Adversarial cross-language dataset contract corpus (SIMULATED fixtures)."""
+"""Adversarial cross-language dataset contract corpus (SIMULATED fixtures).
+
+The canonical C++ binary comes from ``QUANT_CONTRACT_BIN`` when that variable
+is set, and otherwise falls back to ``build/quant_contract``
+(``CONTRACT_TOOL``). ``scripts/verify_report.py`` always sets the variable to
+the freshly built ``build-ci/quant_contract`` so a stale, ignored ``build/``
+binary cannot satisfy these tests.
+"""
 
 from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-CONTRACT_TOOL = ROOT / "build" / "quant_contract"
+CONTRACT_TOOL = Path(
+    os.environ.get("QUANT_CONTRACT_BIN", str(ROOT / "build" / "quant_contract"))
+)
 FIXTURES = ROOT / "data" / "review-fixtures" / "dataset-adversarial"
 
 CSV = (

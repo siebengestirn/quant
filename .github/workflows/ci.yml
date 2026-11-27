@@ -54,7 +54,7 @@ jobs:
       - name: Python tests
         run: |
           python3 -m pip install --quiet pytest
-          python3 -m pytest tests/test_dataset_contract.py tests/test_research.py tests/test_kdbx.py -q
+          python3 -m pytest tests/test_dataset_contract.py tests/test_research.py -q
 
       - name: Single-file assurance gate
         env:
@@ -110,11 +110,21 @@ jobs:
     # - third-party Actions pinned to full commit SHAs, never tags;
     # - destroy the runner after qualification, on success and on failure.
     if: github.event_name != 'pull_request' && vars.QUANT_NATIVE_Q_ENABLED == 'true'
-    runs-on: self-hosted
+    runs-on: [self-hosted, quant-native-q]
     env:
       QUANT_NATIVE_Q_REQUIRED: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      # GitHub does not expose runner labels as an environment variable; the
+      # label set below mirrors this job's runs-on requirement and is checked
+      # against the exact HEAD SHA by the capture script.
+      - name: Capture dedicated runner evidence
+        env:
+          QHOME: ${{ secrets.QUANT_QHOME }}
+          QUANT_EXPECTED_SHA: ${{ github.sha }}
+          RUNNER_LABELS: self-hosted,quant-native-q
+        run: python3 scripts/capture_runner_evidence.py --output data/assurance/runner-evidence.json
 
       - name: Qualify exact protected main commit
         env:
@@ -280,6 +290,14 @@ jobs:
             build/compile_commands.json
           if-no-files-found: warn
 
+      - name: Upload runner evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: runner-evidence
+          path: data/assurance/runner-evidence.json
+          if-no-files-found: warn
+
   release-assurance:
     name: Release assurance (offline)
     # Hosted-only tier for push to main and pull_request. Every suite runs
@@ -389,6 +407,7 @@ jobs:
             tests/test_release_bundle.py \
             tests/test_verify_report.py \
             tests/test_native_q_ci.py \
+            tests/test_ci_security.py \
             -o addopts='' -q
 
       - name: Governance schema validation

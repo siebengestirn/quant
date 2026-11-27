@@ -176,6 +176,13 @@
       "retention": "current"
     },
     {
+      "class": "policy",
+      "owner": "maintainer",
+      "path": "governance/release-state.json",
+      "purpose": "Canonical machine-readable R8.4.2 release and governance state",
+      "retention": "current"
+    },
+    {
       "class": "evidence-record",
       "owner": "QA",
       "path": "governance/requirements-traceability.csv",

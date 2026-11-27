@@ -21,11 +21,19 @@ the release bundle validator. The mandated pytest commands remain unchanged;
 pytest receives ``-rs`` through the environment so that skip IDs and reasons
 are captured for the allowlist check. The same config and counts are carried
 into the release bundle manifest so verify can compare them exactly.
+
+The portable pytest gate sets ``QUANT_CONTRACT_BIN`` to the freshly built
+``build-ci/quant_contract`` regardless of any inherited value. It records
+that path, its SHA-256, its build directory and the report commit in the gate
+counts; a missing or non-executable binary fails the gate. This prevents a
+stale, ignored ``build/quant_contract`` from satisfying cross-language tests.
+The ``ci_security_tests`` gate is mandatory and enforces the same skip policy.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -75,6 +83,7 @@ REQUIRED_GATES = frozenset(
         "release_bundle_tests",
         "verify_report_tests",
         "native_q_checker_tests",
+        "ci_security_tests",
         "hosted_ci",
     }
 )
@@ -83,10 +92,18 @@ PYTEST_FILES = (
     "tests/test_research.py",
     "tests/test_dataset_adversarial.py",
 )
+CI_SECURITY_TEST_FILES = ("tests/test_ci_security.py",)
 W1_TEST_FILES = ("tests/test_instrument_master.py",)
 RELEASE_BUNDLE_TEST_FILES = ("tests/test_release_bundle.py",)
 VERIFY_REPORT_TEST_FILES = ("tests/test_verify_report.py",)
 NATIVE_Q_CHECKER_TEST_FILES = ("tests/test_native_q_ci.py",)
+BINARY_ENV = "QUANT_CONTRACT_BIN"
+CANONICAL_BUILD_DIR = "build-ci"
+CANONICAL_BINARY_PATH = f"{CANONICAL_BUILD_DIR}/quant_contract"
+BINARY_PATH_KEY = "binary_path"
+BINARY_DIGEST_KEY = "binary_sha256"
+BINARY_BUILD_DIR_KEY = "build_dir"
+BINARY_COMMIT_KEY = "binary_commit"
 PYTEST_RESET = "addopts="
 PYTEST_SKIP_FLAGS = "-rs"
 PYTEST_COUNT_KEYS = ("passed", "failed", "errors", "skipped", "total")
@@ -342,6 +359,52 @@ def pytest_environment() -> dict[str, str]:
     return {**os.environ, "PYTEST_ADDOPTS": flags}
 
 
+def sha256_file(path: Path) -> str:
+    """Return the lowercase SHA-256 of a file's exact bytes."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def canonical_binary_step(commit: str) -> tuple[dict, dict]:
+    """Check the build-ci binary and return its step and gate counts."""
+    path = ROOT / CANONICAL_BINARY_PATH
+    counts = {
+        BINARY_PATH_KEY: CANONICAL_BINARY_PATH,
+        BINARY_DIGEST_KEY: "",
+        BINARY_BUILD_DIR_KEY: CANONICAL_BUILD_DIR,
+        BINARY_COMMIT_KEY: commit,
+    }
+    problem = ""
+    if not path.is_file():
+        problem = "missing"
+    elif not os.access(path, os.X_OK):
+        problem = "not executable"
+    else:
+        counts[BINARY_DIGEST_KEY] = sha256_file(path)
+    ok = not problem
+    output = (
+        f"{CANONICAL_BINARY_PATH} sha256={counts[BINARY_DIGEST_KEY] or 'none'} "
+        f"build_dir={CANONICAL_BUILD_DIR} commit={commit}"
+    )
+    if problem:
+        output += f" ({problem})"
+    step = {
+        "name": "canonical contract binary",
+        "command": (
+            f"test -x {shlex.quote(str(path))} && "
+            f"sha256sum {shlex.quote(str(path))}"
+        ),
+        "exit_code": 0 if ok else 1,
+        "counts": {},
+        "result": PASS if ok else FAIL,
+        "output": output,
+    }
+    return step, counts
+
+
 def parse_style(output: str) -> dict:
     """Count PASS lines emitted by the style contract."""
     return {
@@ -454,6 +517,11 @@ def pytest_gate(
     files: tuple[str, ...],
     step_name: str,
     allowed_skips: object = None,
+    *,
+    env: dict[str, str] | None = None,
+    pre_steps: tuple[dict, ...] = (),
+    extra_counts: dict | None = None,
+    extra_ok: bool = True,
 ) -> dict:
     """Run one pytest suite with the strict five-count pass policy."""
     argv = [
@@ -465,26 +533,46 @@ def pytest_gate(
         PYTEST_RESET,
         "-q",
     ]
-    test = step_result(step_name, argv, pytest_environment())
+    test_env = pytest_environment() if env is None else env
+    test = step_result(step_name, argv, test_env)
+    if env is not None and BINARY_ENV in env:
+        test["command"] = (
+            f"{BINARY_ENV}={shlex.quote(env[BINARY_ENV])} " + test["command"]
+        )
     counts = parse_pytest(test["output"])
     source = ALLOWED_SKIPS if allowed_skips is None else allowed_skips
     allowed = allowed_skip_entries(source)
     ok = (
-        counts["passed"] > 0
+        extra_ok
+        and counts["passed"] > 0
         and counts["failed"] == 0
         and counts["errors"] == 0
         and pytest_skips_ok(test["output"], counts, allowed, files)
     )
     test = finalize(test, ok)
-    gate = make_gate(name, [test], counts, ok)
+    gate = make_gate(
+        name, [*pre_steps, test], {**counts, **(extra_counts or {})}, ok
+    )
     gate["allowed_skips"] = [dict(entry) for entry in allowed]
     return gate
 
 
-def run_pytest(allowed_skips: object = None) -> dict:
-    """Run the portable Python test subset."""
+def run_pytest(allowed_skips: object = None, commit: str = "") -> dict:
+    """Run the portable Python subset against the freshly built binary."""
+    binary_step, binary_counts = canonical_binary_step(commit)
+    env = {
+        **pytest_environment(),
+        BINARY_ENV: str(ROOT / CANONICAL_BINARY_PATH),
+    }
     return pytest_gate(
-        "portable_pytest", PYTEST_FILES, "portable pytest", allowed_skips
+        "portable_pytest",
+        PYTEST_FILES,
+        "portable pytest",
+        allowed_skips,
+        env=env,
+        pre_steps=(binary_step,),
+        extra_counts=binary_counts,
+        extra_ok=binary_step["result"] == PASS,
     )
 
 
@@ -521,6 +609,16 @@ def run_native_q_checker_tests(allowed_skips: object = None) -> dict:
         "native_q_checker_tests",
         NATIVE_Q_CHECKER_TEST_FILES,
         "native q checker tests",
+        allowed_skips,
+    )
+
+
+def run_ci_security_tests(allowed_skips: object = None) -> dict:
+    """Run the mandatory CI workflow security suite."""
+    return pytest_gate(
+        "ci_security_tests",
+        CI_SECURITY_TEST_FILES,
+        "CI security tests",
         allowed_skips,
     )
 
@@ -980,11 +1078,12 @@ def run_gates(
     return [
         run_portable(),
         run_sanitizer(),
-        run_pytest(allowed),
+        run_pytest(allowed, commit),
         run_w1_tests(allowed),
         run_release_bundle_tests(allowed),
         run_verify_report_tests(allowed),
         run_native_q_checker_tests(allowed),
+        run_ci_security_tests(allowed),
         run_style(),
         run_freshness(),
         run_audit(),
@@ -1061,6 +1160,12 @@ def show_report(path: Path) -> int:
     config = report.get("config") or {}
     skips = config.get(ALLOWED_SKIPS_KEY) or []
     print(f"Allowed skips: {len(skips)}")
+    portable = gate_named(report, "portable_pytest") or {}
+    binary = portable.get("counts") or {}
+    print(
+        f"Canonical contract binary: {binary.get(BINARY_PATH_KEY, 'missing')} "
+        f"sha256={binary.get(BINARY_DIGEST_KEY) or 'none'}"
+    )
     for gate in report.get("gates", []):
         print(f"- {gate['name']}: {gate['result']} {gate.get('counts', {})}")
     hosted = gate_named(report, "hosted_ci") or {}

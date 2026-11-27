@@ -25,6 +25,13 @@ total counts; a gate passes only with executed tests and zero failures,
 errors and unapproved skips. The rendered ``## Verification`` section is
 derived from those counts and the same config, then compared byte for byte
 to the embedded report by verify.
+
+The portable pytest gate records the canonical ``build-ci/quant_contract``
+binary path, its SHA-256, its build directory and the report commit. Verify
+checks those fields and renders them in the verification section, so a stale
+or fabricated binary claim cannot support a release. The mandatory
+``ci_security_tests`` gate is versioned and validated like every other
+Python suite.
 """
 
 from __future__ import annotations
@@ -71,9 +78,16 @@ GATE_NAMES = (
     "release_bundle_tests",
     "verify_report_tests",
     "native_q_checker_tests",
+    "ci_security_tests",
 )
 REQUIRED_GATES = frozenset(GATE_NAMES)
 PYTEST_COUNT_KEYS = ("passed", "failed", "errors", "skipped", "total")
+CANONICAL_BUILD_DIR = "build-ci"
+CANONICAL_BINARY_PATH = f"{CANONICAL_BUILD_DIR}/quant_contract"
+BINARY_PATH_KEY = "binary_path"
+BINARY_DIGEST_KEY = "binary_sha256"
+BINARY_BUILD_DIR_KEY = "build_dir"
+BINARY_COMMIT_KEY = "binary_commit"
 REQUIRED_COUNTS = {
     "portable_cpp": ("checks", "failures", "ctest_passed", "ctest_total"),
     "sanitizer": (
@@ -87,6 +101,7 @@ REQUIRED_COUNTS = {
     "release_bundle_tests": PYTEST_COUNT_KEYS,
     "verify_report_tests": PYTEST_COUNT_KEYS,
     "native_q_checker_tests": PYTEST_COUNT_KEYS,
+    "ci_security_tests": PYTEST_COUNT_KEYS,
     "style": ("pass_checks", "checks_total"),
     "state_freshness": ("findings",),
     "terminology_audit": ("findings", "binding", "advisory"),
@@ -104,6 +119,7 @@ REQUIRED_COUNTS = {
 REPORT_METADATA = ("generated_at", "started_at", "completed_at", "toolchain")
 PYTHON_GATES = (
     "native_q_checker_tests",
+    "ci_security_tests",
     "portable_pytest",
     "w1",
     "verify_report_tests",
@@ -847,6 +863,28 @@ def validate_gate_values(
         raise ValueError("hosted_ci: inconsistent job counts")
 
 
+def validate_canonical_binary(report: dict, head: str) -> None:
+    """Require the report's canonical binary evidence to be exact."""
+    counts = gate_counts(report, "portable_pytest")
+    path = counts.get(BINARY_PATH_KEY)
+    digest = counts.get(BINARY_DIGEST_KEY)
+    build_dir = counts.get(BINARY_BUILD_DIR_KEY)
+    commit = counts.get(BINARY_COMMIT_KEY)
+    if path != CANONICAL_BINARY_PATH:
+        raise ValueError("portable_pytest: wrong canonical binary path")
+    if build_dir != CANONICAL_BUILD_DIR:
+        raise ValueError("portable_pytest: wrong canonical build directory")
+    if (
+        not isinstance(digest, str)
+        or len(digest) != 64
+        or digest != digest.lower()
+        or not set(digest) <= HEX_DIGITS
+    ):
+        raise ValueError("portable_pytest: invalid canonical binary digest")
+    if commit != head:
+        raise ValueError("portable_pytest: binary commit does not match HEAD")
+
+
 def validate_native_pass(native: dict) -> None:
     """Require full integration evidence for a native PASS."""
     if native["enabled"] is not True:
@@ -980,6 +1018,7 @@ def validate_report(
             raise ValueError(f"required gate failed: {name}")
         validate_gate_metadata(gate, name)
     validate_gate_values(report, allowed)
+    validate_canonical_binary(report, head)
     hosted = validate_hosted_evidence(report, head)
     native = hosted.get("native_q")
     validate_native_record(native, scope)
@@ -1039,6 +1078,7 @@ def render_verification(report: dict) -> list[str]:
     bundle_tests = gate_counts(report, "release_bundle_tests")
     report_tests = gate_counts(report, "verify_report_tests")
     checker_tests = gate_counts(report, "native_q_checker_tests")
+    security_tests = gate_counts(report, "ci_security_tests")
     style = gate_counts(report, "style")
     freshness = gate_counts(report, "state_freshness")
     audit = gate_counts(report, "terminology_audit")
@@ -1062,6 +1102,11 @@ def render_verification(report: dict) -> list[str]:
         f"{sanitizer.get('sanitizer_failures')} failures.",
         "- Portable pytest (dataset contract, research, adversarial): "
         f"{pytest_totals(pytest)} (passed/failed/errors/skipped/total).",
+        "- Canonical dataset contract binary: "
+        f"{pytest.get(BINARY_PATH_KEY, 'missing')} "
+        f"(SHA-256 {pytest.get(BINARY_DIGEST_KEY, 'missing')}), "
+        f"built in {pytest.get(BINARY_BUILD_DIR_KEY, 'missing')} from commit "
+        f"{pytest.get(BINARY_COMMIT_KEY, 'missing')}.",
         "- Pinned instrument-master (W1): "
         f"{pytest_totals(w1)} (passed/failed/errors/skipped/total).",
         "- Release bundle suite: "
@@ -1072,6 +1117,9 @@ def render_verification(report: dict) -> list[str]:
         "(passed/failed/errors/skipped/total).",
         "- Native-q checker suite (offline): "
         f"{pytest_totals(checker_tests)} "
+        "(passed/failed/errors/skipped/total).",
+        "- CI security suite (offline): "
+        f"{pytest_totals(security_tests)} "
         "(passed/failed/errors/skipped/total).",
         f"- Python gate skip policy: "
         f"{len(report_skip_entries(report))} allowlisted skip(s): "
