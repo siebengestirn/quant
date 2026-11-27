@@ -28,6 +28,27 @@ NOT_OBSERVED and the post-job API attestation mechanism was CHECKED. Audit
 evidence verification remains PENDING until PR #71 merges. No new release,
 independent acceptance or q runtime result is claimed for this revision.
 
+## Current source note — offline modules (post-baseline)
+
+The working source adds read-only modules that are implemented offline and
+NOT QUALIFIED. They do not change the R8.4.3 / PR #67 product baseline or
+the PR #70 latest-source distinction; no new release is claimed.
+
+- `python/instrument_master.py`: bitemporal Observation registry with
+  `as_of`/`resolve`, provider coverage and separated status/eligibility;
+  ADR `governance/w1d-architecture.md`.
+- `python/exchange_calendar.py`, `python/pit_universe.py`: versioned
+  calendar/PIT contracts with no real NSE calendar data.
+- `python/corporate_actions.py`: event ledger and adjustment engine with
+  no real corporate-action data.
+- `python/upstox_v3.py`: read-only V3 daily adapter, injected HTTP and
+  mocked tests only; V2 REST remains the actual integration.
+- `python/fyers_socket.py`: read-only Data Socket adapter, injected
+  transport and mocked tests only; no live credentials.
+
+No live provider qualification, exchange status source, research
+acceptance or full W1 exit is recorded.
+
 ## Release history (HISTORICAL)
 
 The exact current main SHA, hosted CI runs and bundle digest are recorded in

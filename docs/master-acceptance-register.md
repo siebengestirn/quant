@@ -10,7 +10,10 @@ trading DISABLED / NO TRADE. The latest source revision PR #70 is a source
 coordinate in that state, not a new product release: native q runner
 execution NOT_OBSERVED and attestation mechanism CHECKED, with audit
 evidence verification PENDING until PR #71 merges. W1 is PARTIAL with 46
-offline tests and W1-D PENDING; W9 NOT QUALIFIED; W13-W15 FUTURE;
+offline tests, a bitemporal registry and ADR present; W1-D live read-only
+consistency and exchange status PENDING, no full W1 exit. W5 is PARTIAL
+with calendar/PIT modules offline; W6 IMPLEMENTED MODULES; W2/W3 adapters
+IMPLEMENTED OFFLINE / NOT QUALIFIED. W9 NOT QUALIFIED; W13-W15 FUTURE;
 W16/W18 PENDING; W19/W20 PROPOSED. R8.4.2 / PR #66 and the intermediate
 PR #64 work are HISTORICAL, no longer the current product baseline.
 
@@ -19,8 +22,9 @@ programme. A capability is complete only when requirement, implementation,
 tests, failure behaviour, operational evidence and independent acceptance
 agree. Green CI alone is not acceptance.
 
-Statuses: `NOT IMPLEMENTED`, `IMPLEMENTED`, `UNIT-TESTED`,
-`INTEGRATION-TESTED`, `FAULT-INJECTED`, `CRASH-TESTED`,
+Statuses: `NOT IMPLEMENTED`, `IMPLEMENTED`, `IMPLEMENTED MODULES` (offline
+code only), `UNIT-TESTED`, `INTEGRATION-TESTED`, `FAULT-INJECTED`,
+`CRASH-TESTED`, `NOT QUALIFIED` (no live qualification),
 `INDEPENDENTLY QUALIFIED`, `INDEPENDENTLY ACCEPTED`, `BLOCKED`.
 
 ## CURRENT STATE (authoritative)
@@ -111,8 +115,9 @@ release:
   open_prs_at_pr_62: 0
   current_pr_inventory_source: GitHub pull request index (external)
 w1: >-
-  PARTIAL: 46 offline tests at PR #67 (HISTORICAL at PR #63: 28 tests);
-  W1-D live consistency and effective dating PENDING; no full W1 exit
+  PARTIAL / IMPLEMENTED MODULES: 46 offline tests at PR #67 (HISTORICAL
+  at PR #63: 28 tests); bitemporal registry and ADR present; W1-D live
+  read-only consistency and exchange status PENDING; no full W1 exit
 governance: >-
   model SINGLE_DEVELOPER, required_github_approvals 0,
   self_review_checklist REQUIRED, exact_head_ci REQUIRED,
@@ -171,7 +176,11 @@ with runner execution NOT_OBSERVED and attestation mechanism CHECKED.
 Branch protection was recaptured at PR #70 (HISTORICAL point-in-time
 capture, response digest in the CURRENT STATE block above and in
 `governance/branch-protection-capture.json`). Audit evidence verification
-remains PENDING until PR #71 merges.
+remains PENDING until PR #71 merges. The post-baseline offline modules
+(bitemporal registry, calendar/PIT, corporate actions, V3 and Data Socket
+adapters) are source-level implementation only: they change no release
+identity, gate set or acceptance, and are qualified nowhere in this
+register.
 
 ### HISTORICAL / SUPERSEDED snapshot (retained as evidence, not current state)
 
@@ -210,10 +219,12 @@ accepted.
 
 | Workstream | Implementation | Verification | Independent acceptance | Blocked by |
 |---|---|---|---|---|
-| W1 Instrument master | W1-A/B/C implemented from pinned public Upstox and FYERS masters; effective-dated registry (W1-D) still PENDING | 46 offline tests at PR #67; 9,926 VERIFIED crosswalk matches, 174 UNMAPPED; four bundled pinned snapshots | Pending: W1-D live consistency and effective dating; no full W1 exit | W1-D live consistency |
-| W2 Upstox V3 | Partial (V2 REST; V3 fixture-schema normalisation only) | Unit-tested corrections | Pending | W1 |
-| W3 FYERS Data Socket | Not implemented | Not tested | Pending | W1, valid token |
+| W1 Instrument master | W1-A/B/C implemented from pinned public Upstox and FYERS masters; W1-D bitemporal Observation registry and ADR IMPLEMENTED OFFLINE; live exchange status source absent | 46 offline tests at PR #67; 9,926 VERIFIED crosswalk matches, 174 UNMAPPED; four bundled pinned snapshots; registry as_of/resolve/provider-coverage and separated status/eligibility offline | Pending: W1-D live read-only consistency, exchange status and effective dating; no full W1 exit | W1-D live consistency; exchange status source |
+| W2 Upstox V3 | PARTIAL: read-only V2 REST is the actual integration; V3 historical daily adapter IMPLEMENTED OFFLINE / NOT QUALIFIED (injected HTTP, mocked tests only) | Unit-tested corrections and offline adapter tests; no live V3 credential, raw payload archive or 10-session qualification | Pending: V3 provider qualification | W1; V3-capable token |
+| W3 FYERS Data Socket | IMPLEMENTED MODULES / NOT QUALIFIED: read-only Data Socket adapter with injected transport, mocked tests only; General Socket excluded | Offline tests pass; no live credential, reconnect or replay evidence | Pending: live qualification | W1, fresh read-only token |
 | W4 Provider journal | Not proven | Synthetic coverage only | Pending | W2, W3 |
+| W5 calendar/PIT | PARTIAL: exchange-calendar and PIT-universe modules IMPLEMENTED OFFLINE; no real NSE calendar data | Offline contract tests with labelled SYNTHETIC fixtures | Pending: authoritative NSE calendar and PIT universe evidence | W1; real NSE calendar data |
+| W6 corporate actions | IMPLEMENTED MODULES / NOT ACCEPTED: event ledger and versioned adjustment engine offline; no real action data | Offline tests with provenanced synthetic events | Pending: real action data and adjustment parity | W1; W5; real action data |
 | W12 Durability | Partial | Process/crash evidence only | Pending | W4, fault rig |
 | W16 Independent acceptance | Documented merge controls | Register present; exact-head CI evidence | NOT RECORDED (external) | defined high-risk release gates |
 
@@ -226,12 +237,12 @@ contains requirement IDs from the same register.
 | ID | Workstream | Current status | Dependencies | Exit evidence | Release blocking |
 |---|---|---|---|---|---|
 | W0 | Evidence-integrity registers | PARTIAL: four governance CSV registers tracked; no prior W0 definition in repository (UNVERIFIED PROVENANCE) | none | Independent reviewer disposition of the four registers | No for routine merges |
-| W1 | Instrument master and multi-venue identity | PARTIAL: W1-A/B/C implemented from pinned public Upstox/FYERS masters (9,926 VERIFIED / 174 UNMAPPED); 46 offline tests at PR #67 and four bundled snapshots; W1-D live consistency and effective dating PENDING | none | Effective-dated registry, provider crosswalk report, per-class conformance matrix and live consistency tests | Yes for multi-asset |
-| W2 | Upstox V3 data adapter | PARTIAL: read-only V2 REST; V3 seven-field candle schema normalisation of fixtures only | W1 | ISO timestamp parsing, V3 seven-field candles, ascending canonical history, raw payload archive, 10-session qualification | Yes for provider certification |
-| W3 | FYERS Data Socket adapter | NOT IMPLEMENTED | W1, fresh token | REST quotes, history, Data Socket only, reconnect and replay evidence | Yes for dual-provider |
+| W1 | Instrument master and multi-venue identity | PARTIAL / IMPLEMENTED MODULES: W1-A/B/C from pinned public Upstox/FYERS masters (9,926 VERIFIED / 174 UNMAPPED); 46 offline tests at PR #67 and four bundled snapshots; W1-D bitemporal Observation registry (as_of/resolve/provider coverage, separated status/eligibility) and ADR present; W1-D live read-only consistency and exchange status PENDING; no full W1 exit | none | Effective-dated registry, provider crosswalk report, per-class conformance matrix, exchange status source and live consistency tests | Yes for multi-asset |
+| W2 | Upstox V3 data adapter | PARTIAL: read-only V2 REST is the actual integration; V3 historical daily adapter IMPLEMENTED OFFLINE / NOT QUALIFIED (injected HTTP, mocked tests only); no live V3 endpoint qualification | W1 | ISO timestamp parsing, V3 seven-field candles, ascending canonical history, raw payload archive, 10-session qualification | Yes for provider certification |
+| W3 | FYERS Data Socket adapter | IMPLEMENTED MODULES / NOT QUALIFIED: read-only Data Socket adapter with injected transport and mocked tests only; no live credentials or feed certification; General Socket excluded | W1, fresh read-only token | REST quotes, history, Data Socket only, reconnect and replay evidence | Yes for dual-provider |
 | W4 | Provider-to-journal-to-q path | NOT PROVEN with real events | W2, W3 | Raw and normalised events, durable journal, q replay parity | Yes |
-| W5 | Exchange calendar and PIT universe | PARTIAL | W1 | Authoritative calendar, universe revisions, effective-dated aliases | Yes for research |
-| W6 | Corporate actions | NOT IMPLEMENTED | W1, W5 | Split, bonus, dividend, rights, merger and demerger fixtures with provenance | Yes |
+| W5 | Exchange calendar and PIT universe | PARTIAL: `python/exchange_calendar.py` and `python/pit_universe.py` IMPLEMENTED OFFLINE; no real NSE calendar data | W1 | Authoritative NSE calendar, universe revisions, effective-dated aliases | Yes for research |
+| W6 | Corporate actions | IMPLEMENTED MODULES / NOT ACCEPTED: `python/corporate_actions.py` append-only event ledger and versioned adjustment engine offline; no real action data | W1, W5 | Split, bonus, dividend, rights, merger and demerger events with provenance and adjustment parity | Yes |
 | W7 | Research and statistical acceptance | INCONCLUSIVE / BLOCKED | W5, W6 | Nested validation, full trial registry, Reality Check/SPA or approved alternative, cost model, sealed holdout | Yes for strategy acceptance |
 | W8 | Feature registry | PARTIAL | W5 | Versioned definitions, availability tests, C++/Python parity | No for data release; yes for strategy |
 | W9 | Contract-note reconciliation | NOT QUALIFIED: reconciliation not implemented | W1, W6 | Independent charge recalculation; zero unexplained differences | Yes for financial gate |
@@ -262,12 +273,12 @@ of the current final release bundle (external artifact).
 | Gate | Current status | Blocked by |
 |---|---|---|
 | W0 | PARTIAL | independent reviewer (acceptance) |
-| W1 | PARTIAL: W1-A/B/C pinned public masters; 46 offline tests and four bundled snapshots; W1-D and effective dating PENDING | none |
-| W2 | PARTIAL: V2 REST only; V3 fixture-schema normalisation | W1 |
-| W3 | NOT IMPLEMENTED (FYERS profile probe only) | W1, fresh token |
+| W1 | PARTIAL / IMPLEMENTED MODULES: W1-A/B/C pinned public masters; bitemporal registry and ADR present; 46 offline tests and four bundled snapshots; W1-D live read-only consistency and exchange status PENDING | none |
+| W2 | PARTIAL: V2 REST actual integration; V3 historical adapter IMPLEMENTED OFFLINE / NOT QUALIFIED | W1 |
+| W3 | IMPLEMENTED MODULES / NOT QUALIFIED (Data Socket adapter, no live credentials) | W1, fresh read-only token |
 | W4 | NOT PROVEN with real events | W2, W3 |
-| W5 | PARTIAL (ticker-keyed status) | W1 |
-| W6 | NOT IMPLEMENTED | W1, W5 |
+| W5 | PARTIAL: calendar/PIT modules IMPLEMENTED OFFLINE; no real NSE calendar data | W1 |
+| W6 | IMPLEMENTED MODULES / NOT ACCEPTED: event ledger and adjustment engine; no real action data | W1, W5 |
 | W7 | INCONCLUSIVE / BLOCKED | W5, W6 |
 | W8 | PARTIAL | W5 |
 | W9 | NOT IMPLEMENTED | W1, W6 |
@@ -318,11 +329,15 @@ and the trading decision remains NO TRADE.
 
 Provider scope (W2/W3): the live Upstox integration is read-only V2 REST
 (`https://api.upstox.com/v2` in `src/market_data.cpp`); there is no V3 HTTP
-endpoint call. V3 seven-field candle parsing is schema normalisation of
-fixtures only. V3 candle schema normalisation implemented; actual Upstox V3
-endpoints NOT established; streaming NOT IMPLEMENTED; real feed certification
-NOT achieved. FYERS is a profile probe against
-`https://api-t1.fyers.in/api/v3`; no Data Socket streaming is implemented.
+endpoint call from the C++ integration. V3 seven-field candle parsing is
+schema normalisation of fixtures only. The post-baseline `python/upstox_v3.py`
+read-only V3 daily adapter is implemented offline with injected HTTP and
+mocked tests only; actual V3 endpoint qualification, raw payload archive
+and 10-session certification are NOT achieved. Streaming is NOT IMPLEMENTED.
+FYERS live integration remains a profile probe against
+`https://api-t1.fyers.in/api/v3`; `python/fyers_socket.py` implements a
+read-only Data Socket adapter offline with an injected transport and mocked
+tests only, with no live credential or certification.
 
 ### R8.3 corrective work (PR #61 — HISTORICAL release record)
 
@@ -416,6 +431,36 @@ GATED_NOT_RUN. Independent acceptance remains PENDING. The later source
 revision PR #70 is not a product release: runner execution NOT_OBSERVED,
 attestation mechanism CHECKED and audit evidence verification PENDING until
 PR #71 merges.
+
+## Current source modules (offline, qualification pending)
+
+These modules are present in the current working source after the release
+baseline. They are offline Python code with injected I/O and mocked tests;
+they are not a product release and do not change the R8.4.3 / PR #67
+baseline or the PR #70 latest-source distinction.
+
+- `python/instrument_master.py` adds an append-only bitemporal Observation
+  registry with `as_of`, `resolve`, canonical-ID/provider-alias resolution
+  and provider coverage. Identity, conformance, provider trading status,
+  exchange status, exchange eligibility, data freshness and eligibility are
+  separate and fail closed. The design record is
+  `governance/w1d-architecture.md` (AUTHORED, not acceptance).
+- `python/exchange_calendar.py` and `python/pit_universe.py` define a
+  versioned session/halt contract and a point-in-time universe from
+  published status history. All values are caller-supplied; no real NSE
+  calendar data is bundled and fixtures are labelled SYNTHETIC.
+- `python/corporate_actions.py` provides an append-only event ledger and
+  versioned adjusted series. No real corporate-action data is supplied and
+  no adjustment is accepted.
+- `python/upstox_v3.py` is a read-only V3 historical daily adapter with
+  injected HTTP and network disabled by default; `python/fyers_socket.py`
+  is a read-only Data Socket adapter with an injected transport and the
+  General Socket explicitly forbidden. Both are NOT QUALIFIED.
+
+No live provider qualification, exchange status source, real NSE calendar
+or corporate-action data, research acceptance or full W1 exit is claimed.
+No integration into the C++ authoritative core, q tables or research keys
+is claimed; these modules write no journal and authorise no order.
 
 ## Data-only testing invariants
 

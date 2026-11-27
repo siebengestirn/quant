@@ -230,6 +230,13 @@
       "path": "governance/instrument-master-snapshots.json",
       "purpose": "Immutable instrument-master provenance pointing at tracked reference-data bytes",
       "retention": "current"
+    },
+    {
+      "class": "evidence-record",
+      "owner": "maintainer",
+      "path": "governance/w1d-architecture.md",
+      "purpose": "W1-D bitemporal instrument registry architecture decision record",
+      "retention": "current"
     }
   ],
   "policy": {

@@ -9,24 +9,36 @@ provider token.
 
 Identity verification, contract conformance, trading status and eligibility
 are reported separately. Matching an ISIN establishes identity only; it never
-implies that comparable contract fields agree. Effective dating is partial:
-effective_from is derived from the supplied snapshot market_date and
-effective_to stays open because no validity interval is supplied.
+implies that comparable contract fields agree. The legacy crosswalk reports
+the snapshot market_date as a partial, snapshot-derived observation date; the
+bitemporal registry never infers a validity date from it and keeps unknown
+effective_from and effective_to values unknown until a source establishes
+them.
 """
 
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import math
 import re
+import sys
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import NamedTuple
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+reject_duplicate_keys = importlib.import_module(
+    "json_support"
+).reject_duplicate_keys
 
 SCHEMA_VERSION = "instrument-master-v1"
 IDENTITY_VERSION = "v1"
+REGISTRY_VERSION = "instrument-registry-v1"
 
 PROVIDER_UPSTOX = "upstox"
 PROVIDER_FYERS = "fyers"
@@ -51,11 +63,24 @@ ACTIVE = "ACTIVE"
 UNKNOWN = "UNKNOWN"
 ELIGIBLE = "ELIGIBLE"
 NOT_ELIGIBLE = "NOT_ELIGIBLE"
+SINGLE_SOURCE = "SINGLE_SOURCE"
+MULTI_SOURCE = "MULTI_SOURCE"
+OPEN = "OPEN"
+PREOPEN = "PREOPEN"
+ALLOWED = "ALLOWED"
+DISALLOWED = "DISALLOWED"
+FRESH = "FRESH"
+STALE = "STALE"
+INVALID = "INVALID"
 
 IDENTITY_STATUSES = (VERIFIED, UNMAPPED, AMBIGUOUS)
 CONFORMANCE_STATUSES = (PASS, CONFLICT, INCOMPLETE)
 TRADING_STATUSES = (ACTIVE, INACTIVE, SUSPENDED, UNKNOWN)
 ELIGIBILITY_STATUSES = (ELIGIBLE, NOT_ELIGIBLE)
+PROVIDER_COVERAGE_STATUSES = (SINGLE_SOURCE, MULTI_SOURCE, UNKNOWN)
+EXCHANGE_STATUSES = (OPEN, PREOPEN, SUSPENDED, UNKNOWN)
+EXCHANGE_ELIGIBILITY_STATUSES = (ALLOWED, DISALLOWED, UNKNOWN)
+DATA_FRESHNESS_STATUSES = (FRESH, STALE, INVALID, UNKNOWN)
 
 MISSING_PROVIDER_KEY = "MISSING_PROVIDER_KEY"
 MISSING_ISIN = "MISSING_ISIN"
@@ -76,19 +101,44 @@ FYERS_EXCHANGE_SEGMENTS = {
 SNAPSHOT_FIELDS = frozenset(
     {
         "provider",
-        "url",
         "captured_at_utc",
+        "url",
         "market_date",
+        "decoded_bytes",
+        "decoded_sha256",
         "original_filename",
         "original_bytes",
         "original_sha256",
-        "decoded_bytes",
-        "decoded_sha256",
         "schema_version",
         "provider_update_timestamp",
         "status",
     }
 )
+# Non-authoritative provenance additions accepted from the canonical record.
+EXTENDED_PROVENANCE_FIELDS = frozenset(
+    {
+        "source_class",
+        "reference_original_path",
+        "reference_decoded_path",
+        "reference_original_bytes",
+        "reference_decoded_bytes",
+        "reference_original_sha256",
+        "reference_decoded_sha256",
+    }
+)
+# Observation attribute names. Provider-scoped names use
+# ``provider:<provider>:<attribute>`` so one append-only stream can carry
+# independent evidence from each provider without extra record fields.
+PROVIDER_PREFIX = "provider:"
+PROVIDER_KEY_ATTRIBUTE = "provider_key"
+ATTR_EFFECTIVE_FROM = "effective_from"
+ATTR_EFFECTIVE_TO = "effective_to"
+ATTR_IDENTITY_STATUS = "identity_status"
+ATTR_CONFORMANCE_STATUS = "conformance_status"
+ATTR_PROVIDER_TRADING_STATUS = "provider_trading_status"
+ATTR_EXCHANGE_STATUS = "exchange_status"
+ATTR_EXCHANGE_ELIGIBILITY = "exchange_eligibility"
+ATTR_DATA_FRESHNESS = "data_freshness"
 DIFF_FIELDS = (
     "exchange",
     "segment",
@@ -278,6 +328,12 @@ class CanonicalInstrument(NamedTuple):
     source_digest: str
     source_version: str
     conformance_report: ConformanceReport | None = None
+    provider_coverage: str = MULTI_SOURCE
+    provider_trading_status: str = UNKNOWN
+    exchange_status: str = UNKNOWN
+    exchange_eligibility: str = UNKNOWN
+    data_freshness: str = UNKNOWN
+    quant_eligibility: str = NOT_ELIGIBLE
 
     @property
     def identity_status(self) -> str:
@@ -320,10 +376,15 @@ class FieldConformance(NamedTuple):
 
 
 class ConformanceReport(NamedTuple):
-    """Per-field contract conformance, separate from identity corroboration."""
+    """Per-field contract conformance, separate from identity corroboration.
+
+    provider_coverage is an independent dimension: agreement within one
+    provider is never reported as cross-provider PASS.
+    """
 
     status: str
     fields: tuple[FieldConformance, ...]
+    provider_coverage: str = MULTI_SOURCE
 
     @property
     def conflicts(self) -> tuple[FieldConformance, ...]:
@@ -351,6 +412,9 @@ class QuarantineReport(NamedTuple):
     by_reason_provider_class: dict[str, dict[str, dict[str, int]]]
 
 
+_EMPTY_COUNTS: Mapping[str, int] = MappingProxyType({})
+
+
 class CrosswalkReport(NamedTuple):
     """Cross-provider result plus identities withheld from eligibility.
 
@@ -362,8 +426,242 @@ class CrosswalkReport(NamedTuple):
     instruments: tuple[CanonicalInstrument, ...]
     quarantine: tuple[QuarantineEntry, ...]
     status_counts: dict[str, int]
-    conformance_counts: dict[str, int] = {}
-    trading_counts: dict[str, int] = {}
+    conformance_counts: Mapping[str, int] = _EMPTY_COUNTS
+    trading_counts: Mapping[str, int] = _EMPTY_COUNTS
+    coverage_counts: Mapping[str, int] = _EMPTY_COUNTS
+
+
+class Observation(NamedTuple):
+    """One append-only observation; corrections are new rows, not edits."""
+
+    canonical_instrument_id: str
+    attribute_name: str
+    attribute_value: object
+    valid_from: str | None
+    valid_to: str | None
+    observed_at: str
+    ingested_at: str
+    provider_updated_at: str | None
+    source_digest: str
+    source_version: str
+    registry_version: str
+
+
+@dataclass(frozen=True)
+class InstrumentState:
+    """Bitemporal view at one market date and observation time."""
+
+    canonical_instrument_id: str
+    market_date: str
+    observed_at: str
+    effective_from: str | None
+    effective_to: str | None
+    provider_coverage: str
+    identity_status: str
+    conformance_status: str
+    provider_trading_status: str
+    exchange_status: str
+    exchange_eligibility: str
+    data_freshness: str
+    quant_eligibility: str
+    provider_keys: tuple[str, ...]
+    attributes: Mapping[str, object]
+    source_digest: str
+    source_version: str
+    registry_version: str
+
+    def as_dict(self) -> dict[str, object]:
+        """Return a plain mapping, safe for JSON serialisation."""
+        return {**self.__dict__, "attributes": dict(self.attributes)}
+
+    def __getitem__(self, key: str) -> object:
+        """Allow mapping-style access to every state field."""
+        if key not in self.__dict__:
+            raise KeyError(key)
+        return getattr(self, key)
+
+    def get(self, key: str, default: object = None) -> object:
+        """Return a state field with a mapping-style default."""
+        return self.__dict__.get(key, default)
+
+
+class InstrumentRegistry:
+    """Immutable, append-only store of observations with two time axes."""
+
+    def __init__(self, observations: Sequence[Observation]) -> None:
+        rows = []
+        for item in observations:
+            if not isinstance(item, Observation):
+                raise ValueError("registry requires Observation records")
+            if not item.canonical_instrument_id or not item.attribute_name:
+                raise ValueError("observation requires identity and attribute")
+            _date(item.valid_from, "valid_from")
+            _date(item.valid_to, "valid_to")
+            _timestamp(item.observed_at)
+            _timestamp(item.ingested_at)
+            rows.append(item)
+        self._observations = tuple(sorted(rows, key=_order_key))
+        self._ids = tuple(
+            sorted({row.canonical_instrument_id for row in self._observations})
+        )
+
+    @property
+    def observations(self) -> tuple[Observation, ...]:
+        """Return the append-only observation rows in deterministic order."""
+        return self._observations
+
+    @property
+    def canonical_ids(self) -> tuple[str, ...]:
+        """Return every canonical identifier present in the registry."""
+        return self._ids
+
+    def as_of(
+        self, market_date: str, observed_at: str
+    ) -> dict[str, InstrumentState]:
+        """Return states valid on a date and known by an observation time."""
+        day = _date(market_date, "market_date")
+        moment = _timestamp(observed_at)
+        selected: dict[str, dict[str, Observation]] = {}
+        for row in self._observations:
+            if _knowledge_time(row) > moment:
+                continue
+            if row.valid_from is not None and row.valid_from > day:
+                continue
+            if row.valid_to is not None and day >= row.valid_to:
+                continue
+            bucket = selected.setdefault(row.canonical_instrument_id, {})
+            current = bucket.get(row.attribute_name)
+            if current is None or _order_key(row) > _order_key(current):
+                bucket[row.attribute_name] = row
+        return {
+            identity: self._state_for(identity, day, observed_at, bucket)
+            for identity, bucket in selected.items()
+        }
+
+    def resolve(self, identifier: str, as_of: str) -> InstrumentState | None:
+        """Resolve a canonical ID or provider key to its historical state."""
+        moment = _timestamp(as_of)
+        identity = self.canonical_id_for(identifier, as_of=as_of)
+        if identity is None:
+            return None
+        day = moment.date().isoformat()
+        return self.as_of(day, as_of).get(identity)
+
+    def canonical_id_for(
+        self, identifier: str, *, as_of: str | None = None
+    ) -> str | None:
+        """Map a canonical ID or provider alias to its canonical ID."""
+        moment = _timestamp(as_of) if as_of is not None else None
+        known = [
+            row
+            for row in self._observations
+            if moment is None or _knowledge_time(row) <= moment
+        ]
+        known_ids = {row.canonical_instrument_id for row in known}
+        if identifier in known_ids:
+            return identifier
+        for row in reversed(known):
+            parsed = split_provider_attribute(row.attribute_name)
+            if parsed is None or parsed[1] != PROVIDER_KEY_ATTRIBUTE:
+                continue
+            provider, _attribute = parsed
+            key = str(row.attribute_value)
+            if identifier in (key, provider_alias(provider, key)):
+                return row.canonical_instrument_id
+        return None
+
+    def provider_coverage(
+        self,
+        instrument_id: str | None = None,
+        *,
+        market_date: str | None = None,
+        observed_at: str | None = None,
+    ) -> str | dict[str, str]:
+        """Return coverage for one ID, or a mapping for all IDs."""
+        if instrument_id is None:
+            return {
+                identity: self.provider_coverage(
+                    identity, market_date=market_date, observed_at=observed_at
+                )
+                for identity in self._ids
+            }
+        if observed_at is None:
+            known = [
+                row.ingested_at
+                for row in self._observations
+                if row.canonical_instrument_id == instrument_id
+            ]
+            if not known:
+                return UNKNOWN
+            observed_at = max(known, key=_timestamp)
+        day = market_date or _timestamp(observed_at).date().isoformat()
+        state = self.as_of(day, observed_at).get(instrument_id)
+        return state.provider_coverage if state is not None else UNKNOWN
+
+    def _state_for(
+        self,
+        identity: str,
+        day: str,
+        observed_at: str,
+        bucket: Mapping[str, Observation],
+    ) -> InstrumentState:
+        """Build one state from the observations selected for a query."""
+        values = {name: row.attribute_value for name, row in bucket.items()}
+        providers = set()
+        provider_keys = []
+        for name, row in bucket.items():
+            parsed = split_provider_attribute(name)
+            if parsed is None:
+                continue
+            provider, attribute = parsed
+            providers.add(provider)
+            if attribute == PROVIDER_KEY_ATTRIBUTE:
+                provider_keys.append(str(row.attribute_value))
+        coverage = (
+            MULTI_SOURCE
+            if len(providers) > 1
+            else SINGLE_SOURCE if providers else UNKNOWN
+        )
+        conformance = _state_conformance(values.get(ATTR_CONFORMANCE_STATUS))
+        if conformance is None:
+            conformance = conformance_from_observations(bucket, coverage)
+        latest = max(bucket.values(), key=_order_key)
+        provider_trading = _state_status(
+            values.get(ATTR_PROVIDER_TRADING_STATUS)
+        )
+        exchange = _state_status(values.get(ATTR_EXCHANGE_STATUS))
+        eligibility = _state_status(values.get(ATTR_EXCHANGE_ELIGIBILITY))
+        freshness = _state_status(values.get(ATTR_DATA_FRESHNESS))
+        identity_status = _state_status(values.get(ATTR_IDENTITY_STATUS))
+        quant = fail_closed_eligibility(
+            identity_status=identity_status,
+            provider_coverage=coverage,
+            conformance_status=conformance,
+            provider_trading_status=provider_trading,
+            exchange_status=exchange,
+            exchange_eligibility=eligibility,
+            data_freshness=freshness,
+        )
+        return InstrumentState(
+            canonical_instrument_id=identity,
+            market_date=day,
+            observed_at=observed_at,
+            effective_from=_state_date(values.get(ATTR_EFFECTIVE_FROM)),
+            effective_to=_state_date(values.get(ATTR_EFFECTIVE_TO)),
+            provider_coverage=coverage,
+            identity_status=identity_status,
+            conformance_status=conformance,
+            provider_trading_status=provider_trading,
+            exchange_status=exchange,
+            exchange_eligibility=eligibility,
+            data_freshness=freshness,
+            quant_eligibility=quant,
+            provider_keys=tuple(sorted(provider_keys)),
+            attributes=MappingProxyType(dict(values)),
+            source_digest=latest.source_digest,
+            source_version=latest.source_version,
+            registry_version=latest.registry_version,
+        )
 
 
 def sha256_hex(payload: bytes) -> str:
@@ -371,25 +669,262 @@ def sha256_hex(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _strict_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    """Reject duplicate JSON object keys instead of silently overwriting."""
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(f"duplicate JSON key: {key}")
-        result[key] = value
-    return result
-
-
 def _decode_json(payload: bytes) -> object:
     """Decode UTF-8 JSON with strict duplicate-key handling."""
-    return json.loads(payload.decode("utf-8"), object_pairs_hook=_strict_object)
+    return json.loads(
+        payload.decode("utf-8"), object_pairs_hook=reject_duplicate_keys
+    )
 
 
 def _verify_digest(payload: bytes, expected: str) -> None:
     """Fail closed when supplied bytes do not match the provenance digest."""
     if sha256_hex(payload) != expected:
         raise ValueError("snapshot digest does not match provenance")
+
+
+_DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+
+
+def _date(value: object, label: str) -> str | None:
+    """Validate an ISO calendar date, treating empty or None as unknown."""
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str) or not _DATE_RE.fullmatch(value):
+        raise ValueError(f"invalid {label}: {value!r}")
+    try:
+        datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"invalid {label}: {value!r}") from exc
+    return value
+
+
+def _timestamp(value: object) -> datetime:
+    """Parse a timezone-aware ISO timestamp, failing closed otherwise."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"invalid timestamp: {value!r}")
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise ValueError(f"invalid timestamp: {value!r}") from exc
+    if moment.tzinfo is None:
+        raise ValueError(f"timestamp requires a UTC offset: {value!r}")
+    return moment.astimezone(UTC)
+
+
+def provider_attribute(provider: str, attribute: str) -> str:
+    """Return the provider-scoped observation attribute name."""
+    if not provider or ":" in provider or not attribute:
+        raise ValueError("provider and attribute must be non-empty tokens")
+    return f"{PROVIDER_PREFIX}{provider}:{attribute}"
+
+
+def split_provider_attribute(name: str) -> tuple[str, str] | None:
+    """Return the provider and attribute of a provider-scoped name."""
+    if not isinstance(name, str) or not name.startswith(PROVIDER_PREFIX):
+        return None
+    parts = name[len(PROVIDER_PREFIX) :].split(":", 1)
+    if len(parts) != 2 or not all(parts):
+        return None
+    return parts[0], parts[1]
+
+
+def provider_alias(provider: str, key: str) -> str:
+    """Return the stable alias token used for provider-key resolution."""
+    if not provider or ":" in provider or not key:
+        raise ValueError("provider and key must be non-empty tokens")
+    return f"{provider}:{key}"
+
+
+def observation(
+    canonical_instrument_id: str,
+    attribute_name: str,
+    attribute_value: object,
+    *,
+    observed_at: str,
+    ingested_at: str | None = None,
+    valid_from: str | None = None,
+    valid_to: str | None = None,
+    provider_updated_at: str | None = None,
+    source_digest: str = "",
+    source_version: str = SCHEMA_VERSION,
+    registry_version: str = REGISTRY_VERSION,
+) -> Observation:
+    """Build one observation with explicit validity and observation times."""
+    _date(valid_from, "valid_from")
+    _date(valid_to, "valid_to")
+    if valid_from is not None and valid_to is not None:
+        if valid_from >= valid_to:
+            raise ValueError("valid_from must precede valid_to")
+    return Observation(
+        canonical_instrument_id,
+        attribute_name,
+        attribute_value,
+        valid_from,
+        valid_to,
+        observed_at,
+        ingested_at or observed_at,
+        provider_updated_at,
+        source_digest,
+        source_version,
+        registry_version,
+    )
+
+
+def _order_key(row: Observation) -> tuple:
+    """Order rows by observation time, then ingestion time and digest."""
+    return (
+        _timestamp(row.observed_at),
+        _timestamp(row.ingested_at),
+        row.provider_updated_at or "",
+        row.source_digest,
+    )
+
+
+def _knowledge_time(row: Observation) -> datetime:
+    """Return the first time QUANT could know this observation."""
+    return max(_timestamp(row.observed_at), _timestamp(row.ingested_at))
+
+
+def _state_status(value: object, allowed: Sequence[str] = ()) -> str:
+    """Return a known status token, otherwise the fail-closed UNKNOWN."""
+    if isinstance(value, str) and (not allowed or value in allowed):
+        return value
+    return UNKNOWN
+
+
+def _state_conformance(value: object) -> str | None:
+    """Return an explicit conformance token or None when unattested."""
+    if isinstance(value, str) and value in (*CONFORMANCE_STATUSES, UNKNOWN):
+        return value
+    return None
+
+
+def _state_date(value: object) -> str | None:
+    """Return an explicitly attested effective date, never an inferred one."""
+    return _date(value, "effective date")
+
+
+def conformance_from_observations(
+    bucket: Mapping[str, Observation], coverage: str
+) -> str:
+    """Evaluate comparable fields from provider-scoped observations."""
+    providers = {
+        parsed[0]
+        for name in bucket
+        if (parsed := split_provider_attribute(name)) is not None
+    }
+    if not providers:
+        return UNKNOWN
+    conflict = False
+    incomplete = coverage == SINGLE_SOURCE
+    for field in CONFORMANCE_FIELDS:
+        seen: list[tuple[str, object]] = []
+        for name, row in bucket.items():
+            parsed = split_provider_attribute(name)
+            if parsed is None or parsed[1] != field:
+                continue
+            value = row.attribute_value
+            if (
+                field == "tick_size"
+                and parsed[0] == PROVIDER_UPSTOX
+                and value is not None
+            ):
+                value = float(value) / 100
+            seen.append((parsed[0], value))
+        if not seen:
+            continue
+        present = [
+            value for _, value in seen if value is not None and value != ""
+        ]
+        if len(seen) < len(providers) or len(present) < len(providers):
+            incomplete = True
+        if present and any(
+            not _values_agree(present[0], value) for value in present[1:]
+        ):
+            conflict = True
+    if conflict:
+        return CONFLICT
+    if incomplete:
+        return INCOMPLETE
+    return PASS
+
+
+def fail_closed_eligibility(
+    *,
+    identity_status: str,
+    provider_coverage: str,
+    conformance_status: str,
+    provider_trading_status: str,
+    exchange_status: str,
+    exchange_eligibility: str,
+    data_freshness: str,
+) -> str:
+    """Grant eligibility only when every independent dimension is affirmed."""
+    gates = (
+        (identity_status, VERIFIED),
+        (provider_coverage, MULTI_SOURCE),
+        (conformance_status, PASS),
+        (provider_trading_status, ACTIVE),
+        (exchange_status, OPEN),
+        (exchange_eligibility, ALLOWED),
+        (data_freshness, FRESH),
+    )
+    return (
+        ELIGIBLE
+        if all(actual == required for actual, required in gates)
+        else NOT_ELIGIBLE
+    )
+
+
+def build_registry(observations: Sequence[Observation]) -> InstrumentRegistry:
+    """Build an immutable bitemporal registry from append-only rows."""
+    return InstrumentRegistry(observations)
+
+
+def _as_of(
+    registry: InstrumentRegistry, market_date: str, observed_at: str
+) -> dict[str, InstrumentState]:
+    """Module-level form of the registry as-of query."""
+    return registry.as_of(market_date, observed_at)
+
+
+def resolve(
+    registry: InstrumentRegistry, identifier: str, observed_at: str
+) -> InstrumentState | None:
+    """Module-level form of canonical-ID or provider-key resolution."""
+    return registry.resolve(identifier, observed_at)
+
+
+def _provider_coverage(
+    registry: InstrumentRegistry,
+    instrument_id: str | None = None,
+    *,
+    market_date: str | None = None,
+    observed_at: str | None = None,
+) -> str | dict[str, str]:
+    """Module-level form of the provider-coverage dimension."""
+    return registry.provider_coverage(
+        instrument_id, market_date=market_date, observed_at=observed_at
+    )
+
+
+_PUBLIC_QUERIES = {
+    "as_of": _as_of,
+    "provider_coverage": _provider_coverage,
+}
+
+
+def __getattr__(name: str) -> object:
+    """Expose the module-level query aliases without shadowing parameters."""
+    try:
+        return _PUBLIC_QUERIES[name]
+    except KeyError as exc:
+        raise AttributeError(
+            f"module {__name__!r} has no attribute {name!r}"
+        ) from exc
 
 
 def _text(value: object) -> str:
@@ -857,18 +1392,24 @@ def _field_conformance(
 def contract_conformance(
     group: Sequence[ProviderInstrument],
 ) -> ConformanceReport:
-    """Evaluate every comparable field independently of identity status."""
+    """Evaluate comparable fields with an independent coverage dimension."""
     fields = tuple(
         _field_conformance(field, group) for field in CONFORMANCE_FIELDS
     )
     statuses = {item.status for item in fields}
+    providers = {item.provider for item in group}
+    coverage = (
+        MULTI_SOURCE
+        if len(providers) > 1
+        else SINGLE_SOURCE if providers else UNKNOWN
+    )
     if CONFLICT in statuses:
         status = CONFLICT
-    elif INCOMPLETE in statuses:
+    elif INCOMPLETE in statuses or coverage != MULTI_SOURCE:
         status = INCOMPLETE
     else:
         status = PASS
-    return ConformanceReport(status, fields)
+    return ConformanceReport(status, fields, coverage)
 
 
 def eligibility_status(
@@ -890,6 +1431,7 @@ def _build_canonical(
     identity_status: str,
     trading_status: str,
     conformance: ConformanceReport,
+    suspended: bool = False,
 ) -> CanonicalInstrument:
     """Build one canonical instrument from its provider observations."""
     identifiers = tuple(
@@ -931,8 +1473,9 @@ def _build_canonical(
         expiry=None,
         strike=None,
         option_type=None,
-        # Partial effective dating only: the start comes from the supplied
-        # snapshot market_date and no end date is asserted.
+        # Legacy crosswalk field only: this is the snapshot observation date,
+        # not an asserted contract validity start. The bitemporal registry
+        # keeps unknown effective dates unknown instead of inferring them.
         effective_from=min(item.market_date for item in group),
         effective_to=None,
         first_observed_at=min(item.observed_at_utc for item in group),
@@ -944,6 +1487,12 @@ def _build_canonical(
         source_digest=_merged_digest(group),
         source_version=SCHEMA_VERSION,
         conformance_report=conformance,
+        provider_coverage=conformance.provider_coverage,
+        provider_trading_status=trading_status,
+        exchange_status=SUSPENDED if suspended else UNKNOWN,
+        exchange_eligibility=UNKNOWN,
+        data_freshness=UNKNOWN,
+        quant_eligibility=eligibility,
     )
 
 
@@ -1000,6 +1549,7 @@ def crosswalk(
     }
     conformance_counts = {status: 0 for status in CONFORMANCE_STATUSES}
     trading_counts = {status: 0 for status in TRADING_STATUSES}
+    coverage_counts = {SINGLE_SOURCE: 0, MULTI_SOURCE: 0}
     for identity in sorted(groups):
         group = groups[identity]
         collisions = _collision_entries(identity, group)
@@ -1009,12 +1559,18 @@ def crosswalk(
         conformance = contract_conformance(group)
         instruments.append(
             _build_canonical(
-                identity, group, identity_status, trading_status, conformance
+                identity,
+                group,
+                identity_status,
+                trading_status,
+                conformance,
+                identity in suspended,
             )
         )
         counts[identity_status] += 1
         conformance_counts[conformance.status] += 1
         trading_counts[trading_status] += 1
+        coverage_counts[conformance.provider_coverage] += 1
         if trading_status in counts:
             counts[trading_status] += 1
     return CrosswalkReport(
@@ -1023,6 +1579,7 @@ def crosswalk(
         counts,
         conformance_counts,
         trading_counts,
+        coverage_counts,
     )
 
 
@@ -1099,9 +1656,35 @@ def load_provenance(path: Path) -> dict[str, SnapshotMeta]:
         raise ValueError("provenance requires a snapshots array")
     metas = {}
     for entry in document["snapshots"]:
-        if not isinstance(entry, dict) or set(entry) != SNAPSHOT_FIELDS:
+        if not isinstance(entry, dict) or not SNAPSHOT_FIELDS <= set(entry):
             raise ValueError("unexpected snapshot provenance fields")
-        meta = SnapshotMeta(**entry)
+        unknown = set(entry) - (SNAPSHOT_FIELDS | EXTENDED_PROVENANCE_FIELDS)
+        if unknown:
+            raise ValueError(
+                f"unknown snapshot provenance fields: "
+                f"{', '.join(sorted(unknown))}"
+            )
+        extra = set(entry) & EXTENDED_PROVENANCE_FIELDS
+        if extra and not EXTENDED_PROVENANCE_FIELDS <= set(entry):
+            raise ValueError("incomplete extended provenance fields")
+        if extra and entry.get("source_class") != "immutable-reference-data":
+            raise ValueError("unsupported provenance source_class")
+        for key in ("reference_original_path", "reference_decoded_path"):
+            if key in entry:
+                value = entry[key]
+                if (
+                    not isinstance(value, str)
+                    or Path(value).is_absolute()
+                    or ".." in Path(value).parts
+                    or not value.startswith("reference-data/")
+                    or not value.endswith(".gz")
+                ):
+                    raise ValueError(f"unsafe provenance path: {key}")
+        meta = SnapshotMeta(
+            **{key: entry[key] for key in sorted(SNAPSHOT_FIELDS)}
+        )
+        if meta.provider in metas:
+            raise ValueError(f"duplicate provider: {meta.provider}")
         metas[meta.provider] = meta
     return metas
 

@@ -161,10 +161,43 @@ happens before publication in `MarketDataPipeline::IngestQuote`
 (`src/engine.cpp:1146`); `Publish` (`src/engine.cpp:1213`) is the
 downstream q step. A q IPC response is not a zero-loss guarantee.
 
+### Current source modules (offline, qualification pending)
+
+The post-baseline source adds read-only Python modules under `python/`.
+They are implemented offline with injected I/O and mocked tests only;
+they are not a product release and do not change the R8.4.3 / PR #67
+product baseline or the PR #70 latest-source distinction.
+
+- `python/instrument_master.py` holds an append-only bitemporal Observation
+  registry with `as_of`, `resolve` and provider coverage. Identity,
+  conformance, provider trading status, exchange status, exchange
+  eligibility, data freshness and eligibility are separate and fail
+  closed. `governance/w1d-architecture.md` is an AUTHORED design record,
+  not acceptance.
+- `python/exchange_calendar.py` and `python/pit_universe.py` implement a
+  versioned session/halt calendar contract and a point-in-time universe
+  from published status history. All data is caller-supplied; no real NSE
+  calendar data exists and fixtures are labelled SYNTHETIC.
+- `python/corporate_actions.py` implements an append-only event ledger
+  with correction revisions and a versioned adjustment engine. No real
+  corporate-action data is supplied and no adjusted series is accepted.
+- `python/upstox_v3.py` is a read-only V3 historical daily adapter using
+  injected HTTP with network disabled by default. `python/fyers_socket.py`
+  is a read-only Data Socket adapter using an injected transport, with the
+  General Socket forbidden. Both are NOT QUALIFIED.
+
+No live provider credential, exchange status source, real NSE calendar or
+corporate-action data, research acceptance or full W1 exit is claimed. No
+integration into the C++ authoritative core, q tables or research feature
+keys is claimed: these modules write no journal and authorise no order.
+
 ## 3. Explicit boundaries
 
 - C++ is authoritative for money, costs, accounting, risk and order
   decisions. No other layer may authorise an order.
+- The offline Python module layer is advisory only: it does not publish to
+  the C++ authoritative core, q tables or research keys, and it cannot
+  authorise an order or substitute for provider qualification.
 - Python research cannot authorise orders; it can only compute diagnostics
   and request authoritative simulation from C++ (`python/research.py:4`,
   `python/research.py:1517`).
@@ -187,10 +220,10 @@ downstream q step. A q IPC response is not a zero-loss guarantee.
 
 | Dependency edge | Current effect |
 |---|---|
-| W1 instrument master before provider qualification (W2, W3) | W1 is PARTIAL: W1-A/B/C map pinned public Upstox and FYERS masters offline (9,926 VERIFIED / 174 UNMAPPED); W1-D live consistency and effective dating are PENDING. W2 is PARTIAL with no V3 endpoint call and W3 is NOT IMPLEMENTED, so no provider is qualified. |
+| W1 instrument master before provider qualification (W2, W3) | W1 is PARTIAL / IMPLEMENTED MODULES: W1-A/B/C map pinned public Upstox and FYERS masters offline (9,926 VERIFIED / 174 UNMAPPED); W1-D bitemporal registry and ADR present; W1-D live consistency and exchange status are PENDING. W2 is PARTIAL with V2 REST as the actual integration and an offline V3 adapter NOT QUALIFIED; W3 has an offline Data Socket adapter NOT QUALIFIED, so no provider is qualified. |
 | W2 and W3 before W4 provider-to-journal-to-q path | W4 is NOT PROVEN with real events; only synthetic coverage exists. |
 | W4 before W10 operational paper trading | W10 is NOT IMPLEMENTED; the paper OMS has a model and replay but no operational lifecycle. |
-| W5 and W6 before W7 strategy acceptance | W5 is PARTIAL and W6 is NOT IMPLEMENTED; W7 is INCONCLUSIVE/BLOCKED and the holdout is SEALED_NOT_EVALUATED. |
+| W5 and W6 before W7 strategy acceptance | W5 is PARTIAL with offline calendar/PIT modules and no real NSE calendar data; W6 has an offline event ledger and adjustment engine but no real action data; W7 is INCONCLUSIVE/BLOCKED and the holdout is SEALED_NOT_EVALUATED. |
 | W4 plus a fault rig before W12 durability qualification | W12 is NOT PROVEN; power-loss testing is outstanding. |
 | W11 hosted native q before persistence releases | GATED / NOT RUN on a governed licensed runner; local native q cannot run on this Mac. R8.4 and R8.4.1 mapped the skipped conclusion as GATED_NOT_RUN, never passed; runner provisioning remains OPEN under TD-015. |
 | W7, W10, W12, W16 and compliance before W17 live route | W17 remains DISABLED; live execution must not be enabled by this baseline. |
@@ -213,6 +246,10 @@ reorganized governance records are included. R8.4.1 (PR #63) and R8.4.2
 (PR #66) are COMPLETE (HISTORICAL release records). R8.4.3 / PR #67 is
 COMPLETE under PORTABLE_RESEARCH with 4 required checks, 46 W1 tests and
 native q GATED_NOT_RUN.
+The post-baseline offline modules for W1-D, calendar/PIT, corporate actions,
+V3 and Data Socket are IMPLEMENTED OFFLINE and NOT QUALIFIED; there is no
+live feed, exchange status source or real calendar/action data. They add no
+integration into C++, q or research keys and no acceptance claim.
 At PR #58 (HISTORICAL) hosted CI runs `45969369813` and
 `45969624206` passed; at PR #61 (HISTORICAL) hosted CI run `46007348694`
 passed with native-q skipped/GATED_NOT_RUN; at PR #62 (HISTORICAL) hosted CI

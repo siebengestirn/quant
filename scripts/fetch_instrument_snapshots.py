@@ -32,6 +32,8 @@ Gate wiring (exact command, no network):
   python3 scripts/fetch_instrument_snapshots.py verify
   python3 scripts/fetch_instrument_snapshots.py evidence-report \\
       --output-report data/assurance/instrument-evidence.json
+The report uses tracked reference-data paths when those bytes are present,
+records only relative paths and never embeds machine-local directories.
 The report is written even when verification fails; a nonzero exit code means
 the evidence did not verify. Tests never download snapshots.
 """
@@ -952,11 +954,17 @@ def _relative(path: Path) -> str:
         return ""
 
 
+def _report_path(path: Path) -> str:
+    """Return a repository-relative path, or a bare name outside the tree."""
+    return _relative(path) or path.name
+
+
 def _byte_record(path: Path, size: int, digest: str) -> dict:
-    """Return exact path, byte count and SHA-256 for one snapshot file."""
+    """Return relative path, byte count and SHA-256 for one snapshot file."""
+    relative = _report_path(path)
     record = {
-        "path": str(path.resolve()),
-        "relative_path": _relative(path),
+        "path": relative,
+        "relative_path": relative,
         "bytes": 0,
         "sha256": "",
         "expected_bytes": size,
@@ -1076,9 +1084,9 @@ def build_evidence_report(source: EvidenceSource, provenance: Path) -> dict:
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
         "generated_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "provenance": _relative(provenance) or str(provenance),
+        "provenance": _report_path(provenance),
         "provenance_source": source.source,
-        "source_root": str(source.root.resolve()),
+        "source_root": _relative(source.root) or source.source,
         "extraction_command": source.extraction_command,
         "verification_status": status,
         "snapshot_count": len(snapshots),

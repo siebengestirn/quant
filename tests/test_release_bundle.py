@@ -787,6 +787,48 @@ def test_bundle_verify_checks_instrument_digests(
     assert result["native_q"] == "GATED_NOT_RUN"
 
 
+def test_stage_optional_evidence_excludes_auxiliary_report(
+    sandbox: Sandbox, workspace: Path
+) -> None:
+    """An assurance copy of the report is not staged as bundle evidence."""
+    assurance = sandbox.repo / "data" / "assurance"
+    assurance.mkdir(parents=True)
+    (assurance / "english-audit.json").write_text("[]", encoding="utf-8")
+    (assurance / "verification-report.json").write_text("{}", encoding="utf-8")
+    quant_root = workspace / "quant"
+    quant_root.mkdir()
+    RELEASE_BUNDLE.stage_optional_evidence(quant_root)
+    staged = quant_root / "evidence" / "assurance"
+    assert (staged / "english-audit.json").is_file()
+    assert not (staged / "verification-report.json").exists()
+
+
+def test_bundle_verify_rejects_auxiliary_report(
+    snapshots: SnapshotFixture, workspace: Path
+) -> None:
+    """A pre-bundle assurance report copy cannot support a release."""
+    bundle = write_test_bundle(
+        workspace, snapshots, corrupt=False, auxiliary_report=True
+    )
+    result = RELEASE_BUNDLE.verify_bundle(bundle)
+    assert not result["ok"]
+    assert any(
+        "auxiliary verification report is not permitted" in error
+        for error in result["errors"]
+    )
+
+
+def test_bundle_keeps_only_canonical_report(
+    snapshots: SnapshotFixture, workspace: Path
+) -> None:
+    """The canonical report is bundled; the auxiliary copy is absent."""
+    bundle = write_test_bundle(workspace, snapshots, corrupt=False)
+    with zipfile.ZipFile(bundle) as archive:
+        names = set(archive.namelist())
+    assert RELEASE_BUNDLE.REPORT_ENTRY in names
+    assert RELEASE_BUNDLE.AUXILIARY_REPORT_ENTRY not in names
+
+
 def test_bundle_verify_rejects_corrupt_snapshot(
     snapshots: SnapshotFixture, workspace: Path
 ) -> None:
@@ -862,6 +904,7 @@ def write_test_bundle(
     scope: str = RELEASE_SCOPE,
     audit_evidence: bool | str | None = None,
     sync_evidence: bool = True,
+    auxiliary_report: bool = False,
 ) -> Path:
     """Write a small bundle with a report, provenance and snapshots.
 
@@ -923,6 +966,12 @@ def write_test_bundle(
         path = quant_root / RELEASE_BUNDLE.INSTRUMENT_DIR / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"corrupt\n" if corrupt else payload)
+    if auxiliary_report:
+        assurance = quant_root / "evidence" / "assurance"
+        assurance.mkdir(parents=True, exist_ok=True)
+        (assurance / "verification-report.json").write_text(
+            json.dumps(report), encoding="utf-8"
+        )
     manifest = RELEASE_BUNDLE.render_manifest(
         "2026-11-27T00:00:00Z",
         COMMIT,
