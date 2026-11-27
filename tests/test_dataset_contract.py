@@ -165,6 +165,23 @@ def test_csv_schema_v3_preserves_open_interest(tmp_path: Path):
     assert any(row[-1] == "5" for row in result_rows(directory, key)[1:])
 
 
+def test_csv_schema_v3_open_interest_bounds():
+    """V3 open interest uses a bounded, exact integer representation."""
+    header = "date,open,high,low,close,volume,open_interest\n"
+    for value in ("-2", "1.5", "9223372036854775808", "1e300", "nan"):
+        payload = f"2026-01-01,100,103,99,102,1000,{value}\n".encode()
+        rows, errors = contract._read_csv_content(
+            header.encode() + payload, "x.csv", "v3"
+        )
+        assert errors and not rows
+    for value in ("-1", "0", "7", "9223372036854774784"):
+        payload = f"2026-01-01,100,103,99,102,1000,{value}\n".encode()
+        rows, errors = contract._read_csv_content(
+            header.encode() + payload, "x.csv", "v3"
+        )
+        assert not errors and rows[0]["open_interest"] == int(value)
+
+
 def result_rows(directory: Path, key: str) -> list[list[str]]:
     """Return raw CSV rows for assertion helpers."""
     return [

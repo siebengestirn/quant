@@ -2,6 +2,7 @@
 build/
 build-san/
 build-kdbx/
+build-*/
 data/
 *.o
 *.a

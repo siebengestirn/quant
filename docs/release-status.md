@@ -6,7 +6,16 @@ final evidence bundle; volatile identifiers are not copied here.
 The public web PR index showed "29 closed" because it was not fully paginated;
 it is not the authoritative inventory. PR #44 was the last technical
 remediation; PR #45 enforced branch protection; PR #46 is this final evidence
-reconciliation. Open PRs after PR #46: 0. Branches: `main` only.
+reconciliation.
+
+SUPERSEDED — historical policy before 2026-11-27: open PRs after PR #46: 0;
+branches: `main` only. This is a historical inventory snapshot, not the live
+configuration.
+
+This is the current record; superseded sections are labelled. The zero-approval
+single-developer model in the "Final integration record" section below is the
+ACTIVE POLICY. Earlier one-approval governance material is marked SUPERSEDED —
+historical policy before 2026-11-27 and is retained only as evidence.
 
 ## Status vocabulary
 
@@ -20,7 +29,7 @@ reconciliation. Open PRs after PR #46: 0. Branches: `main` only.
 | POWER-LOSS-TESTED | Not performed |
 | HOSTED-REQUIRED-CHECK | Core, ASan/UBSan and style contract pass |
 | POST-MERGE-VERIFIED | CI success on final main SHA |
-| INDEPENDENTLY ACCEPTED | Not recorded for historical PRs; now enforced going forward |
+| INDEPENDENTLY ACCEPTED | SUPERSEDED — historical policy before 2026-11-27 vocabulary; tracked now as independent external acceptance: PENDING / NOT RECORDED |
 | OPERATIONALLY CERTIFIED | Not performed |
 
 ## Hosted CI evidence — exact-head and post-merge
@@ -47,7 +56,10 @@ reconciliation. Open PRs after PR #46: 0. Branches: `main` only.
 It is therefore **not** true that every PR head was green: PR #34 was merged
 with a red style check and was repaired by PR #35. The final `main` is green.
 
-## Governance
+## Governance — SUPERSEDED historical policy before 2026-11-27
+
+Historical record of the superseded one-approval configuration; the ACTIVE
+POLICY is the zero-approval model recorded at the end of this document.
 
 Branch protection on `main` was updated to match `git-policy.json`:
 
@@ -60,8 +72,13 @@ Branch protection on `main` was updated to match `git-policy.json`:
   (linear history not required).
 
 The exported setting is `docs/branch-protection-2026-11-26.json`.
+SUPERSEDED — historical policy before 2026-11-27: this export records the old
+one-approval configuration, not the live configuration. The JSON exports are
+untouched evidence; `git-policy.json` declares policy, while only an
+authenticated API export proves live GitHub configuration.
 
-**Bootstrap exception (narrow, closed by scope, time-limited).** PR #45
+**SUPERSEDED — historical policy before 2026-11-27. Bootstrap exception
+(narrow, closed by scope, time-limited).** PR #45
 installs the approval requirement and PR #46 reconciles final evidence.
 Only one maintainer account exists,
 so GitHub cannot supply an independent approving review for those PRs.
@@ -102,18 +119,25 @@ power-loss durability NOT PROVEN; intraday/HFT UNSUPPORTED; multi-asset venue
 conformance NOT ESTABLISHED; independent reviewer acceptance for historical
 releases NOT RECORDED; live execution DISABLED; trading decision NO TRADE.
 
-## Governance evidence refresh (27 November 2026)
+## Governance evidence refresh (27 November 2026) — SUPERSEDED
 
+SUPERSEDED — historical policy before 2026-11-27: this section and its export
+record the superseded one-approval configuration, not the live configuration.
 The branch-protection endpoint was exported again after PR #46. The response
 is `docs/branch-protection-2026-11-27.json`; the SHA-256 of the raw API
 response bytes is
 `59741f72e3971a2e4e38608ddea47fa87686e46f22282214eeebe0b4ddece989`.
 It requires three strict checks, one independent approving review,
 conversation resolution, last-push approval and administrator enforcement,
-and prohibits force pushes and branch deletion. This is an authenticated
-export of the live endpoint, not a static description.
+and prohibits force pushes and branch deletion. It was an authenticated
+export of the endpoint as configured at that time, not the live configuration.
+The JSON export is untouched evidence. `git-policy.json` declares policy;
+only an authenticated API export proves live GitHub configuration.
 
-## Final integration record — 27 November 2026
+## ACTIVE POLICY — Final integration record — 27 November 2026
+
+This section is the ACTIVE POLICY. It supersedes the one-approval governance
+material above; zero PRs are open and `main` is the sole integration branch.
 
 All seven remediation PRs #47–#53 were merged sequentially with merge commits
 after fresh exact-head CI on each synced head. `main` is the sole integration
@@ -129,3 +153,9 @@ provider streaming, contract-note reconciliation, corporate actions and
 operational paper trading NOT IMPLEMENTED; native q hosted tier GATED;
 power-loss durability NOT PROVEN; intraday/HFT UNSUPPORTED; multi-asset venue
 conformance NOT ESTABLISHED; live execution DISABLED; decision NO TRADE.
+
+A final evidence bundle containing an authenticated branch-protection export,
+timestamp, final commit SHA and checksum remains to be regenerated after the
+final commit. `git-policy.json` declares policy; only an authenticated API
+export proves the live GitHub configuration. The historical JSON exports do
+not establish the current zero-approval setting.

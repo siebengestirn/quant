@@ -949,8 +949,9 @@ void TestUpstoxQuoteTimestampNormalization() {
   Json::Object excess_fraction = item;
   excess_fraction["timestamp"] =
       Json::String("2026-11-27T10:15:30.123456789+05:30");
-  Check(normalized(Json::ObjectValue(excess_fraction)).quality == "ok",
-        "excess fractional precision truncated to milliseconds");
+  Check(normalized(Json::ObjectValue(excess_fraction)).quality ==
+            "invalid_timestamp",
+        "excess fractional precision rejected instead of silently truncated");
   Json::Object slight_future = item;
   slight_future["timestamp"] = Json::Integer(wall_now + 60000);
   Check(normalized(Json::ObjectValue(slight_future)).quality == "ok",
@@ -959,6 +960,83 @@ void TestUpstoxQuoteTimestampNormalization() {
   outside["timestamp"] = Json::Integer(wall_now + 600000);
   Check(normalized(Json::ObjectValue(outside)).quality == "invalid_timestamp",
         "timestamp outside future tolerance rejected");
+}
+
+void TestIsoTimestampFailClosed() {
+  Json::Object item;
+  item["last_price"] = Json::Number(100.0);
+  item["timestamp"] = Json::String("2026-11-27T04:45:30Z");
+  item["last_trade_time"] = Json::String("1795754730000");
+  Json::Object buy;
+  buy["price"] = Json::Number(99.9);
+  buy["quantity"] = Json::Number(100.0);
+  Json::Object sell;
+  sell["price"] = Json::Number(100.1);
+  sell["quantity"] = Json::Number(100.0);
+  Json::Object depth;
+  depth["buy"] = Json::Array({Json::ObjectValue(buy)});
+  depth["sell"] = Json::Array({Json::ObjectValue(sell)});
+  item["depth"] = Json::ObjectValue(depth);
+
+  auto normalized = [&](const std::string& timestamp) {
+    Json::Object candidate = item;
+    candidate["timestamp"] = Json::String(timestamp);
+    return NormalizeUpstoxQuote(
+        Json::ObjectValue(candidate), "AAA", "UPSTOX:AAA");
+  };
+  auto expect_rejected = [&](const std::string& timestamp) {
+    const Quote quote = normalized(timestamp);
+    Check(quote.quality == "invalid_timestamp",
+          "malformed timestamp rejected: " + timestamp);
+    Check(quote.provider_timestamp_ms == 0 &&
+              quote.last_trade_timestamp_ms == 0 &&
+              quote.exchange_timestamp_ms == 0,
+          "rejected timestamp zeroes market times: " + timestamp);
+    Check(ProviderFreshnessUnknown(quote) && TradeFreshnessUnknown(quote),
+          "rejected timestamp leaves freshness unknown: " + timestamp);
+  };
+  auto expect_utc = [&](const std::string& timestamp, int64_t expected_ms) {
+    const Quote quote = normalized(timestamp);
+    Check(quote.quality == "ok",
+          "well-formed timestamp accepted: " + timestamp);
+    Check(quote.provider_timestamp_ms == expected_ms,
+          "UTC conversion exact: " + timestamp);
+  };
+
+  const std::vector<std::string> malformed = {
+      "2026-00-10T10:15:30Z",      "2026-13-01T10:15:30Z",
+      "2026-xx-01T10:15:30Z",      "2026-11-xxT10:15:30Z",
+      "2026-11-27Txx:15:30Z",      "2026-11-27T10:xx:30Z",
+      "2026-11-27T10:15:xxZ",      "2026-11-27T10:15:30+05x30",
+      "2026-11-27T10:15:30+0530",  "2026-11-27T10:15:30.Z",
+      "2026-11-27T10:15:30.1234Z", "2026-02-29T10:15:30Z",
+      "2024-02-30T10:15:30Z",      "2026-11-27T10:15:60Z",
+      "2026-11-27T24:00:00Z",      "2026-11-27T10:60:00Z",
+      "2026-11-27T10:15:30Zjunk",  "2026-11-27t10:15:30Z",
+      "2026-11-27T10:15:30",       "1969-12-31T23:59:59Z"};
+  for (const std::string& timestamp : malformed)
+    expect_rejected(timestamp);
+
+  expect_utc("2026-11-27T04:45:30Z", 1795754730000);
+  expect_utc("2026-11-27T10:15:30+05:30", 1795754730000);
+  expect_utc("2026-11-26T23:15:30-05:00", 1795752930000);
+  expect_utc("2026-11-27T04:45:30.5Z", 1795754730500);
+  expect_utc("2026-11-27T04:45:30.12Z", 1795754730120);
+  expect_utc("2026-11-27T04:45:30z", 1795754730000);
+  expect_utc("2024-02-29T10:15:30Z", 1709201730000);
+
+  const Quote received = normalized("2026-11-27T04:45:30Z");
+  const int64_t wall_now =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count();
+  Check(received.receive_wall_clock_ms > 0 &&
+            wall_now - received.receive_wall_clock_ms < 5000 &&
+            received.receive_wall_clock_ms - wall_now < 5000,
+        "independent wall-clock receipt recorded in UTC milliseconds");
+  Check(received.receive_timestamp_ms > 0 &&
+            received.receive_timestamp_ms != received.receive_wall_clock_ms,
+        "monotonic receipt distinct from wall-clock receipt");
 }
 
 void TestProviderHistoryValidation() {
@@ -1007,6 +1085,46 @@ void TestProviderHistoryValidation() {
                                                 Json::String("7")})}),
                       "AAA");
   Check(!string_oi.errors.empty(), "non-numeric open interest rejected");
+
+  auto with_oi = [](double oi) {
+    return Json::Array({Json::Array({Json::String("2026-01-01"),
+                                     Json::Number(100.0),
+                                     Json::Number(103.0),
+                                     Json::Number(99.0),
+                                     Json::Number(102.0),
+                                     Json::Number(1000.0),
+                                     Json::Number(oi)})});
+  };
+  const HistoryParseResult zero_oi = BuildHistoryCsv(with_oi(0.0), "AAA");
+  Check(zero_oi.errors.empty() &&
+            zero_oi.csv.find("2026-01-01,100,103,99,102,1000,0\n") !=
+                std::string::npos,
+        "genuine zero open interest distinct from unavailable sentinel");
+  const HistoryParseResult sentinel_oi = BuildHistoryCsv(with_oi(-1.0), "AAA");
+  Check(sentinel_oi.errors.empty() &&
+            sentinel_oi.csv.find("2026-01-01,100,103,99,102,1000,-1\n") !=
+                std::string::npos,
+        "unavailable open interest sentinel preserved");
+  const HistoryParseResult fractional_oi = BuildHistoryCsv(with_oi(1.5), "AAA");
+  Check(!fractional_oi.errors.empty(), "fractional open interest rejected");
+  const HistoryParseResult huge_oi = BuildHistoryCsv(with_oi(1.0e300), "AAA");
+  Check(!huge_oi.errors.empty(), "out-of-range open interest rejected");
+  const HistoryParseResult boundary_oi =
+      BuildHistoryCsv(with_oi(9223372036854775808.0), "AAA");
+  Check(!boundary_oi.errors.empty(),
+        "open interest at 2^63 rejected before integer conversion");
+  const HistoryParseResult near_max_oi =
+      BuildHistoryCsv(with_oi(9223372036854774784.0), "AAA");
+  Check(near_max_oi.errors.empty() &&
+            near_max_oi.csv.find("9223372036854774784") != std::string::npos,
+        "largest exactly representable int64 open interest preserved");
+  std::vector<Candle> bounded_candles;
+  Check(!ReadCsvText("date,open,high,low,close,volume,open_interest\n"
+                     "2026-01-01,100,103,99,102,1000,9223372036854775808\n",
+                     &bounded_candles,
+                     &error,
+                     "v3"),
+        "canonical v3 reader rejects out-of-range open interest");
 
   HistoryParseResult reversed = BuildHistoryCsv(
       Json::Array({ValidCandleRow("2026-01-02"), ValidCandleRow("2026-01-01")}),
@@ -3687,6 +3805,7 @@ int main() {
   TestInstrumentReferenceModel();
   TestProviderHistoryValidation();
   TestUpstoxQuoteTimestampNormalization();
+  TestIsoTimestampFailClosed();
   TestPaperOrderReducer();
   TestFillAverageArithmetic();
   TestReplayFillConflicts();

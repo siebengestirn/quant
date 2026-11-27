@@ -438,6 +438,8 @@ struct Quote {
   int64_t last_trade_timestamp_ms = 0;  // Last trade time, kept distinct.
   int64_t receive_timestamp_ms =
       0;  // steady monotonic clock, never used as market time.
+  int64_t receive_wall_clock_ms =
+      0;  // system clock UTC, audit chronology only; not a market event time.
   uint64_t sequence = 0;
   std::string quality;  // ok | stale | missing_depth | cross_provider_mismatch
 };

@@ -138,23 +138,43 @@ The expectations object carries `csv_schema`:
 An absent field means `v2` for backward compatibility; new provider snapshots
 must declare `v3`. The canonical contract digest includes `csv_schema`.
 
-Open interest is a non-negative integer. In the in-memory candle model, `-1`
-means unavailable and `0` is a genuine zero. A missing open-interest column in
-`v2` is not equivalent to zero in `v3`. The provider adapter validates the
-seventh field and preserves it in canonical output; malformed, negative or
-fractional values are rejected.
+The canonical open-interest contract is identical for the C++ and Python
+consumers:
+
+```text
+open_interest >= 0 : available value
+open_interest == -1: unavailable
+open_interest < -1 : invalid
+```
+
+Every value must be integral and strictly less than `2^63` so that the
+floating-point-to-integer conversion is defined. Genuine zero is distinct from
+unavailable, and a missing `v2` column is not equivalent to a `v3` zero. The
+provider adapter rejects malformed, fractional, negative-below-sentinel and
+out-of-range values; the seventh field is otherwise preserved verbatim in
+canonical output.
 
 ## Provider timestamp policy
 
-Upstox V3 `timestamp` is ISO-8601; `last_trade_time` may be a millisecond
-value. Both are parsed according to their documented type. Provider update
-time, exchange trade time, local wall-clock receive time and local monotonic
-receive time remain distinct.
+Upstox `timestamp` is ISO-8601 and `last_trade_time` may be a millisecond
+value. Both are parsed according to their documented type. The accepted ISO
+grammar is:
+
+```text
+YYYY-MM-DDTHH:MM:SS[.1-to-3-digits](Z|z|+HH:MM|-HH:MM)
+```
+
+Every field is checked for exact digits and range before any calendar table
+is indexed or `timegm` is called: month is validated before the days-in-month
+lookup, the day against the actual month and leap year, hours 0-23, minutes
+0-59, seconds 0-59. Leap seconds are rejected, not normalised into the next
+minute. A decimal point requires one to three digits; greater precision is
+rejected rather than silently truncated. A numeric offset requires the colon
+and ranges 0-23 hours and 0-59 minutes. Trailing characters are rejected.
 
 A timestamp is accepted when it is positive, within five minutes of future
-skew and no more than ten years in the past. Fractional seconds beyond
-milliseconds are truncated. Invalid dates, invalid timezone offsets, empty
-strings, nulls and unparseable values are rejected.
+skew and no more than ten years in the past. Invalid dates, invalid timezone
+offsets, empty strings, nulls and unparseable values are rejected.
 
 Fail-closed rule: if either the provider update timestamp or the last-trade
 timestamp is invalid, both are zeroed and the quote is marked
@@ -163,3 +183,12 @@ time. This is an explicit policy, not an omission. A provider update without
 a trade is not treated as equivalent to a malformed trade timestamp once the
 quote is accepted as `invalid_timestamp`; the rule applies to validation
 failure only.
+
+Five distinct times are recognised: provider update, exchange trade, last
+trade, local wall-clock receipt and local monotonic receipt. `Quote` stores
+`receive_timestamp_ms` from the steady monotonic clock for elapsed-time
+measurement and `receive_wall_clock_ms` from the system clock for operational
+audit chronology. The monotonic value is never used as a UTC event timestamp.
+Both receipt values are written to the durable journal. The q `quotes` table
+records the monotonic receipt as `recvNs` in nanoseconds for latency analysis;
+that field is not a UTC timestamp and must never be interpreted as one.

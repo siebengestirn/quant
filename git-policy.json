@@ -9,7 +9,7 @@
   },
   "branch": {
     "active_topic_branches": [],
-    "active_topic_rationale": "Seven remediation PRs (#47-#53) are open and awaiting independent acceptance; no topic branch is merged. main remains the sole integration branch.",
+    "active_topic_rationale": "Single-developer repository: remediation PRs #47-#53, final release record PR #54 and documentation inventory PR #55 are all merged; zero PRs are open and main is the sole integration branch. The active policy is zero required GitHub approvals with a mandatory self-review checklist and exact-head CI; independent external acceptance is not recorded.",
     "allowed_topic_prefixes": [
       "feat",
       "fix",
