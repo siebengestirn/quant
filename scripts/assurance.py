@@ -26,9 +26,10 @@ import subprocess
 import sys
 import time
 import tomllib
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from pathlib import Path
 
+from quant_common import Finding
 from state_freshness import check as check_state_freshness
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -139,17 +140,6 @@ PATTERNS = (
 BINDING_CATEGORIES = {"tautology", "audit_ignore"}
 IGNORE = re.compile(r"(?:prose|english)-audit-ignore:")
 FENCE = re.compile(r"^\s*(```|~~~)")
-
-
-@dataclass(frozen=True)
-class Finding:
-    """A terminology candidate."""
-
-    source: str
-    line: int
-    category: str
-    phrase: str
-    context: str
 
 
 def command(

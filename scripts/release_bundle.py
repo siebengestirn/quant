@@ -50,6 +50,16 @@ import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 
+from quant_common import (
+    BINARY_BUILD_DIR_KEY,
+    BINARY_COMMIT_KEY,
+    BINARY_DIGEST_KEY,
+    BINARY_PATH_KEY,
+    CANONICAL_BINARY_PATH,
+    CANONICAL_BUILD_DIR,
+    run_cli,
+)
+
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT = ROOT.parent / "quant-final-20261127.zip"
 DEFAULT_REPORT = ROOT / "data" / "assurance" / "verification-report.json"
@@ -82,12 +92,6 @@ GATE_NAMES = (
 )
 REQUIRED_GATES = frozenset(GATE_NAMES)
 PYTEST_COUNT_KEYS = ("passed", "failed", "errors", "skipped", "total")
-CANONICAL_BUILD_DIR = "build-ci"
-CANONICAL_BINARY_PATH = f"{CANONICAL_BUILD_DIR}/quant_contract"
-BINARY_PATH_KEY = "binary_path"
-BINARY_DIGEST_KEY = "binary_sha256"
-BINARY_BUILD_DIR_KEY = "build_dir"
-BINARY_COMMIT_KEY = "binary_commit"
 REQUIRED_COUNTS = {
     "portable_cpp": ("checks", "failures", "ctest_passed", "ctest_total"),
     "sanitizer": (
@@ -1581,27 +1585,32 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Dispatch the requested subcommand."""
+def dispatch(argv: list[str] | None) -> int:
+    """Build or verify a bundle from the parsed command line."""
     args = parse_args(argv)
-    try:
-        if args.command == "build":
-            build(args.output, args.report, args.staging_dir, args.scope)
-        else:
-            result = verify_bundle(args.bundle, args.scope)
-            print_summary(args.bundle, result)
-            if not result["ok"]:
-                return 1
-    except (
-        OSError,
-        RuntimeError,
-        ValueError,
-        tarfile.TarError,
-        zipfile.BadZipFile,
-    ) as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 1
+    if args.command == "build":
+        build(args.output, args.report, args.staging_dir, args.scope)
+    else:
+        result = verify_bundle(args.bundle, args.scope)
+        print_summary(args.bundle, result)
+        if not result["ok"]:
+            return 1
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Dispatch the requested subcommand, failing closed on bad evidence."""
+    return run_cli(
+        dispatch,
+        argv,
+        (
+            OSError,
+            RuntimeError,
+            ValueError,
+            tarfile.TarError,
+            zipfile.BadZipFile,
+        ),
+    )
 
 
 if __name__ == "__main__":

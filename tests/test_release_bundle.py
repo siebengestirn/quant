@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 import subprocess
+import sys
 import tempfile
 import zipfile
 from collections.abc import Iterator
@@ -15,6 +16,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
 SPEC = importlib.util.spec_from_file_location(
     "release_bundle", ROOT / "scripts" / "release_bundle.py"
 )

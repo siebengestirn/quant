@@ -60,12 +60,17 @@ SAFE_PROVIDER_RE = re.compile(r"[a-z][a-z0-9_-]*")
 SAFE_DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 SAFE_FILENAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 DIGEST_RE = re.compile(r"[0-9a-f]{64}")
+# Declared media types accepted per pinned snapshot suffix. Upstox (.gz)
+# stays gzip/binary. FYERS (.json) additionally accepts text/plain because
+# public.fyers.in serves its NSE_CM symbol-master JSON under that label
+# (observed 2026-11-27). Every accepted body is still parsed as JSON below,
+# so text/html and other declared types remain strictly rejected.
 CONTENT_TYPES = {
     ".gz": frozenset(
         {"application/gzip", "application/x-gzip", "application/octet-stream"}
     ),
     ".json": frozenset(
-        {"application/json", "text/json", "application/octet-stream"}
+        {"application/json", "text/plain", "application/octet-stream"}
     ),
 }
 BUNDLE_PREFIX = "quant/"
@@ -331,11 +336,25 @@ def _check_content_length(response: Any, url: str, max_bytes: int) -> None:
 
 
 def _check_content_type(response: Any, url: str, suffix: str) -> None:
-    """Fail on a missing or unexpected provider content type."""
+    """Reject a missing or unexpected provider content type.
+
+    Upstox ``.gz`` allows only gzip/binary labels. FYERS ``.json`` also
+    allows ``text/plain`` because that endpoint mislabels valid JSON;
+    the reason is recorded on CONTENT_TYPES. ``text/html`` and all other
+    types stay rejected, and payload validity is checked independently.
+    """
     observed = response.headers.get_content_type().lower()
     allowed = CONTENT_TYPES.get(suffix, frozenset())
     if observed not in allowed:
         raise ValueError(f"{url}: unexpected content type {observed!r}")
+
+
+def _check_json_payload(payload: bytes, url: str) -> None:
+    """Require downloaded bytes to parse as JSON, whatever the header says."""
+    try:
+        json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{url}: payload is not valid JSON: {exc}") from exc
 
 
 def download(
@@ -343,7 +362,11 @@ def download(
     max_bytes: int = MAX_ORIGINAL_BYTES,
     suffix: str = ".json",
 ) -> bytes:
-    """Stream one pinned URL over HTTPS with host and size limits."""
+    """Stream one pinned URL over HTTPS with host and size limits.
+
+    A ``.json`` snapshot must also parse as JSON, independently of its
+    declared content type; the header is never trusted for validity.
+    """
     validate_url(url)
     opener = urllib.request.build_opener(AllowlistedRedirect())
     try:
@@ -353,7 +376,10 @@ def download(
                 raise ValueError(f"{url}: unexpected HTTP status {status}")
             _check_content_length(response, url, max_bytes)
             _check_content_type(response, url, suffix)
-            return read_limited(response, url, max_bytes)
+            payload = read_limited(response, url, max_bytes)
+            if suffix == ".json":
+                _check_json_payload(payload, url)
+            return payload
     except urllib.error.HTTPError as exc:
         raise ValueError(f"{url}: HTTP status {exc.code}") from exc
     except urllib.error.URLError as exc:

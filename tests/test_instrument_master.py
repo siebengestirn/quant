@@ -12,6 +12,7 @@ import sys
 import zipfile
 from email.message import Message
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -702,7 +703,7 @@ def test_oversize_and_unexpected_content_are_rejected():
 
     url = METAS["upstox"].url
     with pytest.raises(ValueError, match="unexpected content type"):
-        fetcher._check_content_type(Response("text/plain", "1"), url, ".json")
+        fetcher._check_content_type(Response("text/html", "1"), url, ".json")
     with pytest.raises(ValueError, match="Content-Length"):
         fetcher._check_content_length(
             Response("application/json", "99"), url, 10
@@ -747,6 +748,99 @@ def test_download_rejects_bad_status_and_streams_with_limits(monkeypatch):
     with pytest.raises(ValueError, match="unexpected HTTP status 404"):
         fetcher.download(f"{url}?bad", 100, ".json")
     assert fetcher.download(url, 100, ".json") == b'{"ok":true}'
+
+
+class _StubResponse:
+    """In-memory response with declared headers and a synthetic body."""
+
+    def __init__(
+        self, content_type: str, body: bytes, status: int = 200
+    ) -> None:
+        self.status = status
+        self.headers = Message()
+        self.headers["Content-Type"] = content_type
+        self.headers["Content-Length"] = str(len(body))
+        self._body = io.BytesIO(body)
+
+    def read(self, count: int) -> bytes:
+        """Return the next body chunk."""
+        return self._body.read(count)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args) -> bool:
+        return False
+
+
+def _stub_retrieval(
+    monkeypatch: pytest.MonkeyPatch,
+    content_type: str,
+    body: bytes,
+    status: int = 200,
+) -> list[tuple[str, int]]:
+    """Restore real retrieval and serve one synthetic response offline."""
+    response = _StubResponse(content_type, body, status)
+    calls: list[tuple[str, int]] = []
+
+    def open_stub(url: str, timeout: int) -> _StubResponse:
+        """Record the URL and timeout, then return the prepared response."""
+        calls.append((url, timeout))
+        return response
+
+    opener = SimpleNamespace(open=open_stub)
+    monkeypatch.setattr(
+        fetcher.urllib.request, "build_opener", lambda *args: opener
+    )
+    monkeypatch.setattr(fetcher, "download", REAL_DOWNLOAD)
+    return calls
+
+
+def test_content_type_allowlist_is_explicit_and_provider_scoped() -> None:
+    """Upstox stays gzip/binary; FYERS allows text/plain for its JSON."""
+    assert fetcher.CONTENT_TYPES[".gz"] == frozenset(
+        {"application/gzip", "application/x-gzip", "application/octet-stream"}
+    )
+    assert fetcher.CONTENT_TYPES[".json"] == frozenset(
+        {"application/json", "text/plain", "application/octet-stream"}
+    )
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    ["text/plain", "application/json", "application/octet-stream"],
+)
+def test_fyers_json_download_accepts_allowlisted_content_types(
+    monkeypatch: pytest.MonkeyPatch, content_type: str
+) -> None:
+    """A text/plain label must not reject the valid FYERS JSON body."""
+    body = b'[{"symbol":"NSE:MARUTI-EQ"}]'
+    calls = _stub_retrieval(monkeypatch, content_type, body)
+    url = METAS["fyers"].url
+    assert fetcher.download(url, 100, ".json") == body
+    assert calls == [(url, fetcher.TIMEOUT_SECONDS)]
+
+
+def test_fyers_html_content_type_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An HTML error page is never accepted as a pinned JSON snapshot."""
+    _stub_retrieval(monkeypatch, "text/html", b'{"ok":true}')
+    with pytest.raises(ValueError, match="unexpected content type"):
+        fetcher.download(METAS["fyers"].url, 100, ".json")
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    ["text/plain", "application/json", "application/octet-stream"],
+)
+def test_malformed_json_is_rejected_with_an_allowed_content_type(
+    monkeypatch: pytest.MonkeyPatch, content_type: str
+) -> None:
+    """An allowed header cannot make non-JSON bytes an acceptable body."""
+    _stub_retrieval(monkeypatch, content_type, b"<html>not json</html>")
+    with pytest.raises(ValueError, match="not valid JSON"):
+        fetcher.download(METAS["fyers"].url, 100, ".json")
 
 
 def test_bundle_extraction_is_offline_and_digest_checked(tmp_path):

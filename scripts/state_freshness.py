@@ -15,6 +15,8 @@ import subprocess
 import sys
 import tempfile
 
+from quant_common import HISTORICAL_MARKERS
+
 HISTORICAL_HEADER_LINES = 12
 HISTORICAL_HEADER_MARKERS = ("superseded", "historical")
 MARKER_WINDOW = 5
@@ -44,20 +46,7 @@ IDENTIFIERS = (
     ),
     ("CI run ID", re.compile(r"(?<![0-9A-Za-z])\d{11}(?![0-9A-Za-z])")),
 )
-MARKERS = (
-    "historical",
-    "superseded",
-    "at pr #",
-    "at_pr_",
-    "baseline",
-    "snapshot",
-    "captured",
-    "previous",
-    "past",
-    "release history",
-    "old",
-    "archive",
-)
+MARKERS = (*HISTORICAL_MARKERS, "at pr #", "at_pr_", "old")
 CURRENT_KEY_RE = re.compile(
     r"(?<![\w])([a-z_]*current[a-z_0-9]*)\s*[\"']?\s*[:=]\s*(.+)",
     re.IGNORECASE,

@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from quant_common import Finding, run_cli
+
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_INPUT = ROOT / "data" / "assurance" / "english-audit.json"
 DEFAULT_OUTPUT = ROOT / "data" / "assurance" / "audit-dispositions.json"
@@ -193,27 +195,6 @@ FALLBACK_REASON = (
 )
 
 
-@dataclass(frozen=True)
-class Finding:
-    """One advisory finding from the terminology audit."""
-
-    source: str
-    line: int
-    category: str
-    phrase: str
-    context: str
-
-    def as_dict(self) -> dict[str, str | int]:
-        """Return the finding fields exactly as read from the audit."""
-        return {
-            "source": self.source,
-            "line": self.line,
-            "category": self.category,
-            "phrase": self.phrase,
-            "context": self.context,
-        }
-
-
 def utc_now() -> str:
     """Return the current UTC instant in a stable Z-suffixed format."""
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -360,24 +341,24 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Dispatch the requested command."""
+def dispatch(argv: list[str] | None) -> int:
+    """Run the requested classification or summary command."""
     args = parse_args(argv)
-    try:
-        if args.command == "classify":
-            report = classify_file(args.input, args.output)
-        else:
-            report = json.loads(args.path.read_text(encoding="utf-8"))
-        summarize(report)
-    except (
-        OSError,
-        UnicodeDecodeError,
-        json.JSONDecodeError,
-        ValueError,
-    ) as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 1
+    if args.command == "classify":
+        report = classify_file(args.input, args.output)
+    else:
+        report = json.loads(args.path.read_text(encoding="utf-8"))
+    summarize(report)
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Dispatch the requested command, failing closed on malformed input."""
+    return run_cli(
+        dispatch,
+        argv,
+        (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError),
+    )
 
 
 if __name__ == "__main__":

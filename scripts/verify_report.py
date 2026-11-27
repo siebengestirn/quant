@@ -43,6 +43,15 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
+from quant_common import (
+    BINARY_BUILD_DIR_KEY,
+    BINARY_COMMIT_KEY,
+    BINARY_DIGEST_KEY,
+    BINARY_PATH_KEY,
+    CANONICAL_BINARY_PATH,
+    CANONICAL_BUILD_DIR,
+)
+
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT = ROOT / "data" / "assurance" / "verification-report.json"
 REPOSITORY = "siebengestirn/quant"
@@ -98,12 +107,6 @@ RELEASE_BUNDLE_TEST_FILES = ("tests/test_release_bundle.py",)
 VERIFY_REPORT_TEST_FILES = ("tests/test_verify_report.py",)
 NATIVE_Q_CHECKER_TEST_FILES = ("tests/test_native_q_ci.py",)
 BINARY_ENV = "QUANT_CONTRACT_BIN"
-CANONICAL_BUILD_DIR = "build-ci"
-CANONICAL_BINARY_PATH = f"{CANONICAL_BUILD_DIR}/quant_contract"
-BINARY_PATH_KEY = "binary_path"
-BINARY_DIGEST_KEY = "binary_sha256"
-BINARY_BUILD_DIR_KEY = "build_dir"
-BINARY_COMMIT_KEY = "binary_commit"
 PYTEST_RESET = "addopts="
 PYTEST_SKIP_FLAGS = "-rs"
 PYTEST_COUNT_KEYS = ("passed", "failed", "errors", "skipped", "total")

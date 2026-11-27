@@ -8,11 +8,13 @@ import hashlib
 import importlib.util
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
 _SPEC = importlib.util.spec_from_file_location(
     "check_release_state", ROOT / "scripts" / "check_release_state.py"
 )
@@ -333,3 +335,78 @@ def test_noncanonical_json_fails(sandbox: Path) -> None:
 def test_show_reports_the_canonical_state(sandbox: Path) -> None:
     """The show command prints the authoritative release identity."""
     assert CHECK.show(sandbox) == 0
+
+
+def mark_historical(sandbox: Path) -> dict:
+    """Label the fixture state as a historical capture and return it."""
+    state = json.loads((sandbox / CHECK.STATE_RELATIVE).read_text())
+    state["capture_context"] = "HISTORICAL capture at PR #66"
+    write_json(sandbox, CHECK.STATE_RELATIVE, state)
+    return state
+
+
+def test_historical_state_without_generated_report_passes(
+    sandbox: Path,
+) -> None:
+    """A generated report absent from a clean historical checkout is N/A."""
+    mark_historical(sandbox)
+    (sandbox / CHECK.REPORT_RELATIVE).unlink()
+    assert CHECK.check(sandbox) == []
+
+
+def test_current_state_without_generated_report_fails(sandbox: Path) -> None:
+    """A current-state record must still provide the generated report."""
+    (sandbox / CHECK.REPORT_RELATIVE).unlink()
+    errors = CHECK.check(sandbox)
+    assert any(
+        f"{CHECK.REPORT_RELATIVE}: missing or unreadable" in error
+        for error in errors
+    )
+
+
+def test_historical_state_with_invalid_report_fails(sandbox: Path) -> None:
+    """A present but malformed report is never treated as not applicable."""
+    mark_historical(sandbox)
+    (sandbox / CHECK.REPORT_RELATIVE).write_text(
+        "{not valid json", encoding="utf-8"
+    )
+    errors = CHECK.check(sandbox)
+    assert any("invalid JSON" in error for error in errors)
+
+
+def test_historical_state_keeps_checking_current_doc_values(
+    sandbox: Path,
+) -> None:
+    """A historical label never excuses a stale current-state document."""
+    mark_historical(sandbox)
+    path = sandbox / DOC_PATHS[0]
+    text = path.read_text(encoding="utf-8")
+    path.write_text(
+        text.replace(CURRENT_RECORD, CURRENT_RECORD + "W1 14 tests.\n"),
+        encoding="utf-8",
+    )
+    errors = CHECK.check(sandbox)
+    assert any("stale W1 14 tests" in error for error in errors)
+
+
+def test_historical_state_keeps_checking_required_fields(
+    sandbox: Path,
+) -> None:
+    """Missing required fields fail even without a generated report."""
+    state = mark_historical(sandbox)
+    del state["manifest_sha256"]
+    write_json(sandbox, CHECK.STATE_RELATIVE, state)
+    (sandbox / CHECK.REPORT_RELATIVE).unlink()
+    errors = CHECK.check(sandbox)
+    assert any(
+        "missing required field manifest_sha256" in error for error in errors
+    )
+
+
+def test_historical_state_tolerates_captured_commit(sandbox: Path) -> None:
+    """A historical capture does not claim to match the live HEAD commit."""
+    state = mark_historical(sandbox)
+    state["main_commit"] = STALE_COMMIT
+    write_json(sandbox, CHECK.STATE_RELATIVE, state)
+    (sandbox / CHECK.REPORT_RELATIVE).unlink()
+    assert CHECK.check(sandbox) == []

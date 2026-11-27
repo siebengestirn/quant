@@ -24,6 +24,8 @@ import re
 import subprocess
 import sys
 
+from quant_common import HISTORICAL_MARKERS
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 STATE_RELATIVE = "governance/release-state.json"
 REPORT_RELATIVE = "data/assurance/verification-report.json"
@@ -103,18 +105,7 @@ TEST_FUNCTION_RE = re.compile(r"^(?:async\s+)?def\s+test_\w+", re.MULTILINE)
 SHA256_RE = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{64}(?![0-9a-fA-F])")
 COMMIT_RE = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{40}(?![0-9a-fA-F])")
 RANGE_RE = re.compile(r"^(\d+)-(\d+)$")
-LINE_MARKERS = (
-    "historical",
-    "superseded",
-    "at pr #",
-    "release history",
-    "baseline",
-    "snapshot",
-    "captured",
-    "previous",
-    "past",
-    "archive",
-)
+LINE_MARKERS = (*HISTORICAL_MARKERS, "at pr #")
 SECTION_MARKERS = (
     "historical",
     "superseded",
@@ -155,6 +146,17 @@ CURRENT_CHECKS_RE = re.compile(r"\b4\s+required checks\b", re.IGNORECASE)
 def canonical_text(payload: object) -> str:
     """Render the canonical JSON form used by every tracked JSON file."""
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
+
+
+def pr_suffix(state: dict) -> str:
+    """Return the final PR number in the merged pull request range."""
+    value = str(state.get("merged_pull_requests", ""))
+    return value.rsplit("-", maxsplit=1)[-1]
+
+
+def is_historical(state: dict) -> bool:
+    """Report whether the captured state is explicitly labelled historical."""
+    return "historical" in str(state.get("capture_context", "")).lower()
 
 
 def read_text(root: pathlib.Path, relative: str) -> str | None:
@@ -198,7 +200,7 @@ def git_head(root: pathlib.Path) -> str:
 
 
 def verify_report_constants() -> frozenset[str] | None:
-    """Import the read-only gate set from scripts/verify_report.py if present."""
+    """Import the read-only gate set from the verification script."""
     path = ROOT / "scripts" / "verify_report.py"
     if not path.is_file():
         return None
@@ -210,10 +212,10 @@ def verify_report_constants() -> frozenset[str] | None:
         spec.loader.exec_module(module)
     except (OSError, RuntimeError, ValueError):
         return None
-    gates = getattr(module, "REQUIRED_GATES", None)
-    if not isinstance(gates, (set, frozenset, list, tuple)):
+    names = getattr(module, "REQUIRED_GATES", None)
+    if not isinstance(names, (set, frozenset, list, tuple)):
         return None
-    return frozenset(str(name) for name in gates)
+    return frozenset(map(str, names))
 
 
 def inventory_errors(root: pathlib.Path) -> list[str]:
@@ -277,7 +279,7 @@ def csv_errors(root: pathlib.Path, state: dict) -> list[str]:
             for line in lines
             if not any(marker in line.lower() for marker in LINE_MARKERS)
         )
-        end = str(state.get("merged_pull_requests", "")).split("-")[-1]
+        end = pr_suffix(state)
         pr_token = f"PR #{end}" if end.isdigit() else "current PR"
         status = str(state.get("release_status", "COMPLETE"))
         tokens = (
@@ -342,7 +344,7 @@ def doc_errors(root: pathlib.Path, state: dict) -> list[str]:
         current_text = "\n".join(current)
         if version and version not in current_text:
             errors.append(f"{relative}: current record missing {version}")
-        end = str(state.get("merged_pull_requests", "")).split("-")[-1]
+        end = pr_suffix(state)
         pr_token = f"PR #{end}" if end.isdigit() else "current PR"
         status = str(state.get("release_status", "COMPLETE"))
         required = (
@@ -359,14 +361,18 @@ def doc_errors(root: pathlib.Path, state: dict) -> list[str]:
     return errors
 
 
-def state_errors(root: pathlib.Path, state: dict) -> list[str]:
-    """Cross-check the state against read-only repository evidence."""
+def required_field_errors(state: dict) -> list[str]:
+    """Report every missing or empty field of the canonical state."""
+    return [
+        f"{STATE_RELATIVE}: missing required field {field}"
+        for field in REQUIRED_FIELDS
+        if field not in state or state[field] in (None, "", [], {})
+    ]
+
+
+def identity_errors(root: pathlib.Path, state: dict) -> list[str]:
+    """Validate fixed release values, digests and the captured commit."""
     errors: list[str] = []
-    for field in REQUIRED_FIELDS:
-        if field not in state or state[field] in (None, "", [], {}):
-            errors.append(f"{STATE_RELATIVE}: missing required field {field}")
-    if errors:
-        return errors
     if state.get("release_version") != "R8.4.2":
         errors.append(f"{STATE_RELATIVE}: release_version is not R8.4.2")
     if state.get("release_scope") != "PORTABLE_RESEARCH":
@@ -378,8 +384,7 @@ def state_errors(root: pathlib.Path, state: dict) -> list[str]:
     commit = state["main_commit"]
     if not isinstance(commit, str) or not COMMIT_RE.fullmatch(commit):
         errors.append(f"{STATE_RELATIVE}: main_commit is not a full SHA-256")
-    historical = "historical" in str(state.get("capture_context", "")).lower()
-    if not historical:
+    if not is_historical(state):
         head = git_head(root)
         if not head:
             errors.append(f"{STATE_RELATIVE}: git HEAD is unavailable")
@@ -391,10 +396,14 @@ def state_errors(root: pathlib.Path, state: dict) -> list[str]:
         digest = state.get(field)
         if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
             errors.append(f"{STATE_RELATIVE}: {field} is not a SHA-256 digest")
-    report_text = read_text(root, REPORT_RELATIVE)
-    if report_text is None:
-        errors.append(f"{REPORT_RELATIVE}: missing or unreadable")
-        return errors
+    return errors
+
+
+def report_file_errors(
+    state: dict, commit: str, historical: bool, report_text: str
+) -> tuple[list[str], dict, bool]:
+    """Validate a generated report, returning its gates and parse validity."""
+    errors: list[str] = []
     digest = hashlib.sha256(report_text.encode("utf-8")).hexdigest()
     if not historical and digest != state.get("verification_report_sha256"):
         errors.append(f"{STATE_RELATIVE}: verification_report_sha256 mismatch")
@@ -402,10 +411,10 @@ def state_errors(root: pathlib.Path, state: dict) -> list[str]:
         report = json.loads(report_text)
     except json.JSONDecodeError as exc:
         errors.append(f"{REPORT_RELATIVE}: invalid JSON: {exc}")
-        return errors
+        return errors, {}, False
     if not isinstance(report, dict):
         errors.append(f"{REPORT_RELATIVE}: object required")
-        return errors
+        return errors, {}, False
     if not historical and report.get("commit") != commit:
         errors.append(f"{REPORT_RELATIVE}: commit differs from main_commit")
     if report.get("release_scope") != state.get("release_scope"):
@@ -417,6 +426,12 @@ def state_errors(root: pathlib.Path, state: dict) -> list[str]:
         for gate in report.get("gates", [])
         if isinstance(gate, dict)
     }
+    return errors, gates, True
+
+
+def gate_errors(state: dict, gates: dict) -> list[str]:
+    """Reconcile the recorded gate set and results with the report."""
+    errors: list[str] = []
     if set(gates) != set(state.get("gate_results", {})):
         errors.append(f"{STATE_RELATIVE}: gate_results differ from report")
     for name, result in state.get("gate_results", {}).items():
@@ -435,34 +450,48 @@ def state_errors(root: pathlib.Path, state: dict) -> list[str]:
         errors.append(
             f"{STATE_RELATIVE}: required_gate_set differs from verify_report"
         )
+    return errors
+
+
+def test_inventory_errors(
+    root: pathlib.Path, state: dict, gates: dict
+) -> list[str]:
+    """Validate the baselines and observed counts of every Python suite."""
+    errors: list[str] = []
     inventory = state.get("test_inventory")
     if not isinstance(inventory, dict):
         errors.append(f"{STATE_RELATIVE}: test_inventory must be an object")
-    else:
-        for name, (
-            inventory_key,
-            report_key,
-            expected,
-            additive,
-        ) in GATE_COUNT_KEYS.items():
-            gate = gates.get(name)
-            observed = gate.get("counts", {}).get(report_key) if gate else None
-            if not isinstance(observed, int):
-                errors.append(f"{STATE_RELATIVE}: {name} count is missing")
-            elif inventory.get(inventory_key) != expected:
-                errors.append(f"{STATE_RELATIVE}: {name} baseline differs")
-            elif additive and observed < expected:
-                errors.append(f"{STATE_RELATIVE}: {name} count below baseline")
-            elif not additive and observed != expected:
-                errors.append(f"{STATE_RELATIVE}: {name} test count differs")
-        security = read_text(root, CI_SECURITY_TEST_FILE)
-        expected = CI_SECURITY_TESTS
-        if security is not None and len(TEST_FUNCTION_RE.findall(security)) < (
-            expected
-        ):
-            errors.append(f"{STATE_RELATIVE}: ci_security test count differs")
-        if inventory.get("ci_security_tests") != expected:
-            errors.append(f"{STATE_RELATIVE}: ci_security baseline differs")
+        return errors
+    for name, (
+        inventory_key,
+        report_key,
+        expected,
+        additive,
+    ) in GATE_COUNT_KEYS.items():
+        gate = gates.get(name)
+        observed = gate.get("counts", {}).get(report_key) if gate else None
+        if not isinstance(observed, int):
+            errors.append(f"{STATE_RELATIVE}: {name} count is missing")
+        elif inventory.get(inventory_key) != expected:
+            errors.append(f"{STATE_RELATIVE}: {name} baseline differs")
+        elif additive and observed < expected:
+            errors.append(f"{STATE_RELATIVE}: {name} count below baseline")
+        elif not additive and observed != expected:
+            errors.append(f"{STATE_RELATIVE}: {name} test count differs")
+    security = read_text(root, CI_SECURITY_TEST_FILE)
+    expected = CI_SECURITY_TESTS
+    if security is not None and len(TEST_FUNCTION_RE.findall(security)) < (
+        expected
+    ):
+        errors.append(f"{STATE_RELATIVE}: ci_security test count differs")
+    if inventory.get("ci_security_tests") != expected:
+        errors.append(f"{STATE_RELATIVE}: ci_security baseline differs")
+    return errors
+
+
+def branch_policy_errors(state: dict, gates: dict) -> list[str]:
+    """Validate branch protection, the native-q gate and trading status."""
+    errors: list[str] = []
     protection = state.get("branch_protection")
     if not isinstance(protection, dict):
         errors.append(f"{STATE_RELATIVE}: branch_protection must be an object")
@@ -487,6 +516,12 @@ def state_errors(root: pathlib.Path, state: dict) -> list[str]:
         or trading.get("decision") != "NO_TRADE"
     ):
         errors.append(f"{STATE_RELATIVE}: trading authorization is not locked")
+    return errors
+
+
+def workstream_errors(state: dict) -> list[str]:
+    """Validate workstream coverage, PR range and labelled release history."""
+    errors: list[str] = []
     workstreams = state.get("current_workstreams")
     if not isinstance(workstreams, dict):
         errors.append(
@@ -508,18 +543,40 @@ def state_errors(root: pathlib.Path, state: dict) -> list[str]:
     history = state.get("historical_releases")
     if not isinstance(history, list) or not history:
         errors.append(f"{STATE_RELATIVE}: historical_releases must be a list")
-    else:
-        for number, record in enumerate(history, 1):
-            if not isinstance(record, dict) or not {
-                "note",
-                "pr",
-                "release_version",
-                "scope",
-                "status",
-            } <= set(record):
-                errors.append(
-                    f"{STATE_RELATIVE}: historical_releases[{number}] incomplete"
-                )
+        return errors
+    for number, record in enumerate(history, 1):
+        required = {"note", "pr", "release_version", "scope", "status"}
+        if not isinstance(record, dict) or not required <= set(record):
+            errors.append(
+                f"{STATE_RELATIVE}: historical_releases[{number}] incomplete"
+            )
+    return errors
+
+
+def state_errors(root: pathlib.Path, state: dict) -> list[str]:
+    """Cross-check the state against read-only repository evidence."""
+    errors = required_field_errors(state)
+    if errors:
+        return errors
+    errors.extend(identity_errors(root, state))
+    report_text = read_text(root, REPORT_RELATIVE)
+    if report_text is None:
+        # A generated report is absent in a clean checkout. A historical
+        # capture does not claim that generated file, so the check is
+        # NOT_APPLICABLE there; a current-state record must still provide it.
+        if not is_historical(state):
+            errors.append(f"{REPORT_RELATIVE}: missing or unreadable")
+        return errors
+    report_errors, gates, valid = report_file_errors(
+        state, state["main_commit"], is_historical(state), report_text
+    )
+    errors.extend(report_errors)
+    if not valid:
+        return errors
+    errors.extend(gate_errors(state, gates))
+    errors.extend(test_inventory_errors(root, state, gates))
+    errors.extend(branch_policy_errors(state, gates))
+    errors.extend(workstream_errors(state))
     return errors
 
 
