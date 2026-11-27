@@ -205,12 +205,18 @@ DATASET_CONTRACT = _load_dataset_contract()
 
 def _write_manifest(directory: Path) -> None:
     """Write a v2 contract and manifest for every CSV in the directory."""
-    paths = sorted(directory.glob("*.csv"))
-    symbols = [path.stem for path in paths]
+    storage = {path.stem: path for path in directory.glob("*.csv")}
+    expectations_path = directory / "contract.json"
+    if expectations_path.is_file():
+        prior = research.json.loads(expectations_path.read_text())
+        keys = prior["storage_keys"]
+    else:
+        keys = {stem: stem for stem in storage}
+    symbols = sorted(keys)
     sessions = sorted(
         {
             line.split(",", 1)[0]
-            for path in paths
+            for path in storage.values()
             for line in path.read_text(encoding="utf-8").splitlines()[1:]
             if line
         }
@@ -227,6 +233,12 @@ def _write_manifest(directory: Path) -> None:
         "last_date": sessions[-1],
         "min_rows": 1,
         "instrument_ids": {symbol: f"ID-{symbol}" for symbol in symbols},
+        "storage_keys": {
+            symbol: keys.get(
+                symbol, DATASET_CONTRACT.storage_key(f"ID-{symbol}")
+            )
+            for symbol in symbols
+        },
     }
     DATASET_CONTRACT.write_contract(directory, expectations)
     errors = DATASET_CONTRACT.write_manifest(directory, expectations)
@@ -236,7 +248,7 @@ def _write_manifest(directory: Path) -> None:
     # structurally valid manifest so the verifier can fail closed on content.
     files = {}
     for symbol in symbols:
-        content = (directory / f"{symbol}.csv").read_bytes()
+        content = storage[expectations["storage_keys"][symbol]].read_bytes()
         rows = len(content.decode("utf-8").splitlines()) - 1
         files[symbol] = {
             "digest": DATASET_CONTRACT.sha256_hex(content),
