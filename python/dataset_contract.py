@@ -34,6 +34,7 @@ DIGEST_ALGORITHM = "sha256"
 HEADER_V2 = ("date", "open", "high", "low", "close", "volume")
 HEADER_V3 = HEADER_V2 + ("open_interest",)
 MAX_OPEN_INTEREST = 2**63
+MAX_EXACT_DOUBLE_INTEGER = 2**53
 VALID_CSV_SCHEMAS = ("v2", "v3")
 CONTRACT_FILE = "contract.json"
 MANIFEST_FILE = "manifest.json"
@@ -43,6 +44,7 @@ _SYMBOL_RE = re.compile(r"^[A-Z0-9 .&/_-]+$")
 _ID_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
 _STORAGE_KEY_RE = re.compile(r"^s[0-9a-f]{31}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_INTEGER_RE = re.compile(r"-?[0-9]+")
 
 CONTRACT_FIELDS = {
     "schema_version",
@@ -405,9 +407,9 @@ def _read_csv_content(
             try:
                 parsed_oi = int(fields[6])
                 if (
-                    parsed_oi < -1
+                    _INTEGER_RE.fullmatch(fields[6]) is None
+                    or parsed_oi < -1
                     or parsed_oi >= MAX_OPEN_INTEREST
-                    or float(fields[6]) != parsed_oi
                 ):
                     raise ValueError
                 open_interest = parsed_oi
@@ -422,6 +424,8 @@ def _read_csv_content(
             or low > min(opening, close)
             or max(opening, close) > high
             or volume < 0
+            or volume > MAX_EXACT_DOUBLE_INTEGER
+            or not volume.is_integer()
         ):
             errors.append(f"{name}:{number}: invalid OHLCV relationship")
         candles.append(

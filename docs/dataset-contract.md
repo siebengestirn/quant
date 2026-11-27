@@ -147,12 +147,20 @@ open_interest == -1: unavailable
 open_interest < -1 : invalid
 ```
 
-Every value must be integral and strictly less than `2^63` so that the
-floating-point-to-integer conversion is defined. Genuine zero is distinct from
-unavailable, and a missing `v2` column is not equivalent to a `v3` zero. The
-provider adapter rejects malformed, fractional, negative-below-sentinel and
-out-of-range values; the seventh field is otherwise preserved verbatim in
-canonical output.
+Every value must be integral and strictly less than `2^63`. Genuine zero is
+distinct from unavailable, and a missing `v2` column is not equivalent to a
+`v3` zero. Provider JSON integer tokens are preserved exactly: signed and
+unsigned integer tokens are converted only after the `int64_t` bound check,
+and a floating-point token is accepted only when its integral value is inside
+the exactly representable `2^53` range. A larger floating-point token is
+rejected instead of being silently rounded. Canonical CSV readers in both
+languages parse the seventh field as a bounded decimal integer.
+
+Volume is a non-negative integral count. It is carried as a double for
+analytics and is therefore exact only up to `2^53`; fractional volumes and
+counts above that bound are rejected by the provider adapter and both
+canonical CSV readers. Derived depth calculations must respect the same
+bound before converting a count to an integer.
 
 ## Provider timestamp policy
 
