@@ -9,7 +9,7 @@
       "core build and tests"
     ]
   },
-  "capture_context": "HISTORICAL point-in-time capture at PR #67; volatile pins are verified against git HEAD, the assurance report and the current release manifest when available, not a claim about later live state",
+  "capture_context": "HISTORICAL point-in-time capture at PR #68; volatile pins are verified against git HEAD and the assurance report when available, not a claim about later live state",
   "captured_state_basis": "Captured at PR #67; verified against git HEAD, the assurance report and the current release manifest",
   "current_workstreams": {
     "W1": "PARTIAL",
@@ -35,6 +35,7 @@
     "W9": "NOT QUALIFIED"
   },
   "gate_results": {
+    "audit_disposition_tests": "PASS",
     "ci_security_tests": "PASS",
     "hosted_ci": "PASS",
     "native_q_checker_tests": "PASS",
@@ -87,7 +88,7 @@
   ],
   "independent_acceptance": "PENDING",
   "main_captured_basis": "captured at PR #67; verified against git HEAD by scripts/check_release_state.py",
-  "main_commit": "8ab4b6747fcd0daa79f9cdd54f2addd21b3b3e2e",
+  "main_commit": "1c63da9ed08418b9160a1445d9080422e17e8fda",
   "manifest_basis": "captured from the R8.4.3 final release manifest; verified against the current bundle",
   "manifest_sha256": "8edb3ccb7be34fdb65d76605a818cb65621e6be34549f6297c3549cc7766349c",
   "merged_pull_requests": "47-67",
@@ -98,6 +99,7 @@
   "release_version": "R8.4.3",
   "report_basis": "captured from data/assurance/verification-report.json; verified byte for byte",
   "required_gate_set": [
+    "audit_disposition_tests",
     "ci_security_tests",
     "hosted_ci",
     "native_q_checker_tests",
@@ -112,13 +114,14 @@
     "w1"
   ],
   "test_inventory": {
-    "ci_security_tests": 14,
+    "audit_disposition_tests": 31,
+    "ci_security_tests": 16,
     "cpp_checks": 14114,
     "native_q_checker_tests": 8,
     "portable_pytest": 51,
-    "release_bundle_tests": 141,
+    "release_bundle_tests": 152,
     "sanitizer_checks": 14114,
-    "verify_report_tests": 171,
+    "verify_report_tests": 197,
     "w1": 46
   },
   "trading_authorization": {
@@ -126,5 +129,5 @@
     "live_execution": "DISABLED"
   },
   "verification_captured_basis": "captured from data/assurance/verification-report.json; verified byte for byte",
-  "verification_report_sha256": "057240cc875da3b8d839e06d99763218af86b0ee5c92fe1ff32caf6f3dc9d47c"
+  "verification_report_sha256": "ec0405bb76f2a06870d09e7dbad51799638b1e8c40f8db08626e60f334a91d28"
 }

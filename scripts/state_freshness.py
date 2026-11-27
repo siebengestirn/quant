@@ -241,6 +241,7 @@ def release_state_errors(root: pathlib.Path) -> list[str]:
     if spec is None or spec.loader is None:
         return ["governance/release-state.json: validator unavailable"]
     module = importlib.util.module_from_spec(spec)
+    sys.modules["check_release_state"] = module
     try:
         spec.loader.exec_module(module)
         return list(module.check(root))

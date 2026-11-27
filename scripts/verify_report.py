@@ -74,6 +74,7 @@ REQUIRED_JOBS = (
     "ASan/UBSan",
     "Style contract (reference guides)",
     "Release assurance (offline)",
+    "Runner attestation (post-job API evidence)",
 )
 NATIVE_RESULTS = {SKIPPED: GATED, SUCCESS: PASS}
 REPORT_SCHEMA_VERSION = 1
