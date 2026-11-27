@@ -2,7 +2,7 @@
 """Post-job runner attestation from the GitHub Actions REST API.
 
 The in-job capture script records workflow-declared label values; only the
-GitHub API can show which runner actually executed a completed job. This
+GitHub API can show which runner executed a completed job. This
 script queries that API after the native-q job finishes and writes a canonical
 attestation of the observed runner identity, the exact head SHA and the job
 lifecycle timestamps.
