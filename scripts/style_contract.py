@@ -44,22 +44,8 @@ def git(*args: str) -> list[str]:
     return result.stdout.splitlines() if result.returncode == 0 else []
 
 
-def load_inventory() -> tuple[dict, list[str]]:
-    """Load the authored-file allowlist, failing closed on any defect."""
-    path = ROOT / "governance" / "inventory.json"
-    if not path.is_file():
-        return {}, ["governance/inventory.json missing"]
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        return {}, [f"governance/inventory.json unreadable: {exc}"]
-    if not isinstance(value, dict):
-        return {}, ["governance/inventory.json malformed: object required"]
-    entries = value.get("entries")
-    if not isinstance(entries, list):
-        return {}, [
-            "governance/inventory.json malformed: entries must be a list"
-        ]
+def inventory_entry_errors(entries: list) -> list[str]:
+    """Validate every authored-file inventory entry."""
     errors: list[str] = []
     seen: set[str] = set()
     for number, entry in enumerate(entries, 1):
@@ -76,31 +62,51 @@ def load_inventory() -> tuple[dict, list[str]]:
             if rel in seen:
                 errors.append(f"{label}: duplicate path {rel}")
             seen.add(rel)
-        kind = entry.get("class")
-        if kind not in ENTRY_CLASSES:
-            errors.append(f"{label}: invalid class {kind!r}")
-        hold = entry.get("retention")
-        if hold not in RETENTIONS:
-            errors.append(f"{label}: invalid retention {hold!r}")
-    policy = value.get("policy")
+        if entry.get("class") not in ENTRY_CLASSES:
+            errors.append(f"{label}: invalid class {entry.get('class')!r}")
+        if entry.get("retention") not in RETENTIONS:
+            errors.append(
+                f"{label}: invalid retention {entry.get('retention')!r}"
+            )
+    return errors
+
+
+def inventory_policy_errors(policy: object) -> list[str]:
+    """Validate the authored-file inventory policy metadata."""
     if not isinstance(policy, dict):
-        errors.append("governance/inventory.json: policy object required")
-    else:
-        source = policy.get("docs_inventory_source")
-        if source != "governance/inventory.json":
-            errors.append(
-                "governance/inventory.json: docs_inventory_source wrong"
-            )
-        if policy.get("generated_paths_are_excluded") is not True:
-            errors.append(
-                "governance/inventory.json: generated files not excluded"
-            )
-        exts = policy.get("scope_extensions")
-        if not isinstance(exts, list) or set(exts) != {".md", ".json", ".csv"}:
-            errors.append("governance/inventory.json: bad scope_extensions")
-        rule = policy.get("rule")
-        if not isinstance(rule, str) or not rule.strip():
-            errors.append("governance/inventory.json: rule must be a string")
+        return ["governance/inventory.json: policy object required"]
+    errors: list[str] = []
+    if policy.get("docs_inventory_source") != "governance/inventory.json":
+        errors.append("governance/inventory.json: docs_inventory_source wrong")
+    if policy.get("generated_paths_are_excluded") is not True:
+        errors.append("governance/inventory.json: generated files not excluded")
+    exts = policy.get("scope_extensions")
+    if not isinstance(exts, list) or set(exts) != {".md", ".json", ".csv"}:
+        errors.append("governance/inventory.json: bad scope_extensions")
+    rule = policy.get("rule")
+    if not isinstance(rule, str) or not rule.strip():
+        errors.append("governance/inventory.json: rule must be a string")
+    return errors
+
+
+def load_inventory() -> tuple[dict, list[str]]:
+    """Load the authored-file allowlist, failing closed on any defect."""
+    path = ROOT / "governance" / "inventory.json"
+    if not path.is_file():
+        return {}, ["governance/inventory.json missing"]
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return {}, [f"governance/inventory.json unreadable: {exc}"]
+    if not isinstance(value, dict):
+        return {}, ["governance/inventory.json malformed: object required"]
+    entries = value.get("entries")
+    if not isinstance(entries, list):
+        return {}, [
+            "governance/inventory.json malformed: entries must be a list"
+        ]
+    errors = inventory_entry_errors(entries)
+    errors.extend(inventory_policy_errors(value.get("policy")))
     if errors:
         return {}, errors
     return value, []
