@@ -142,6 +142,22 @@ bool ParseFloating(const std::string& text, double* out) {
   return true;
 }
 
+// Canonical decimal integer grammar: no sign, no leading zeros, no padding.
+// This keeps one unique representation for every count in canonical CSV.
+bool IsCanonicalUnsignedInteger(std::string_view text) {
+  if (text.empty())
+    return false;
+  if (text == "0")
+    return true;
+  if (text.front() < '1' || text.front() > '9')
+    return false;
+  for (char c : text) {
+    if (c < '0' || c > '9')
+      return false;
+  }
+  return true;
+}
+
 int64_t IntegerOr(const std::map<std::string, std::string>& values,
                   const std::string& key,
                   int64_t fallback) {
@@ -1262,9 +1278,12 @@ PipelineResult MarketDataPipeline::Publish(const KdbxCheckpoint& checkpoint,
       quote.ask = number("ask");
       quote.volume = number("volume");
       const Json* volume_validity = payload.Find("volume_validity");
+      // A legacy quote payload has no validity field. The old provider path
+      // could substitute zero for a missing count, so zero is not proof of a
+      // genuine observation. Fail closed as UNKNOWN.
       quote.volume_validity =
           volume_validity == nullptr
-              ? VolumeValidity::kValid
+              ? VolumeValidity::kUnknown
               : static_cast<VolumeValidity>(volume_validity->as_int(0));
       quote.exchange_timestamp_ms =
           static_cast<int64_t>(number("exchange_timestamp_ms"));
@@ -5405,7 +5424,8 @@ bool ReadCsvText(const std::string& text,
     uint64_t exact_volume = 0;
     const auto volume_parsed = std::from_chars(
         fields[5].data(), fields[5].data() + fields[5].size(), exact_volume);
-    if (volume_parsed.ec != std::errc() ||
+    if (!IsCanonicalUnsignedInteger(fields[5]) ||
+        volume_parsed.ec != std::errc() ||
         volume_parsed.ptr != fields[5].data() + fields[5].size() ||
         exact_volume > 9007199254740992ULL) {
       if (error)

@@ -1,0 +1,32 @@
+{
+  "snapshots": [
+    {
+      "captured_at_utc": "2026-11-27T13:14:56Z",
+      "decoded_bytes": 42459869,
+      "decoded_sha256": "be7cb8f4474d272262b58314c464c8558a3540a15c7957021bfb4e03ac5a14fd",
+      "market_date": "2026-11-26",
+      "original_bytes": 2169882,
+      "original_filename": "NSE.json.gz",
+      "original_sha256": "d94d4da2057050e0df87f3cb1d42a6124532c6d611f8f053ae2dbbaa11916a58",
+      "provider": "upstox",
+      "provider_update_timestamp": "2026-11-26T23:59:38Z",
+      "schema_version": "instrument-master-v1",
+      "status": "AVAILABLE",
+      "url": "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
+    },
+    {
+      "captured_at_utc": "2026-11-27T13:14:57Z",
+      "decoded_bytes": 11287451,
+      "decoded_sha256": "51c244e2292e35160d8efeda13a4acd3388660e6e13b3b83ded5809aeba9e21f",
+      "market_date": "2026-11-26",
+      "original_bytes": 11287451,
+      "original_filename": "NSE_CM_sym_master.json",
+      "original_sha256": "51c244e2292e35160d8efeda13a4acd3388660e6e13b3b83ded5809aeba9e21f",
+      "provider": "fyers",
+      "provider_update_timestamp": "2026-11-27T02:12:36Z",
+      "schema_version": "instrument-master-v1",
+      "status": "AVAILABLE",
+      "url": "https://public.fyers.in/sym_details/NSE_CM_sym_master.json"
+    }
+  ]
+}

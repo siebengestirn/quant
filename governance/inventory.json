@@ -216,6 +216,13 @@
       "path": "tests/fixtures/canonical_dates.csv",
       "purpose": "Canonical date fixtures for automated tests",
       "retention": "current"
+    },
+    {
+      "class": "evidence-record",
+      "owner": "maintainer",
+      "path": "governance/instrument-master-snapshots.json",
+      "purpose": "Immutable public instrument-master snapshot provenance",
+      "retention": "current"
     }
   ],
   "policy": {

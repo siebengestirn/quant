@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""Detect stale state claims and broken references in tracked authored files."""
+"""Detect stale state claims and broken references in tracked authored files.
+
+The self-test uses the system temporary directory on every platform. Set
+QUANT_FRESHNESS_TEMP to an existing directory to override that location.
+"""
 
 from __future__ import annotations
 
+import os
 import pathlib
 import re
 import subprocess
 import sys
 import tempfile
 
-TEMP_ROOT = pathlib.Path(
-    "/private/var/folders/7c/m_f7hs9n445174c0x3gsy5kw0000gn/T/opencode"
-)
 HISTORICAL_HEADER_LINES = 12
 HISTORICAL_HEADER_MARKERS = ("superseded", "historical")
 MARKER_WINDOW = 5
@@ -256,6 +258,11 @@ def check(root: pathlib.Path) -> list[str]:
     return errors
 
 
+def temp_root() -> str | None:
+    """Return the optional environment override for the self-test temp dir."""
+    return os.environ.get("QUANT_FRESHNESS_TEMP") or None
+
+
 def self_test() -> bool:
     """Verify that injected defects fail and legitimate records pass."""
     ok = True
@@ -289,7 +296,7 @@ def self_test() -> bool:
             "`scripts/needed.py`\n"
         ),
     }
-    with tempfile.TemporaryDirectory(prefix="freshness-", dir=TEMP_ROOT) as tmp:
+    with tempfile.TemporaryDirectory(prefix="quant-", dir=temp_root()) as tmp:
         root = pathlib.Path(tmp)
         subprocess.run(
             ["git", "init", "-q"], cwd=root, capture_output=True, check=True
@@ -322,7 +329,7 @@ def self_test() -> bool:
             if found != wanted:
                 print(f"self-test mismatch: {needle} (found={found})")
                 ok = False
-    with tempfile.TemporaryDirectory(prefix="freshness-", dir=TEMP_ROOT) as tmp:
+    with tempfile.TemporaryDirectory(prefix="quant-", dir=temp_root()) as tmp:
         if not any(
             "git ls-files failed" in e for e in check(pathlib.Path(tmp))
         ):

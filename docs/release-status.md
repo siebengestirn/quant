@@ -184,10 +184,10 @@ identifiers: the exact current main SHA, CI runs and bundle digest are in
 
 Branch protection was captured from the authenticated endpoint
 `https://api.github.com/repos/siebengestirn/quant/branches/main/protection`
-at `2026-11-27T10:42:06Z` with HTTP 200, API version `2022-11-28` and
+at `2026-11-27T13:18:16Z` with HTTP 200, API version `2022-11-28` and
 response SHA-256
 `824414cccfa205a54326357edb182c4fb40e320b6755b323189eb1e1c5b7cc11`.
-The capture recorded `main` as `d04ac868bd4ac600d958cc0367a93217b68d2057`
+The capture recorded `main` as `464ea1bba57cdc91b3d93eb77804fd882e245022`
 at capture time; later heads are in the bundle `MANIFEST.md`. It
 records `required_approvals` 0 and three required checks (`core build and
 tests`, `ASan/UBSan`, `Style contract (reference guides)`). The tracked

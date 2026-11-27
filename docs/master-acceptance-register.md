@@ -100,7 +100,7 @@ accepted.
 
 | Workstream | Implementation | Verification | Independent acceptance | Blocked by |
 |---|---|---|---|---|
-| W1 Instrument master | Not implemented | Not tested | Pending | none |
+| W1 Instrument master | W1-A/B/C implemented from public Upstox and FYERS masters; full effective-dated registry still pending | 11 offline tests on captured bytes; 9,926 verified crosswalk matches, 174 unmapped | Pending | W1-D live consistency |
 | W2 Upstox V3 | Partial (V2 REST; V3 fixture-schema normalisation only) | Unit-tested corrections | Pending | W1 |
 | W3 FYERS Data Socket | Not implemented | Not tested | Pending | W1, valid token |
 | W4 Provider journal | Not proven | Synthetic coverage only | Pending | W2, W3 |
@@ -115,7 +115,7 @@ contains requirement IDs from the same register.
 
 | ID | Workstream | Current status | Dependencies | Exit evidence | Release blocking |
 |---|---|---|---|---|---|
-| W1 | Instrument master and multi-venue identity | NOT IMPLEMENTED beyond NSE cash-equity model | none | Effective-dated instrument registry; per-class conformance matrix | Yes for multi-asset |
+| W1 | Instrument master and multi-venue identity | PARTIAL: W1-A/B/C implemented from pinned public masters; W1-D pending | none | Effective-dated registry, provider crosswalk report, per-class conformance matrix and live consistency tests | Yes for multi-asset |
 | W2 | Upstox V3 data adapter | PARTIAL: read-only V2 REST; V3 seven-field candle schema normalisation of fixtures only | W1 | ISO timestamp parsing, V3 seven-field candles, ascending canonical history, raw payload archive, 10-session qualification | Yes for provider certification |
 | W3 | FYERS Data Socket adapter | NOT IMPLEMENTED | W1, fresh token | REST quotes, history, Data Socket only, reconnect and replay evidence | Yes for dual-provider |
 | W4 | Provider-to-journal-to-q path | NOT PROVEN with real events | W2, W3 | Raw and normalised events, durable journal, q replay parity | Yes |
