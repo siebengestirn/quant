@@ -5201,7 +5201,7 @@ bool ReadCsvText(const std::string& text,
           fields[6].data(), fields[6].data() + fields[6].size(), open_interest);
       if (result.ec != std::errc() ||
           result.ptr != fields[6].data() + fields[6].size() ||
-          open_interest < 0) {
+          open_interest < -1) {
         if (error)
           *error =
               "invalid open interest at line " + std::to_string(line_number);

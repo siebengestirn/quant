@@ -948,7 +948,7 @@ void TestProviderHistoryValidation() {
                                                 Json::Number(99.0),
                                                 Json::Number(102.0),
                                                 Json::Number(1000.0),
-                                                Json::Number(-1.0)})}),
+                                                Json::Number(-2.0)})}),
                       "AAA");
   Check(!negative_oi.errors.empty(), "negative open interest rejected");
   const HistoryParseResult string_oi =

@@ -399,7 +399,7 @@ def _read_csv_content(
         if csv_schema == "v3":
             try:
                 parsed_oi = int(fields[6])
-                if parsed_oi < 0 or float(fields[6]) != parsed_oi:
+                if parsed_oi < -1 or float(fields[6]) != parsed_oi:
                     raise ValueError
                 open_interest = parsed_oi
             except ValueError:

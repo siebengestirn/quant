@@ -910,14 +910,15 @@ HistoryParseResult BuildHistoryCsv(const Json& candles,
       return result;
     }
     double values[6] = {};
-    for (size_t i = 0; i < 6; ++i) {
+    const size_t value_count = row.array().size() == 7 ? 6 : 5;
+    for (size_t i = 0; i < value_count; ++i) {
       if (!StrictNumber(row.array()[i + 1], &values[i])) {
         result.errors.push_back(symbol + ": non-numeric field");
         return result;
       }
     }
-    const double open_interest = values[5];
-    if (open_interest < 0.0 || open_interest != std::floor(open_interest)) {
+    const double open_interest = row.array().size() == 7 ? values[5] : -1.0;
+    if (open_interest < -1.0 || open_interest != std::floor(open_interest)) {
       result.errors.push_back(symbol + ": invalid open interest");
       return result;
     }
