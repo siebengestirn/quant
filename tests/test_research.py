@@ -783,3 +783,23 @@ def test_nested_registers_full_trial_universe():
         strategies * len(analysis_nested["folds"])
     )
     assert report["methodology"]["holdout_status"] == "SEALED_NOT_EVALUATED"
+
+
+def test_report_separates_development_and_outer_test_scopes():
+    report = research.analyze(research.synthetic_history(), ROOT)
+    best = report["best_strategy"]
+    stats = report["walk_forward"][best]
+    assert "development_descriptive" in stats
+    assert stats["development_descriptive"]["scope"] == (
+        "DEVELOPMENT_DESCRIPTIVE"
+    )
+    oos = stats["outer_test"]
+    assert oos["scope"] == "OUTER_TEST_ONLY"
+    assert oos["folds_selected"] == stats["folds"]
+    assert stats["mean_ic"] == oos["mean_ic"]
+    assert stats["ic_std"] == oos["ic_std"]
+    assert stats["positive_folds"] == oos["positive_folds"]
+    for field in ("dsr", "gross_spread_mean", "gross_spread_observations"):
+        assert field in stats["development_descriptive"]
+        assert field not in oos
+    assert report["methodology"]["holdout_status"] == "SEALED_NOT_EVALUATED"

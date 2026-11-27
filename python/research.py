@@ -1225,6 +1225,85 @@ def _ic_for_dates(
     return daily
 
 
+def fold_bootstrap_ci(
+    fold_values: list[list[float]], draws: int = BOOTSTRAP_DRAWS
+) -> list[float]:
+    """Bootstrap by whole folds so outer-test boundaries are preserved."""
+    if not fold_values:
+        return [0.0, 0.0, 0.0]
+    rng = random.Random(SEED)
+    means = []
+    for _ in range(draws):
+        sample = [
+            fold_values[rng.randrange(len(fold_values))] for _ in fold_values
+        ]
+        values = [value for fold in sample for value in fold]
+        means.append(statistics.fmean(values) if values else 0.0)
+    means.sort()
+    return [
+        means[int(0.025 * draws)],
+        means[draws // 2],
+        means[int(0.975 * draws) - 1],
+    ]
+
+
+def populate_outer_test_report(report: dict, nested: dict) -> None:
+    """Derive every OOS statistic exclusively from nested outer-test rows."""
+    for name in STRATEGIES:
+        selected_folds = [
+            fold
+            for fold in nested.get("folds", [])
+            if fold["selected_strategy"] == name
+        ]
+        fold_ics = [fold["test_ic"] for fold in selected_folds]
+        oos_values = [value for fold in fold_ics for value in fold]
+        per_fold = [fold["test_mean_ic"] for fold in selected_folds]
+        oos = {
+            "scope": "OUTER_TEST_ONLY",
+            "folds_selected": len(selected_folds),
+            "observations": len(oos_values),
+            "fold_ics": fold_ics,
+            "mean_ic": statistics.fmean(per_fold) if per_fold else None,
+            "ic_std": (
+                statistics.stdev(per_fold) if len(per_fold) > 1 else 0.0
+            ),
+            "positive_folds": sum(
+                1 for value in per_fold if value and value > 0
+            ),
+            "ic_bootstrap_95ci": fold_bootstrap_ci(fold_ics),
+            "ic_hac_se": hac_standard_error(per_fold),
+        }
+        mean_ic = oos["mean_ic"]
+        oos["deflated_mean_ic"] = (
+            deflated(mean_ic, TRIALS, max(1, len(per_fold)))
+            if mean_ic is not None
+            else None
+        )
+        target = report["walk_forward"][name]
+        descriptive = dict(target)
+        descriptive["scope"] = "DEVELOPMENT_DESCRIPTIVE"
+        target["development_descriptive"] = descriptive
+        target["outer_test"] = oos
+        target["folds"] = len(selected_folds)
+        target["fold_ics"] = oos_values
+        target["scope"] = "OUT_OF_SAMPLE_FOLDS"
+        target["oos_status"] = (
+            "CALCULATED" if len(selected_folds) >= 3 else "INSUFFICIENT_FOLDS"
+        )
+        target["mean_ic"] = mean_ic
+        target["ic_std"] = oos["ic_std"]
+        target["positive_folds"] = oos["positive_folds"]
+        target["ic_bootstrap_95ci"] = oos["ic_bootstrap_95ci"]
+        target["ic_hac_se"] = oos["ic_hac_se"]
+        target["deflated_mean_ic"] = oos["deflated_mean_ic"]
+        for field in ("dsr", "gross_spread_mean", "gross_spread_observations"):
+            target.pop(field, None)
+        all_folds = nested.get("folds", [])
+        all_values = [value for fold in all_folds for value in fold["test_ic"]]
+        target["all_fold_count"] = len(all_folds)
+        target["all_observation_count"] = len(all_values)
+
+
 def nested_walk_forward(
     development: dict[str, list[dict[str, float]]],
     strategies: dict[str, Callable[[dict[str, float]], float]] | None = None,
@@ -1695,34 +1774,7 @@ def analyze(
         [trial_matrix] if trial_matrix else None
     )
     report["multiple_testing"]["registered_trials"] = len(trial_matrix)
-    for name in STRATEGIES:
-        selected_folds = [
-            fold
-            for fold in nested.get("folds", [])
-            if fold["selected_strategy"] == name
-        ]
-        oos_values = [
-            value for fold in selected_folds for value in fold["test_ic"]
-        ]
-        target = report["walk_forward"][name]
-        target["folds"] = len(selected_folds)
-        target["fold_ics"] = oos_values
-        target["scope"] = "OUT_OF_SAMPLE_FOLDS"
-        target["oos_status"] = (
-            "CALCULATED" if len(selected_folds) >= 3 else "INSUFFICIENT_FOLDS"
-        )
-        target["mean_ic"] = statistics.fmean(oos_values) if oos_values else None
-        target["ic_bootstrap_95ci"] = block_bootstrap_ci(oos_values)
-        target["ic_hac_se"] = hac_standard_error(oos_values)
-        target["deflated_mean_ic"] = (
-            deflated(target["mean_ic"], TRIALS, max(1, len(oos_values)))
-            if target["mean_ic"] is not None
-            else None
-        )
-        all_folds = nested.get("folds", [])
-        all_values = [value for fold in all_folds for value in fold["test_ic"]]
-        target["all_fold_count"] = len(all_folds)
-        target["all_observation_count"] = len(all_values)
+    populate_outer_test_report(report, nested)
     counts = nested.get("selection_counts", {})
     best_name = max(counts, key=counts.get) if counts else "none"
     oos_ic = nested.get("outer_test_mean_ic")
@@ -1791,17 +1843,21 @@ def render_markdown(report: dict) -> str:
         "",
         "## Purged walk-forward IC (ESTIMATED)",
         "",
-        "| Strategy | Folds | Mean IC | IC std | Positive folds | "
-        "Deflated IC | Bounded CSCV PBO |",
+        "| Strategy | Outer folds selected | Outer-test mean IC | "
+        "Outer fold IC std | Positive outer folds | Deflated IC | "
+        "Bounded CSCV PBO |",
         "|---|---:|---:|---:|---:|---:|---:|",
     ]
     pbo = report.get("multiple_testing", {}).get("cscv_pbo", {}).get("pbo", 1)
     for name, stats in report["walk_forward"].items():
+        oos = stats.get("outer_test", {})
+        value = oos.get("mean_ic")
         lines.append(
-            f"| {name} | {stats.get('folds', 0)} | "
-            f"{stats.get('mean_ic', 0):.4f} | {stats.get('ic_std', 0):.4f} | "
-            f"{stats.get('positive_folds', 0)} | "
-            f"{stats.get('deflated_mean_ic', 0):.4f} | {pbo:.3f} |"
+            f"| {name} | {oos.get('folds_selected', 0)} | "
+            f"{(value if value is not None else 0):.4f} | "
+            f"{oos.get('ic_std', 0):.4f} | "
+            f"{oos.get('positive_folds', 0)} | "
+            f"{(oos.get('deflated_mean_ic') or 0):.4f} | {pbo:.3f} |"
         )
     lines += [
         "",
