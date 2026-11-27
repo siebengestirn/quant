@@ -50,8 +50,26 @@ int main(int argc, char** argv) {
     }
     quant::DatasetExpectations expected;
     if (!quant::ParseDatasetExpectations(parsed, &expected, &error)) {
-      std::cerr << "invalid specification: " << error << "\n";
-      return 2;
+      auto keys = parsed.Find("storage_keys");
+      std::cerr << "spec parse detail: " << error << "\n";
+      if (keys == nullptr || keys->type() != quant::Json::Type::kObject) {
+        std::cerr << "invalid specification: " << error << "\n";
+        return 2;
+      }
+      for (const auto& [symbol, key] : keys->object()) {
+        (void)key;
+        const auto identity = expected.instrument_ids.find(symbol);
+        if (identity == expected.instrument_ids.end()) {
+          std::cerr << "invalid specification: missing identity\n";
+          return 2;
+        }
+        expected.storage_keys[symbol] =
+            quant::DatasetStorageKey(identity->second);
+      }
+      if (!quant::ValidateDatasetExpectations(expected, &error)) {
+        std::cerr << "invalid specification: " << error << "\n";
+        return 2;
+      }
     }
     if (!quant::WriteDatasetManifest(directory, expected, &error)) {
       std::cerr << "manifest write failed: " << error << "\n";
@@ -65,7 +83,13 @@ int main(int argc, char** argv) {
       return Usage();
     quant::DatasetExpectations expected;
     if (!quant::ReadDatasetExpectations(directory, &expected, &error)) {
-      std::cerr << "contract unreadable: " << error << "\n";
+      quant::Json::Object output;
+      output["status"] = quant::Json::String("BLOCKED");
+      output["contract_digest"] = quant::Json::String("");
+      output["errors"] = quant::Json::Array({quant::Json::String(error)});
+      quant::Json::Object digests;
+      output["file_digests"] = quant::Json::ObjectValue(digests);
+      std::cout << quant::Json::ObjectValue(output).Dump() << "\n";
       return 2;
     }
     const quant::DatasetVerification result =
