@@ -569,7 +569,7 @@ def report_file_errors(
         errors.append(f"{REPORT_RELATIVE}: commit differs from main_commit")
     if report.get("release_scope") != state.get("release_scope"):
         errors.append(f"{REPORT_RELATIVE}: scope differs from state")
-    if report.get("overall") != "PASS":
+    if report.get("overall") != "PASS" and not historical:
         errors.append(f"{REPORT_RELATIVE}: overall is not PASS")
     gates = {
         gate.get("name"): gate
