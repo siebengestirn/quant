@@ -833,7 +833,7 @@ def _values_agree(left: object, right: object) -> bool:
 def _field_conformance(
     field: str, group: Sequence[ProviderInstrument]
 ) -> FieldConformance:
-    """Evaluate one comparable field, preserving missing and differing values."""
+    """Evaluate a field, preserving missing and differing values."""
     ordered = sorted(group, key=lambda item: item.provider)
     observed = tuple(
         (item.provider, _conformance_value(item, field)) for item in ordered

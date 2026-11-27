@@ -363,7 +363,7 @@ def _gunzip(payload: bytes, max_bytes: int) -> bytes:
 
 
 def decode_original(payload: bytes, filename: str, max_bytes: int) -> bytes:
-    """Return decoded snapshot bytes, bounded before and during decompression."""
+    """Return decoded snapshot bytes with bounded decompression."""
     if not filename.endswith(".gz"):
         if len(payload) > max_bytes:
             raise ValueError(f"original bytes exceed {max_bytes} bytes")
