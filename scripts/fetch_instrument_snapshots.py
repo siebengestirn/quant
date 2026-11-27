@@ -6,11 +6,24 @@ Usage:
   python3 scripts/fetch_instrument_snapshots.py fetch [--output DIR]
   python3 scripts/fetch_instrument_snapshots.py extract \\
       --from-bundle PATH [--output DIR]
+  python3 scripts/fetch_instrument_snapshots.py evidence-report \\
+      [--output-report PATH] [--data-root DIR] [--evidence-root DIR] \\
+      [--bundle PATH]
 
-``verify`` and ``extract`` are offline. Only ``fetch`` performs network I/O,
-and only when explicitly requested; it never runs at import time. All URLs,
-byte counts and digests come from the pinned provenance record. The download
-uses HTTPS without credentials or custom headers.
+Offline evidence resolves in this order: verified local
+``data/instrument-master`` bytes, a verified ``evidence/instrument-master``
+directory at the repository root (an extracted bundle), then a release ZIP
+named by ``QUANT_RELEASE_BUNDLE``, extracted with the offline ``extract``
+command. ``verify``, ``extract`` and ``evidence-report`` are offline. Only
+``fetch`` performs network I/O, and only when explicitly requested; it never
+runs at import time. All URLs, byte counts and digests come from the pinned
+provenance record. The download uses HTTPS without credentials or headers.
+
+Gate wiring (exact command, no network):
+  python3 scripts/fetch_instrument_snapshots.py evidence-report \\
+      --output-report data/assurance/instrument-evidence.json
+The report is written even when verification fails; a nonzero exit code means
+the evidence did not verify. Tests never download snapshots.
 """
 
 from __future__ import annotations
@@ -21,6 +34,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import sys
 import tempfile
 import urllib.error
@@ -28,10 +42,10 @@ import urllib.parse
 import urllib.request
 import zipfile
 import zlib
-from datetime import date
+from datetime import UTC, date, datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PROVENANCE = ROOT / "governance" / "instrument-master-snapshots.json"
@@ -57,6 +71,29 @@ CONTENT_TYPES = {
 BUNDLE_PREFIX = "quant/"
 BUNDLE_SNAPSHOT_DIR = "evidence/instrument-master"
 MASTER_MODULE = "quant_instrument_master_fetcher"
+DEFAULT_EVIDENCE_ROOT = ROOT / BUNDLE_SNAPSHOT_DIR
+DEFAULT_EVIDENCE_REPORT = (
+    ROOT / "data" / "assurance" / "instrument-evidence.json"
+)
+BUNDLE_ENV = "QUANT_RELEASE_BUNDLE"
+SOURCE_DATA = "data/instrument-master"
+SOURCE_EVIDENCE = "evidence/instrument-master"
+SOURCE_BUNDLE = "QUANT_RELEASE_BUNDLE"
+REPORT_SCHEMA_VERSION = 1
+PASS = "PASS"
+FAIL = "FAIL"
+
+
+class EvidenceSource(NamedTuple):
+    """The verified offline root and how its bytes were made available."""
+
+    root: Path
+    source: str
+    extraction_command: str
+
+
+class EvidenceUnavailable(ValueError):
+    """No verified offline snapshot source is available."""
 
 
 @lru_cache(maxsize=1)
@@ -245,13 +282,19 @@ def verify(payload: bytes, size: int, digest: str, label: str) -> None:
         raise ValueError(f"{label}: expected SHA-256 {digest}, got {observed}")
 
 
+def read_limited_file(path: Path, max_bytes: int) -> bytes:
+    """Read one local file through the bounded streaming reader."""
+    with path.open("rb") as handle:
+        return read_limited(handle, f"local file {path}", max_bytes)
+
+
 def verify_local(meta: Any, data_root: Path) -> bool:
     """Check local original and decoded bytes without any network access."""
     original_path, decoded_path = paths(meta, data_root)
     try:
-        original = original_path.read_bytes()
-        decoded = decoded_path.read_bytes()
-    except OSError:
+        original = read_limited_file(original_path, meta.original_bytes + 1)
+        decoded = read_limited_file(decoded_path, meta.decoded_bytes + 1)
+    except (OSError, ValueError):
         return False
     return matches(
         original, meta.original_bytes, meta.original_sha256
@@ -513,6 +556,184 @@ def extract_from_bundle(
     return metas
 
 
+def extract_argv(bundle: Path, data_root: Path, provenance: Path) -> list[str]:
+    """Return the arguments of the offline bundle-extraction command."""
+    return [
+        "extract",
+        "--from-bundle",
+        str(bundle),
+        "--output",
+        str(data_root),
+        "--provenance",
+        str(provenance),
+    ]
+
+
+def extract_command(bundle: Path, data_root: Path, provenance: Path) -> str:
+    """Render the exact, reproducible offline extraction command."""
+    argv = ["python3", "scripts/fetch_instrument_snapshots.py"]
+    return shlex.join([*argv, *extract_argv(bundle, data_root, provenance)])
+
+
+def evidence_unavailable_message(detail: str = "") -> str:
+    """Return the precise command sequence that restores offline evidence."""
+    example = " ".join(
+        [
+            "python3",
+            "scripts/fetch_instrument_snapshots.py",
+            "extract",
+            "--from-bundle",
+            "/path/to/quant-final-release.zip",
+            "--output",
+            SOURCE_DATA,
+        ]
+    )
+    prefix = f"{detail} " if detail else ""
+    return (
+        f"{prefix}No verified pinned instrument snapshots are available in "
+        f"{SOURCE_DATA} or {SOURCE_EVIDENCE}, and {BUNDLE_ENV} is unset or "
+        "does not name a usable release ZIP. Restore the evidence offline, "
+        "then verify and run the tests:\n"
+        f"  {example}\n"
+        "  python3 scripts/fetch_instrument_snapshots.py verify\n"
+        "  python3 -m pytest tests/test_instrument_master.py "
+        "-o addopts='' -q\n"
+        "Tests never use the network. Retrieval is a separate explicit "
+        "command: python3 scripts/fetch_instrument_snapshots.py fetch"
+    )
+
+
+def _verified_at(root: Path, metas: tuple[Any, ...]) -> bool:
+    """Return True when every pinned snapshot verifies below one root."""
+    return all(verify_local(meta, root) for meta in metas)
+
+
+def resolve_evidence(
+    data_root: Path = DEFAULT_DATA_ROOT,
+    evidence_root: Path = DEFAULT_EVIDENCE_ROOT,
+    provenance: Path = DEFAULT_PROVENANCE,
+    bundle_path: str | Path | None = None,
+) -> EvidenceSource:
+    """Resolve verified offline bytes, never contacting a provider."""
+    metas = load_pins(provenance)
+    if _verified_at(data_root, metas):
+        return EvidenceSource(data_root, SOURCE_DATA, "")
+    if _verified_at(evidence_root, metas):
+        return EvidenceSource(evidence_root, SOURCE_EVIDENCE, "")
+    value = (
+        bundle_path
+        if bundle_path is not None
+        else os.environ.get(BUNDLE_ENV, "")
+    )
+    if not value:
+        raise EvidenceUnavailable(evidence_unavailable_message())
+    bundle = Path(value).expanduser()
+    if not bundle.is_absolute():
+        bundle = Path.cwd() / bundle
+    if not bundle.is_file():
+        raise EvidenceUnavailable(
+            evidence_unavailable_message(f"bundle not found: {bundle}")
+        )
+    command = extract_command(bundle, data_root, provenance)
+    if main(extract_argv(bundle, data_root, provenance)) != 0:
+        raise EvidenceUnavailable(
+            evidence_unavailable_message(f"extraction failed: {command}")
+        )
+    if not _verified_at(data_root, metas):
+        raise EvidenceUnavailable(
+            evidence_unavailable_message(
+                f"extracted bytes failed verification: {command}"
+            )
+        )
+    return EvidenceSource(data_root, SOURCE_BUNDLE, command)
+
+
+def _relative(path: Path) -> str:
+    """Return a repository-relative path, or an empty string when outside."""
+    try:
+        return path.resolve().relative_to(ROOT).as_posix()
+    except ValueError:
+        return ""
+
+
+def _byte_record(path: Path, size: int, digest: str) -> dict:
+    """Return exact path, byte count and SHA-256 for one snapshot file."""
+    record = {
+        "path": str(path.resolve()),
+        "relative_path": _relative(path),
+        "bytes": 0,
+        "sha256": "",
+        "expected_bytes": size,
+        "expected_sha256": digest,
+        "verification": FAIL,
+    }
+    try:
+        payload = read_limited_file(path, size + 1)
+    except (OSError, ValueError) as exc:
+        record["error"] = str(exc)
+        return record
+    record["bytes"] = len(payload)
+    record["sha256"] = hashlib.sha256(payload).hexdigest()
+    record["verification"] = PASS if matches(payload, size, digest) else FAIL
+    return record
+
+
+def build_evidence_report(source: EvidenceSource, provenance: Path) -> dict:
+    """Assemble the machine-readable evidence report for one offline source."""
+    snapshots = []
+    for meta in load_pins(provenance):
+        original, decoded = paths(meta, source.root)
+        entry = {
+            "provider": meta.provider,
+            "market_date": meta.market_date,
+            "provenance_source": source.source,
+            "original": _byte_record(
+                original, meta.original_bytes, meta.original_sha256
+            ),
+            "decoded": _byte_record(
+                decoded, meta.decoded_bytes, meta.decoded_sha256
+            ),
+        }
+        entry["verification_status"] = (
+            PASS
+            if entry["original"]["verification"] == PASS
+            and entry["decoded"]["verification"] == PASS
+            else FAIL
+        )
+        snapshots.append(entry)
+    status = (
+        PASS
+        if all(item["verification_status"] == PASS for item in snapshots)
+        else FAIL
+    )
+    return {
+        "schema_version": REPORT_SCHEMA_VERSION,
+        "generated_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "provenance": _relative(provenance) or str(provenance),
+        "provenance_source": source.source,
+        "source_root": str(source.root.resolve()),
+        "extraction_command": source.extraction_command,
+        "verification_status": status,
+        "snapshot_count": len(snapshots),
+        "snapshots": snapshots,
+    }
+
+
+def evidence_report(
+    output: Path = DEFAULT_EVIDENCE_REPORT,
+    data_root: Path = DEFAULT_DATA_ROOT,
+    evidence_root: Path = DEFAULT_EVIDENCE_ROOT,
+    provenance: Path = DEFAULT_PROVENANCE,
+    bundle_path: str | Path | None = None,
+) -> tuple[dict, int]:
+    """Write the offline evidence report and return it with an exit code."""
+    source = resolve_evidence(data_root, evidence_root, provenance, bundle_path)
+    report = build_evidence_report(source, provenance)
+    text = json.dumps(report, indent=2, sort_keys=True) + "\n"
+    _write_atomic(output, text.encode("utf-8"))
+    return report, 0 if report["verification_status"] == PASS else 1
+
+
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
     """Parse command-line arguments with explicit offline/network commands."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -545,6 +766,27 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     extract_parser.add_argument(
         "--provenance", type=Path, default=DEFAULT_PROVENANCE
     )
+    report_parser = subparsers.add_parser(
+        "evidence-report", help="write the offline snapshot evidence report"
+    )
+    report_parser.add_argument(
+        "--output-report", type=Path, default=DEFAULT_EVIDENCE_REPORT
+    )
+    report_parser.add_argument(
+        "--data-root", type=Path, default=DEFAULT_DATA_ROOT
+    )
+    report_parser.add_argument(
+        "--evidence-root", type=Path, default=DEFAULT_EVIDENCE_ROOT
+    )
+    report_parser.add_argument(
+        "--provenance", type=Path, default=DEFAULT_PROVENANCE
+    )
+    report_parser.add_argument(
+        "--bundle",
+        type=Path,
+        default=None,
+        help=f"release ZIP, overriding ${BUNDLE_ENV}",
+    )
     return parser.parse_args(argv)
 
 
@@ -573,7 +815,7 @@ def _verify_command(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Dispatch verify, fetch or extract and report exact verification facts."""
+    """Dispatch verify, fetch, extract or evidence-report offline."""
     args = parse_args(argv)
     try:
         if args.command == "verify":
@@ -587,6 +829,18 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"fetched {meta.provider}")
                 _print_verified(meta)
             return 0
+        if args.command == "evidence-report":
+            report, code = evidence_report(
+                args.output_report,
+                args.data_root,
+                args.evidence_root,
+                args.provenance,
+                args.bundle,
+            )
+            print(f"evidence report: {report['verification_status']}")
+            print(f"Source: {report['provenance_source']}")
+            print(f"Report: {args.output_report}")
+            return code
         extracted = extract_from_bundle(
             args.from_bundle, args.output, args.provenance
         )

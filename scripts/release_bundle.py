@@ -17,6 +17,14 @@ Generated timestamps vary between runs, so a build is repeatable and
 self-verifying but is not byte-identical across times. Verify checks
 ZIP integrity, the SHA-256 manifest table, the embedded evidence report
 and the digests of any bundled instrument snapshots.
+
+The versioned report carries a ``config`` object whose only skip-related
+field is ``allowed_skips``: records with a ``test_id`` and a non-empty
+``reason``. Every Python gate records passed, failed, errors, skipped and
+total counts; a gate passes only with executed tests and zero failures,
+errors and unapproved skips. The rendered ``## Verification`` section is
+derived from those counts and the same config, then compared byte for byte
+to the embedded report by verify.
 """
 
 from __future__ import annotations
@@ -54,17 +62,18 @@ RELEASE_SCOPES = frozenset((PERSISTENCE_SCOPE, RELEASE_SCOPE))
 GATE_NAMES = (
     "portable_cpp",
     "sanitizer",
-    "portable_pytest",
-    "w1",
-) + (
     "hosted_ci",
     "style",
     "state_freshness",
     "terminology_audit",
+    "portable_pytest",
+    "w1",
     "release_bundle_tests",
     "verify_report_tests",
+    "native_q_checker_tests",
 )
 REQUIRED_GATES = frozenset(GATE_NAMES)
+PYTEST_COUNT_KEYS = ("passed", "failed", "errors", "skipped", "total")
 REQUIRED_COUNTS = {
     "portable_cpp": ("checks", "failures", "ctest_passed", "ctest_total"),
     "sanitizer": (
@@ -73,10 +82,11 @@ REQUIRED_COUNTS = {
         "sanitizer_ctest_passed",
         "sanitizer_ctest_total",
     ),
-    "portable_pytest": ("passed",),
-    "w1": ("passed",),
-    "release_bundle_tests": ("passed",),
-    "verify_report_tests": ("passed",),
+    "portable_pytest": PYTEST_COUNT_KEYS,
+    "w1": PYTEST_COUNT_KEYS,
+    "release_bundle_tests": PYTEST_COUNT_KEYS,
+    "verify_report_tests": PYTEST_COUNT_KEYS,
+    "native_q_checker_tests": PYTEST_COUNT_KEYS,
     "style": ("pass_checks", "checks_total"),
     "state_freshness": ("findings",),
     "terminology_audit": ("findings", "binding", "advisory"),
@@ -92,6 +102,18 @@ REQUIRED_COUNTS = {
     ),
 }
 REPORT_METADATA = ("generated_at", "started_at", "completed_at", "toolchain")
+PYTHON_GATES = (
+    "native_q_checker_tests",
+    "portable_pytest",
+    "w1",
+    "verify_report_tests",
+    "release_bundle_tests",
+)
+ALLOWED_SKIPS_KEY = "allowed_skips"
+REPORT_CONFIG_KEYS = frozenset({ALLOWED_SKIPS_KEY})
+SKIP_FIELDS = frozenset({"test_id", "reason"})
+SKIPPED_LINE_RE = re.compile(r"SKIPPED \[\d+\]\s+(\S+):\d+:\s*(.*)")
+TEST_PATH_RE = re.compile(r"tests/[\w/_-]+\.py")
 NATIVE_RESULTS = frozenset({"GATED_NOT_RUN", "PASS"})
 NATIVE_FIELDS = (
     "enabled",
@@ -657,6 +679,80 @@ def has_text(record: dict, key: str) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def validate_allowed_skips(report: dict) -> tuple[dict[str, str], ...]:
+    """Validate the only field that may approve a skipped Python test."""
+    config = report.get("config")
+    if not isinstance(config, dict):
+        raise ValueError("missing report config")
+    unknown = set(config) - REPORT_CONFIG_KEYS
+    if unknown:
+        raise ValueError(
+            f"unknown report config fields: {', '.join(sorted(unknown))}"
+        )
+    entries = config.get(ALLOWED_SKIPS_KEY)
+    if isinstance(entries, dict):
+        entries = [
+            {"test_id": key, "reason": value} for key, value in entries.items()
+        ]
+    if not isinstance(entries, list):
+        raise ValueError(f"{ALLOWED_SKIPS_KEY} must be a list of records")
+    valid: list[dict[str, str]] = []
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != SKIP_FIELDS:
+            raise ValueError(f"invalid {ALLOWED_SKIPS_KEY} record: {entry!r}")
+        for key in ("test_id", "reason"):
+            if not has_text(entry, key):
+                raise ValueError(
+                    f"{key} is required in {ALLOWED_SKIPS_KEY}: {entry!r}"
+                )
+        valid.append(
+            {
+                "test_id": entry["test_id"].strip(),
+                "reason": entry["reason"].strip(),
+            }
+        )
+    ids = [item["test_id"] for item in valid]
+    if len(ids) != len(set(ids)):
+        raise ValueError(f"duplicate {ALLOWED_SKIPS_KEY} entry")
+    return tuple(valid)
+
+
+def skip_id_allowed(test_id: str, allowed: tuple[dict[str, str], ...]) -> bool:
+    """Match a skip ID against an allowlisted path, path:line or node ID."""
+    for entry in allowed:
+        candidate = entry["test_id"]
+        if not test_id.startswith(candidate):
+            continue
+        suffix = test_id[len(candidate) :]
+        if not suffix or suffix.startswith(":"):
+            return True
+    return False
+
+
+def suite_files(gate: dict) -> list[str]:
+    """Return test file paths named in a gate's recorded command."""
+    command = gate.get("command")
+    return TEST_PATH_RE.findall(command) if isinstance(command, str) else []
+
+
+def observed_skips(gate: dict) -> list[str]:
+    """Collect skip IDs printed in a gate's recorded step outputs."""
+    found: list[str] = []
+    steps = gate.get("steps")
+    if not isinstance(steps, list):
+        return found
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        output = step.get("output")
+        if not isinstance(output, str):
+            continue
+        found.extend(
+            match.group(1) for match in SKIPPED_LINE_RE.finditer(output)
+        )
+    return found
+
+
 def validate_gate_metadata(gate: dict, name: str) -> None:
     """Require command, execution metadata and typed counts for one gate."""
     if not has_text(gate, "command"):
@@ -682,7 +778,35 @@ def validate_gate_metadata(gate: dict, name: str) -> None:
             raise ValueError(f"{name}: invalid count: {key}")
 
 
-def validate_gate_values(report: dict) -> None:
+def validate_gate_skips(
+    report: dict, name: str, counts: dict, allowed: tuple[dict[str, str], ...]
+) -> None:
+    """Require every reported skip to be individually allowlisted."""
+    skipped = counts["skipped"]
+    gate = report_gate(report, name)
+    observed = observed_skips(gate)
+    if observed:
+        unapproved = len(observed) != skipped or any(
+            not skip_id_allowed(test_id, allowed) for test_id in observed
+        )
+    else:
+        paths = suite_files(gate)
+        if paths:
+            scoped = [
+                entry
+                for entry in allowed
+                if any(entry["test_id"].startswith(path) for path in paths)
+            ]
+        else:
+            scoped = list(allowed)
+        unapproved = skipped > len(scoped)
+    if unapproved:
+        raise ValueError(f"{name}: unapproved skip")
+
+
+def validate_gate_values(
+    report: dict, allowed: tuple[dict[str, str], ...] = ()
+) -> None:
     """Reject reports whose parsed gate counts contradict their verdict."""
     for name in ("portable_cpp", "sanitizer"):
         counts = gate_counts(report, name)
@@ -694,14 +818,16 @@ def validate_gate_values(report: dict) -> None:
             raise ValueError(f"{name}: unsafe unit test counts")
         if total <= 0 or counts[prefix + "ctest_passed"] != total:
             raise ValueError(f"{name}: incomplete CTest counts")
-    for name in (
-        "portable_pytest",
-        "w1",
-        "release_bundle_tests",
-        "verify_report_tests",
-    ):
-        if gate_counts(report, name)["passed"] <= 0:
+    for name in PYTHON_GATES:
+        counts = gate_counts(report, name)
+        if counts["passed"] <= 0:
             raise ValueError(f"{name}: no tests passed")
+        if counts["failed"] != 0 or counts["errors"] != 0:
+            raise ValueError(f"{name}: failed or errored tests")
+        expected = sum(counts[key] for key in PYTEST_COUNT_KEYS[:4])
+        if counts["total"] != expected:
+            raise ValueError(f"{name}: inconsistent test totals")
+        validate_gate_skips(report, name, counts, allowed)
     style = gate_counts(report, "style")
     if (
         style["checks_total"] <= 0
@@ -767,6 +893,23 @@ def validate_native_record(native: object, scope: str) -> None:
         validate_native_gated(native, scope)
 
 
+def validate_native_consistency(report: dict, native: dict) -> None:
+    """Require hosted counts to agree with the detailed native-q record."""
+    counts = gate_counts(report, "hosted_ci")
+    if counts.get("native_q_result") != native["result"]:
+        raise ValueError("native q result contradicts hosted counts")
+    if counts.get("native_q_conclusion") != native["conclusion"]:
+        raise ValueError("native q conclusion contradicts hosted counts")
+    fields = (
+        ("native_q_tests_executed", "tests_executed"),
+        ("native_q_tests_skipped", "tests_skipped"),
+        ("native_q_tests_failed", "tests_failed"),
+    )
+    for count_key, field in fields:
+        if counts.get(count_key) != native[field]:
+            raise ValueError(f"native q count mismatch: {field}")
+
+
 def validate_report_header(report: dict, scope: str) -> None:
     """Reject a wrong schema version, scope, branch or missing metadata."""
     if scope not in RELEASE_SCOPES:
@@ -826,6 +969,7 @@ def validate_report(
     if not isinstance(report, dict):
         raise ValueError("verification report must be a JSON object")
     validate_report_header(report, scope)
+    allowed = validate_allowed_skips(report)
     gates = report.get("gates")
     if not isinstance(gates, list) or not gates:
         raise ValueError("verification report has no gates")
@@ -835,9 +979,11 @@ def validate_report(
         if gate.get("result") != "PASS":
             raise ValueError(f"required gate failed: {name}")
         validate_gate_metadata(gate, name)
-    validate_gate_values(report)
+    validate_gate_values(report, allowed)
     hosted = validate_hosted_evidence(report, head)
-    validate_native_record(hosted.get("native_q"), scope)
+    native = hosted.get("native_q")
+    validate_native_record(native, scope)
+    validate_native_consistency(report, native)
     return report
 
 
@@ -862,6 +1008,28 @@ def validate_commit_chain(report: dict, head: str) -> None:
             )
 
 
+def report_skip_entries(report: dict) -> list:
+    """Return the report config's allowlisted skip records, if valid."""
+    config = report.get("config")
+    entries = config.get(ALLOWED_SKIPS_KEY) if isinstance(config, dict) else []
+    return entries if isinstance(entries, list) else []
+
+
+def pytest_totals(counts: dict) -> str:
+    """Render the five recorded Python gate counts in a fixed order."""
+    return "/".join(str(counts.get(key, 0)) for key in PYTEST_COUNT_KEYS)
+
+
+def rendered_skips(report: dict) -> str:
+    """Describe the allowlist embedded in the report config."""
+    parts = [
+        f"{item.get('test_id', '?')} ({item.get('reason', '?')})"
+        for item in report_skip_entries(report)
+        if isinstance(item, dict)
+    ]
+    return "; ".join(parts) if parts else "none"
+
+
 def render_verification(report: dict) -> list[str]:
     """Render human-readable verification totals from the report."""
     portable = gate_counts(report, "portable_cpp")
@@ -870,6 +1038,7 @@ def render_verification(report: dict) -> list[str]:
     w1 = gate_counts(report, "w1")
     bundle_tests = gate_counts(report, "release_bundle_tests")
     report_tests = gate_counts(report, "verify_report_tests")
+    checker_tests = gate_counts(report, "native_q_checker_tests")
     style = gate_counts(report, "style")
     freshness = gate_counts(report, "state_freshness")
     audit = gate_counts(report, "terminology_audit")
@@ -892,10 +1061,21 @@ def render_verification(report: dict) -> list[str]:
         f"{sanitizer.get('sanitizer_checks')} checks, "
         f"{sanitizer.get('sanitizer_failures')} failures.",
         "- Portable pytest (dataset contract, research, adversarial): "
-        f"{pytest.get('passed')} passed; pinned instrument-master (W1): "
-        f"{w1.get('passed')} passed.",
-        f"- Release bundle suite: {bundle_tests.get('passed')} passed; "
-        f"verification report suite: {report_tests.get('passed')} passed.",
+        f"{pytest_totals(pytest)} (passed/failed/errors/skipped/total).",
+        "- Pinned instrument-master (W1): "
+        f"{pytest_totals(w1)} (passed/failed/errors/skipped/total).",
+        "- Release bundle suite: "
+        f"{pytest_totals(bundle_tests)} "
+        "(passed/failed/errors/skipped/total).",
+        "- Verification report suite: "
+        f"{pytest_totals(report_tests)} "
+        "(passed/failed/errors/skipped/total).",
+        "- Native-q checker suite (offline): "
+        f"{pytest_totals(checker_tests)} "
+        "(passed/failed/errors/skipped/total).",
+        f"- Python gate skip policy: "
+        f"{len(report_skip_entries(report))} allowlisted skip(s): "
+        f"{rendered_skips(report)}; unapproved skips FAIL.",
         "- Style contract: "
         f"{style.get('pass_checks')}/{style.get('checks_total')} PASS, "
         "including the exact authored-file allowlist.",

@@ -67,20 +67,21 @@
     ],
     "forbidden_components": [
       ".DS_Store",
+      ".cache",
+      ".mypy_cache",
+      ".pytest_cache",
+      ".ruff_cache",
+      ".venv",
       ".vscode",
       "__pycache__",
-      ".pytest_cache",
-      ".mypy_cache",
-      ".ruff_cache",
-      ".cache",
-      ".venv",
-      "venv",
-      "target",
       "build",
+      "build-kdbx",
       "build-san",
-      "dist",
       "data",
-      "build-kdbx"
+      "dist",
+      "evidence",
+      "target",
+      "venv"
     ],
     "forbidden_suffixes": [
       ".pyc",
@@ -99,7 +100,8 @@
     "required_status_checks": [
       "core build and tests",
       "ASan/UBSan",
-      "Style contract (reference guides)"
+      "Style contract (reference guides)",
+      "Release assurance (offline)"
     ],
     "restrict_direct_main_pushes": true
   },

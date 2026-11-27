@@ -1,19 +1,24 @@
-# QUANT release status — 27 November 2026 (record through PR #62)
+# QUANT release status — 27 November 2026 (record through PR #63)
 
 The exact current main SHA, hosted CI runs and bundle digest are recorded in
-`MANIFEST.md` of the current final release bundle (external artifact), not
-as immutable identifiers in this document. Values labelled "at PR #58",
-"at PR #61" or "at PR #62" are HISTORICAL release records; they do not
-claim the current head after reorganization. PR #61 merged the R8.3 +
-W1 A/B/C work (HISTORICAL). PR #62 merged R8.4, which is COMPLETE at that
-release: native-q conclusion mapping, remote provenance, governance sync
-and W1 snapshot reproducibility. R8.4.1 (PR #63) is IN PROGRESS. The
-release scope was PORTABLE_RESEARCH and native q was GATED_NOT_RUN. The
-public web PR index showed "29 closed" because it was not fully paginated;
-it is not the authoritative inventory. PR #44 was an earlier technical
-remediation and PR #45 enforced branch protection. PR #58 was the closeout
-at that time; PR #56, PR #57, PR #58, PR #61 and PR #62 are the latest
-merged corrections.
+`MANIFEST.md` of the current final release bundle (external artifact,
+regenerated after R8.4.2), not as immutable identifiers in this document.
+Values labelled "at PR #58", "at PR #61", "at PR #62" or "at PR #63" are
+HISTORICAL release records; they do not claim the current head after
+reorganization. PR #61 merged the R8.3 + W1 A/B/C work (HISTORICAL). PR #62
+merged R8.4, which is COMPLETE at that release: native-q conclusion
+mapping, remote provenance, governance sync and W1 snapshot reproducibility.
+PR #63 merged R8.4.1, which is COMPLETE at
+`399652ca6803d65b1c460f0c57419f619c6a950d`: hosted CI run `46023401318`
+succeeded with native-q skipped/GATED_NOT_RUN, the 117-entry bundle digest
+`f67054a7586e26219c21e3b25682bb79ea70fa3dd9b2159d212dd97813b7c795` is
+HISTORICAL, 28 W1 offline tests were recorded and the scope was
+PORTABLE_RESEARCH. R8.4.1 is the CURRENT RELEASE until PR #64 merges;
+R8.4.2 / PR #64 is IN PROGRESS. The public web PR index showed "29 closed"
+because it was not fully paginated; it is not the authoritative inventory.
+PR #44 was an earlier technical remediation and PR #45 enforced branch
+protection. PR #58 was the closeout at that time; PR #56, PR #57, PR #58,
+PR #61, PR #62 and PR #63 are merged corrections; PR #64 is IN PROGRESS.
 
 SUPERSEDED — historical policy before 2026-11-27: open PRs after PR #46: 0;
 branches: `main` only. This is a historical inventory snapshot, not the live
@@ -61,12 +66,13 @@ historical policy before 2026-11-27 and is retained only as evidence.
 | final `main` (at PR #58) | run `45969624206`, all three required jobs pass | HISTORICAL post-merge success at PR #58 on `1a91da2…`; current head in bundle `MANIFEST.md` |
 | #61 | run `46007348694`, three jobs pass and native-q skipped | HISTORICAL at PR #61: R8.3 + W1 A/B/C merge `201f5ba…`; native-q GATED_NOT_RUN, never reported as passed |
 | #62 | run `46015103880`, three jobs pass and native-q skipped | HISTORICAL at PR #62: R8.4 merge `66f037c…`; native-q GATED_NOT_RUN, never reported as passed |
+| #63 | run `46023401318`, three jobs pass and native-q skipped | HISTORICAL at PR #63: R8.4.1 merge `399652ca…`; native-q GATED_NOT_RUN, never reported as passed; current release until PR #64 merges |
 
 It is therefore **not** true that every PR head was green: PR #34 was merged
-with a red style check and was repaired by PR #35. Hosted CI at PR #62
-(HISTORICAL) succeeded with the native-q tier skipped/GATED_NOT_RUN; the
-current head is in `MANIFEST.md` of the current final release bundle
-(external artifact).
+with a red style check and was repaired by PR #35. Hosted CI at PR #62 and
+PR #63 (both HISTORICAL) succeeded with native-q skipped/GATED_NOT_RUN;
+the current head is in `MANIFEST.md` of the current final release bundle
+(external artifact, regenerated after R8.4.2).
 
 ## Governance — SUPERSEDED historical policy before 2026-11-27
 
@@ -106,13 +112,13 @@ PRs, including #34 and #37, were merged before this enforcement and show no
 approving review; that gap is recorded, not hidden. CI success is not
 independent acceptance.
 
-## Gate disposition (HISTORICAL): PRs #47–#53, #56–#58, #61, #62
+## Gate disposition (HISTORICAL): PRs #47–#53, #56–#58, #61, #62, #63
 
 | Gate | Status |
 |---|---|
 | 0 policy/review hygiene | IMPLEMENTED, ENFORCED by branch protection from this release; historical approvals absent |
-| 1 PIT data/calendar | INTEGRATION-TESTED for ticker-keyed status and W1-A/B/C offline public-master crosswalk (14 tests, four bundled snapshots, 9,926 VERIFIED / 174 UNMAPPED); effective-dated identity (W1-D) PENDING |
-| 2 KDB-X generations | IMPLEMENTED, FAULT-INJECTED; native q tested locally and still GATED in hosted CI (skipped/GATED_NOT_RUN at PR #61 and PR #62) |
+| 1 PIT data/calendar | INTEGRATION-TESTED for ticker-keyed status and W1-A/B/C offline public-master crosswalk (at PR #62, HISTORICAL: 14 tests, four bundled snapshots, 9,926 VERIFIED / 174 UNMAPPED); effective-dated identity (W1-D) PENDING |
+| 2 KDB-X generations | IMPLEMENTED, FAULT-INJECTED; native q tested locally and still GATED in hosted CI (skipped/GATED_NOT_RUN at PR #61, PR #62 and PR #63, all HISTORICAL) |
 | 3 accounting replay | INTEGRATION-TESTED with conflict detection |
 | 4 publication transactions | IMMUTABLE transaction IDs; fault-injected at audit/rename/commit boundaries |
 | 5 event runtime | UNIT-TESTED in-memory prototype; not durable or concurrent |
@@ -126,15 +132,17 @@ independent acceptance.
 Research INCONCLUSIVE/negative; White Reality Check and Hansen SPA unavailable;
 cost model GROSS_ONLY; final holdout SEALED_NOT_EVALUATED. Provider streaming,
 contract-note reconciliation, corporate-action ingestion and operational paper
-trading NOT IMPLEMENTED. W1-A/B/C map pinned public masters offline: 14
+trading NOT IMPLEMENTED. W1-A/B/C map pinned public masters offline: 28
 tests, four bundled snapshots and 9,926 VERIFIED / 174 UNMAPPED identities,
 but W1-D live consistency and effective dating are PENDING; no full W1 exit
 is claimed. Native q hosted required check GATED/NOT REQUIRED
-(skipped/GATED_NOT_RUN at PR #61 and PR #62, both HISTORICAL); power-loss
-durability NOT PROVEN; intraday/HFT UNSUPPORTED; multi-asset venue
+(skipped/GATED_NOT_RUN at PR #61, PR #62 and PR #63, all HISTORICAL);
+power-loss durability NOT PROVEN; intraday/HFT UNSUPPORTED; multi-asset venue
 conformance NOT ESTABLISHED; independent reviewer acceptance for recorded
 releases NOT RECORDED; live execution DISABLED; trading decision NO TRADE.
-The R8.4 release scope was PORTABLE_RESEARCH.
+The R8.4 and R8.4.1 release scopes were PORTABLE_RESEARCH. R8.4.1 (PR #63)
+is COMPLETE and is the CURRENT RELEASE until PR #64 merges; R8.4.2 / PR #64
+is IN PROGRESS with no exit claim.
 
 ## Governance evidence refresh (27 November 2026) — SUPERSEDED
 
@@ -151,15 +159,17 @@ export of the endpoint as configured at that time, not the live configuration.
 The JSON export is untouched evidence. `git-policy.json` declares policy;
 only an authenticated API export proves live GitHub configuration.
 
-## ACTIVE POLICY — Integration record — 27 November 2026 (updated through PR #62) <!-- https://github.com/siebengestirn/quant/pull/62 -->
+## ACTIVE POLICY — Integration record — 27 November 2026 (updated through PR #63) <!-- https://github.com/siebengestirn/quant/pull/63 -->
 
 This section is the ACTIVE POLICY. It supersedes the one-approval governance
-material above; zero PRs were open at the PR #62 merge (HISTORICAL) and
-`main` is the sole integration branch. The live PR inventory is external.
+material above; zero PRs were open at the PR #62 merge (HISTORICAL); PR #63
+was merged under the same policy. `main` is the sole integration branch.
+The live PR inventory is external.
 
 All seven remediation PRs #47–#53 were merged sequentially with merge commits
-after fresh exact-head CI on each synced head; PRs #56–#58, #61 (R8.3/W1) and
-#62 (R8.4) were later merged under the same policy. `main` is the sole
+after fresh exact-head CI on each synced head; PRs #56–#58, #61 (R8.3/W1),
+#62 (R8.4) and #63 (R8.4.1) were later merged under the same policy. PR #64
+(R8.4.2) is IN PROGRESS. `main` is the sole
 integration branch. Branch protection was corrected to the single-developer
 policy used in the sibling repositories: zero required GitHub approvals,
 explicit self-review checklist, exact-head CI evidence, three required checks,
@@ -170,13 +180,17 @@ This record supersedes the earlier seven-open-PR snapshot. Operating status
 remains: research INCONCLUSIVE/negative; holdout SEALED_NOT_EVALUATED;
 provider streaming, contract-note reconciliation, corporate actions and
 operational paper trading NOT IMPLEMENTED; W1-A/B/C offline public-master
-evidence only (14 tests, four bundled snapshots, 9,926 VERIFIED /
+evidence only (28 tests, four bundled snapshots, 9,926 VERIFIED /
 174 UNMAPPED), with W1-D effective dating and live consistency PENDING and
 no full W1 exit; native q hosted tier GATED (skipped/GATED_NOT_RUN at
-PR #62, HISTORICAL); power-loss durability NOT PROVEN; intraday/HFT
-UNSUPPORTED; multi-asset venue conformance NOT ESTABLISHED; live execution
-DISABLED; decision NO TRADE. Release scope at PR #62 was PORTABLE_RESEARCH.
-R8.4.1 (PR #63) is IN PROGRESS and is not an exit claim.
+PR #62 and PR #63, both HISTORICAL); power-loss durability NOT PROVEN;
+intraday/HFT UNSUPPORTED; multi-asset venue conformance NOT ESTABLISHED;
+live execution DISABLED; decision NO TRADE. The R8.4 and R8.4.1 release
+scopes were PORTABLE_RESEARCH. R8.4.1 (PR #63) is COMPLETE and is the
+CURRENT RELEASE until PR #64 merges; R8.4.2 / PR #64 is IN PROGRESS with
+runner isolation, native_q_checker gate, skip enforcement, explicit W1
+evidence and hosted release assurance open. No exit claim is made for
+R8.4.2.
 
 ### Active release-bundle policy (R8.1 corrective release)
 
@@ -224,8 +238,9 @@ a missing verification report, and a portable state-freshness self-test.
 W1 A/B/C used pinned public Upstox and FYERS masters with 9,926 VERIFIED
 and 174 UNMAPPED crosswalk identities; W1-D effective dating and live
 consistency remain PENDING. At PR #61 (HISTORICAL), R8.4 was IN PROGRESS;
-it is COMPLETE at PR #62 (release record below). Independent acceptance
-remains NOT RECORDED and the independent security review remains OPEN.
+it is COMPLETE at PR #62 and R8.4.1 is COMPLETE at PR #63 (release records
+below). Independent acceptance remains NOT RECORDED and the independent
+security review remains OPEN.
 
 ### Active release-bundle policy (R8.4 / PR #62 — COMPLETE, HISTORICAL)
 
@@ -248,9 +263,34 @@ pinned snapshots are bundled and digest-checked, with 9,926 VERIFIED /
 174 UNMAPPED identities. The release scope was PORTABLE_RESEARCH and native
 q remained GATED_NOT_RUN. W1-D effective dating and live consistency remain
 PENDING; full W1 exit and independent acceptance are NOT claimed. Native-q
-runner provisioning remains OPEN under TD-015. R8.4.1 (PR #63) is
-IN PROGRESS (bundle validator PASS support, complete report schema,
-native-q self-provisioning CI, offline W1 fixture and hardened retrieval).
+runner provisioning remains OPEN under TD-015. At PR #62 (HISTORICAL),
+R8.4.1 (PR #63) was IN PROGRESS (bundle validator PASS support, complete
+report schema, native-q self-provisioning CI, offline W1 fixture and
+hardened retrieval); it is COMPLETE at PR #63 (release record below).
+
+### Active release-bundle policy (R8.4.1 / PR #63 — COMPLETE, HISTORICAL)
+
+PR #63 merged R8.4.1 at
+`399652ca6803d65b1c460f0c57419f619c6a950d`. HISTORICAL at PR #63: the
+then-final bundle `MANIFEST.md` recorded 117 entries and digest
+`f67054a7586e26219c21e3b25682bb79ea70fa3dd9b2159d212dd97813b7c795`, and
+hosted CI run `46023401318` succeeded with three passing jobs and one
+skipped native-q job (GATED_NOT_RUN, never reported as passed). These are
+release-history values at PR #63; the current bundle is generated after
+R8.4.2 and current values are in its `MANIFEST.md` (external artifact).
+
+R8.4.1 closed the bundle validator PASS path, complete report schema,
+native-q self-provisioning CI, offline W1 fixture and hardened retrieval.
+Local verification recorded 28 W1 offline tests on captured bytes; W1 is
+PARTIAL with 9,926 VERIFIED / 174 UNMAPPED identities and four bundled
+pinned snapshots, W1-D effective dating and live consistency remain
+PENDING, and no full W1 exit is claimed. The release scope was
+PORTABLE_RESEARCH and native q remained GATED_NOT_RUN. R8.4.1 is COMPLETE
+and is the CURRENT RELEASE until PR #64 merges; R8.4.2 / PR #64 is IN
+PROGRESS (runner isolation, native_q_checker gate, skip enforcement,
+explicit W1 evidence and hosted release assurance) with no exit claim.
+Independent acceptance is NOT RECORDED and native-q runner provisioning
+remains OPEN under TD-015.
 
 Branch protection was captured from the authenticated endpoint
 `https://api.github.com/repos/siebengestirn/quant/branches/main/protection`
