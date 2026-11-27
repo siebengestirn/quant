@@ -1,6 +1,12 @@
 # QUANT initial assessment — 2026-11-25
 
-Status: VERIFIED (direct inspection), credentials checked by service name only.
+> SUPERSEDED — historical initial assessment; current state is in
+> `docs/master-acceptance-register.md` and `docs/release-status.md`.
+> All facts below describe the initial snapshot only and are retained as
+> history, not as claims about the current repository.
+
+Status at the initial snapshot: VERIFIED (direct inspection), credentials
+checked by service name only.
 
 ## Repository
 - `/Users/tourist/Desktop/quant` is **not** a git repository. No source code,

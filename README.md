@@ -135,12 +135,16 @@ Community Edition limits acknowledged (verify at deployment): 16 GB RAM per q,
 one instance, four secondary threads, 16 connections, 24 CPU cores. No attempt
 is made to circumvent them. No KX binaries or license files are committed.
 
-**VERIFIED integration results:** 132 C++ checks, 8 pytest tests (including
-C++→q→PyKX round-trip, duplicates, out-of-order, HDB reload, restart),
-round-trip
-counts/state/features consistent across C++ and Python. Benchmark (synchronous,
-unbatched baseline): 1,000 events at ~0.055 ms p50 / 0.098 ms p95 / 0.115 ms
-p99, ~16,000 events/s, ~0.030 ms mean query. `NOT IMPLEMENTED`: bounded async
+**Early historical snapshot (2026-11-25), SUPERSEDED:** VERIFIED then were
+132 C++ checks and 8 pytest tests (including C++→q→PyKX round-trip,
+duplicates, out-of-order, HDB reload, restart), with counts/state/features
+consistent across C++ and Python. Current portable verification records
+14090 C++ checks, 14090 sanitizer checks, zero failures and 50 pytest
+passes; see `docs/master-acceptance-register.md`. The exact current main
+SHA, CI runs and bundle digest are in the current final release bundle
+`MANIFEST.md` (external artifact). Benchmark (synchronous, unbatched
+baseline): 1,000 events at ~0.055 ms p50 / 0.098 ms p95 / 0.115 ms p99,
+~16,000 events/s, ~0.030 ms mean query. `NOT IMPLEMENTED`: bounded async
 queue, backpressure measurement and batched IPC publishing.
 
 ## Credentials and security

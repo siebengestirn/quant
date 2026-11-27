@@ -1,14 +1,22 @@
-# Baseline inventory — W0 current state (2026-11-27)
+# W0 baseline snapshot (2026-11-27, PR #55) — HISTORICAL
 
-Purpose: a truthful, evidence-backed current-state baseline for the R8
-directive. This records what exists, what is gated or not run, and which
-corrections are included in this release. It is not an acceptance
-certificate. No claim of provider qualification, profitability, independent
-acceptance, live execution or power-loss proof is made.
+Purpose: a truthful, evidence-backed snapshot of the R8 directive at the W0
+baseline (PR #55). This document is HISTORICAL: it records what existed at
+that point, what was gated or not run, and which corrections were planned.
+It is not an acceptance certificate and is not the current state. The
+authoritative current state is in the final release bundle `MANIFEST.md`
+(external artifact) and the CURRENT STATE block of
+`docs/master-acceptance-register.md`. Exact main SHAs, CI runs and bundle
+digests recorded here are point-in-time values labelled at PR #55 or at PR
+#58; after this reorganization merges they are historical, not immutable
+current identifiers. No claim of provider qualification, profitability,
+independent acceptance, live execution or power-loss proof is made.
 
-## 1. Verified git state
+## 1. Verified git state (W0 snapshot, PR #55 — HISTORICAL)
 
-Commands were run in `/Users/tourist/Desktop/quant`. Exact outputs:
+The exact outputs below were captured at the W0 baseline (PR #55) in
+`/Users/tourist/Desktop/quant`. They are retained as historical evidence
+only; they do not describe the current head.
 
 ```console
 $ git rev-parse HEAD
@@ -38,16 +46,22 @@ $ python3 scripts/check_git_policy.py --allow-dirty
 QUANT git policy: PASS
 ```
 
-`gh pr list --state open` and `git stash list` produced no output. `gh pr list
---state all --limit 100` lists PRs #1 through #55, all with state `MERGED`,
-including PRs #47–#55. There are zero open PRs. `main` is the only local branch
-and `origin/main` is the only remote tracking branch; local `main` equals
-`origin/main` at the head above. One worktree, zero stashes. HEAD is the merge
-commit of PR #55 (`docs/canonical-inventory`).
+At the W0 snapshot (PR #55), `gh pr list --state open` and `git stash list`
+produced no output. `gh pr list --state all --limit 100` listed PRs #1 through
+#55, all `MERGED`, including PRs #47–#55. `main` was the only local branch and
+`origin/main` the only remote tracking branch, both at the SHA above; one
+worktree and zero stashes. That head was the PR #55 merge commit
+(`docs/canonical-inventory`).
 
-## 2. Governance at this head
+Later PRs #56, #57 and #58 were also MERGED. At PR #58 the range #1–#58 was
+all MERGED with zero open PRs and `main` as the only branch. Those PR #58
+values are historical after this reorganization; the authoritative current
+PR and head state are in the final bundle `MANIFEST.md` (external artifact)
+and the register CURRENT STATE block.
 
-| Control | Current value | Evidence |
+## 2. Governance at the W0 snapshot (historical)
+
+| Control | Value at PR #55 | Evidence |
 |---|---|---|
 | Model | `SINGLE_DEVELOPER` | `git-policy.json`, `docs/master-acceptance-register.md` |
 | Required GitHub approvals | 0 | `git-policy.json` `pr_review` |
@@ -62,8 +76,10 @@ not a human independent review. The historical one-approval material in
 `docs/release-status.md` and the two branch-protection JSON exports are
 labelled superseded; they do not establish the live GitHub
 configuration. `git-policy.json` declares policy, and only an authenticated
-API export proves live configuration; no such current export was produced in
-this baseline. The single-maintainer exception is closed by scope and applies
+API export proves live configuration; no such export was produced at the W0
+snapshot. A later point-in-time capture is recorded in
+`governance/branch-protection-capture.json`; it is a capture, not live
+current state. The single-maintainer exception is closed by scope and applies
 only to PRs #45 and #46.
 
 ## 3. Canonical documentation inventory
@@ -89,27 +105,27 @@ Inventory policy: new material belongs inside one of those documents; extra
 Markdown files are not admitted to `docs/`. Historical snapshots remain in Git
 history and release bundles. `scripts/style_contract.py` enforces the policy
 through the `docs-inventory` check: `docs/README.md` is required and at most
-ten tracked `docs/*.md` files other than the index are allowed. The two W0
-deliverables are new files at repository root, so they do not
-alter the `docs/` inventory count.
+ten tracked `docs/*.md` files other than the index are allowed. The W0
+deliverables are now tracked under `governance/`, so they do not alter the
+`docs/` inventory count.
 
 ## 4. Build and test evidence
 
-### 4.1 Local verification (observed)
+### 4.1 Local verification (R8.1 observation, at PR #58)
 
 ```console
 $ ctest --test-dir build --output-on-failure
 100% tests passed out of 3
 $ ./build/quant_tests
-checks=14063 failures=0
+checks=14090 failures=0
 $ ./build-asan-ci/quant_tests
-checks=14063 failures=0
+checks=14090 failures=0
 $ ctest --test-dir build-asan-ci --output-on-failure
 100% tests passed out of 3
 $ python3 -m pytest tests/test_research.py \
     tests/test_dataset_contract.py \
     tests/test_dataset_adversarial.py
-48 passed in 4.82s
+50 passed
 $ python3 scripts/style_contract.py
 reference-index: PASS
 documentation: PASS
@@ -120,12 +136,14 @@ shell: PASS
 q-guide: PASS
 ```
 
-The 48 pytest tests are 35 in `tests/test_research.py`, 7 in
-`tests/test_dataset_contract.py` and 6 in `tests/test_dataset_adversarial.py`.
-The `checks=14063 failures=0` result is from the portable `build` and from
-`build-asan-ci`; the latter is the local sanitizer build configuration. All
-results above are local observations, not hosted CI results and not
-independent acceptance.
+The 50 portable pytest tests cover `tests/test_research.py`,
+`tests/test_dataset_contract.py` and `tests/test_dataset_adversarial.py`.
+The `checks=14090 failures=0` result is from the portable `build` and from
+`build-asan-ci`; the latter is the local sanitizer build configuration.
+At PR #58, hosted CI runs `45969369813` (exact head) and `45969624206`
+(post-merge) passed; current runs are in the final bundle `MANIFEST.md`
+(external artifact). All results above are local observations or automated
+CI gates, not independent acceptance.
 
 ### 4.2 Native q limitation — GATED / NOT RUN
 
@@ -136,7 +154,7 @@ runtime exists at `$HOME/.kx/bin/q`, but the official `libe.so`/`k.h` pairing
 is not available on this Mac, so the KDB-X C API was not compiled in. A full
 `python3 -m pytest tests/ -q` run therefore produced two failures in
 `tests/test_kdbx.py` with `KDB-X C API unavailable in this build`; those are
-not treated as passes and are excluded from the 48-test count above. Native
+not treated as passes and are excluded from the 50-test count above. Native
 q persistence and recovery tests cannot run locally.
 
 The hosted `native-q` job in `.github/workflows/ci.yml` is guarded by
@@ -148,18 +166,24 @@ not recorded as passed anywhere in this baseline.
 
 Hosted exact-head CI is a required control. Prior hosted run identifiers and
 per-PR dispositions are recorded in `docs/release-status.md` (including the
-PR #34 style failure repaired by PR #35). Hosted exact-head CI evidence for
-the release commit is recorded in GitHub Actions; this baseline does not
-reproduce that result. `QUANT_WITH_KDBX=OFF` is the configuration used for
-hosted core, sanitizer and style jobs.
+PR #34 style failure repaired by PR #35). At PR #58, hosted CI run
+`45969369813` passed on head `fb9170ca5e9003b0dbea7c1191e874ff4e7fa8b2`
+and post-merge run `45969624206` passed on final main
+`1a91da2fb08995c9f6ee20e373d004ad28e58a72`. These are PR #58 values; the
+current CI runs are recorded in the final bundle `MANIFEST.md` (external
+artifact). `QUANT_WITH_KDBX=OFF` is the configuration used for hosted core,
+sanitizer and style jobs. CI is an automated gate, not independent
+acceptance.
 
 ## 5. Outstanding issues
 
-The following are outstanding at this head. No item below is claimed closed.
-Status words are conservative: `PENDING` means evidence is not
-recorded, `PARTIAL` means a model or unit scope exists but not the full
-contract, `GATED` means a guarded tier is not run, and `NOT PROVEN` means the
-required evidence does not exist.
+The following were outstanding at the W0 snapshot. Rows updated for the R8.1
+corrective release are labelled at PR #58; after this reorganization the
+authoritative current state is in the final bundle `MANIFEST.md` and the
+register CURRENT STATE block. No item below is claimed closed. Status words
+are conservative: `PENDING` means evidence is not recorded, `PARTIAL` means a
+model or unit scope exists but not the full contract, `GATED` means a guarded
+tier is not run, and `NOT PROVEN` means the required evidence does not exist.
 
 ### P0 — release and safety blockers
 
@@ -173,7 +197,7 @@ required evidence does not exist.
 | q server-side IPC authentication | NOT IMPLEMENTED | correctness fixes, Remaining blockers |
 | Date-partitioned HDB with transactional checkpoints | NOT IMPLEMENTED | correctness fixes, Remaining blockers |
 | W17 live execution authorisation | DISABLED; written broker/compliance approval absent | register W17, `src/zerodha.cpp:171` |
-| Final evidence bundle regeneration | PENDING | `docs/release-status.md`, ACTIVE POLICY |
+| Final evidence bundle regeneration | COMPLETED at PR #58: bundle SHA-256 `5eb0e1a87b3925117f515808591c9049ee0a11ffec246b46f61f9f79c54462c7`, 98 manifest entries; previous `d94a6254…` (97 entries) HISTORICAL | `docs/release-status.md` ACTIVE POLICY; final bundle `MANIFEST.md` (external artifact) |
 
 ### P1 — correctness and operational gaps
 
@@ -191,7 +215,7 @@ required evidence does not exist.
 | White Reality Check, Hansen SPA, true CSCV/PBO | NOT IMPLEMENTED | correctness fixes, register W7 |
 | QG-003 daily risk state persistence across restart | NOT IMPLEMENTED | correctness fixes, QG addendum |
 | QG-004 research/execution universe separation | PARTIAL; price bands and full status data absent | correctness fixes, QG addendum |
-| QG-007 cross-language 2^53 and large-timestamp fixtures | NOT IMPLEMENTED | correctness fixes, QG addendum |
+| QG-007 cross-language 2^53 and large-timestamp fixtures | PARTIAL — exact-integer OI/volume at 2^53 implemented and merged in PR #57; large-timestamp fixtures NOT IMPLEMENTED | correctness fixes, QG addendum; `governance/technical-debt-register.csv` TD-019 |
 | QG-008 process-kill and power-loss tests | NOT IMPLEMENTED | correctness fixes, QG addendum |
 | QG-012..016 real pipeline, q security, PIT universe, statistics, audit lifecycle | NOT IMPLEMENTED / BLOCKED | correctness fixes |
 | Composite idempotency key auto-restore into `.quant.seen` | PARTIAL; persisted in snapshots, not auto-restored | correctness fixes, Remaining blockers |
@@ -234,10 +258,13 @@ The R8 fail-closed correction round covers these files:
   `docs/dataset-contract.md`, `docs/git-state.md`,
   `docs/git-workflow.md`, `docs/master-acceptance-register.md`,
   `docs/release-status.md`, `git-policy.json`.
-- Baseline and traceability: `baseline-inventory.md`,
-  `architecture-current.md`, `technical-debt-register.csv`,
-  `security-findings.csv`, `requirements-traceability.csv`,
-  `research-report-registry.csv`, `.gitignore`.
+- Baseline and traceability: `governance/baseline-inventory.md`,
+  `governance/architecture-current.md`,
+  `governance/technical-debt-register.csv`,
+  `governance/security-findings.csv`,
+  `governance/requirements-traceability.csv`,
+  `governance/research-report-registry.csv`,
+  `governance/branch-protection-capture.json`, `.gitignore`.
 
 Generated build directories are excluded from Git by `.gitignore`.
 

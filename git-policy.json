@@ -1,4 +1,14 @@
 {
+  "authored_inventory": {
+    "generated_files_never_tracked": true,
+    "inventory_file": "governance/inventory.json",
+    "rule": "Tracked authored .md, .json and .csv files must be listed in governance/inventory.json with an owner and purpose; generated files under data/, build*/, .pytest_cache/ and .ruff_cache/ are never tracked.",
+    "scope_extensions": [
+      ".md",
+      ".json",
+      ".csv"
+    ]
+  },
   "automation": {
     "must_not_delete_local_branches": true,
     "must_not_delete_remote_branches": false,
@@ -9,7 +19,7 @@
   },
   "branch": {
     "active_topic_branches": [],
-    "active_topic_rationale": "Single-developer repository: remediation PRs #47-#53, final release record PR #54, documentation inventory PR #55 and R7 correction PR #56 are all merged; zero PRs are open and main is the sole integration branch. The R8.1 corrective work (exact-integer open interest, integral volume, wall-clock journal replay) is implemented locally, with exact-head CI run 45968572026 and a regenerated final bundle whose MANIFEST.md records the exact SHA and digest. The active policy is zero required GitHub approvals with a mandatory self-review checklist and exact-head CI; independent external acceptance is not recorded.",
+    "active_topic_rationale": "Single-developer repository: remediation PRs #47-#53, final release record PR #54, documentation inventory PR #55, R7 correction PR #56, PR #57 and PR #58 are all merged; zero PRs are open and main is the sole integration branch. The R8.1 corrective work (exact-integer open interest, integral volume, wall-clock journal replay) is merged and released. Current exact main SHA, CI runs and bundle digest are recorded in MANIFEST.md in the current final release bundle (external artifact). As recorded at PR #58, final CI runs were 45969369813 on the exact PR head and 45969624206 on final main, final main was 1a91da2fb08995c9f6ee20e373d004ad28e58a72 and the final bundle digest was 5eb0e1a87b3925117f515808591c9049ee0a11ffec246b46f61f9f79c54462c7; these are release history, not pinned current state. The active policy is zero required GitHub approvals with a mandatory self-review checklist and exact-head CI; independent external acceptance is not recorded.",
     "allowed_topic_prefixes": [
       "feat",
       "fix",
@@ -155,10 +165,20 @@
     }
   },
   "release_record": {
-    "current_main_sha_source": "MANIFEST.md in the final release bundle",
-    "final_main_sha_at_pr_56": "99bc70c015a3744a27ffbaca76b32f3025cb7c37",
-    "previous_bundle_sha256": "d94a625425bf3ed2090749f8eafa10d819e70d72dc3b58f47511d788afcf923e",
-    "r8_1_bundle_status": "regeneration pending"
+    "current_main_sha_source": "MANIFEST.md in the current final release bundle (external artifact)",
+    "current_state": "The exact main SHA, both CI run identifiers and the bundle digest are recorded in MANIFEST.md in the current final release bundle (external artifact); they are not pinned in this file.",
+    "historical_bundle_sha256": "d94a625425bf3ed2090749f8eafa10d819e70d72dc3b58f47511d788afcf923e",
+    "historical_main_sha_at_pr_56": "99bc70c015a3744a27ffbaca76b32f3025cb7c37",
+    "release_history": {
+      "at_pr_58": {
+        "final_bundle_manifest_entries": 98,
+        "final_bundle_sha256": "5eb0e1a87b3925117f515808591c9049ee0a11ffec246b46f61f9f79c54462c7",
+        "final_head_ci_run": 45969369813,
+        "final_main_sha": "1a91da2fb08995c9f6ee20e373d004ad28e58a72",
+        "final_post_merge_ci_run": 45969624206
+      }
+    },
+    "status": "complete"
   },
   "schema_version": 1,
   "working_tree": {

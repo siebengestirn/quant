@@ -187,13 +187,9 @@ def tree_fingerprint() -> str:
 
 def exclude_path(path: str) -> bool:
     """Report whether a path is generated or out of audit scope."""
-    excluded = set(POLICY["generated_paths"]["forbidden_components"])
-    excluded.update(POLICY["generated_paths"]["forbidden_component_prefixes"])
     if path.startswith(("references/", "data/", ".git/")):
         return True
-    if any(part in excluded for part in path.split("/")):
-        return True
-    return path.endswith(tuple(POLICY["generated_paths"]["forbidden_suffixes"]))
+    return is_generated(path)
 
 
 def prose_lines(path: str, text: str) -> list[tuple[int, str]]:
@@ -296,10 +292,12 @@ def check_style_references() -> bool:
 def is_generated(path: str) -> bool:
     """Report whether a path is excluded as generated output."""
     excluded = set(POLICY["generated_paths"]["forbidden_components"])
-    excluded.update(POLICY["generated_paths"]["forbidden_component_prefixes"])
-    return any(part in excluded for part in path.split("/")) or path.endswith(
-        tuple(POLICY["generated_paths"]["forbidden_suffixes"])
-    )
+    prefixes = tuple(POLICY["generated_paths"]["forbidden_component_prefixes"])
+    suffixes = tuple(POLICY["generated_paths"]["forbidden_suffixes"])
+    for part in path.split("/"):
+        if part in excluded or part.startswith(prefixes):
+            return True
+    return path.endswith(suffixes)
 
 
 def check_generated_paths() -> bool:

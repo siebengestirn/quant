@@ -23,6 +23,17 @@ import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MAX_LINE = 80
+ENTRY_CLASSES = {
+    "entrypoint-doc",
+    "canonical-doc",
+    "policy",
+    "tooling-config",
+    "evidence-record",
+    "historical-evidence",
+    "test-fixture",
+    "index",
+}
+RETENTIONS = {"current", "historical", "pinned-reference"}
 
 
 def git(*args: str) -> list[str]:
@@ -31,6 +42,98 @@ def git(*args: str) -> list[str]:
         ["git", *args], cwd=ROOT, capture_output=True, text=True, check=False
     )
     return result.stdout.splitlines() if result.returncode == 0 else []
+
+
+def inventory_entry_errors(entries: list) -> list[str]:
+    """Validate every authored-file inventory entry."""
+    errors: list[str] = []
+    seen: set[str] = set()
+    for number, entry in enumerate(entries, 1):
+        label = f"governance/inventory.json entry {number}"
+        if not isinstance(entry, dict):
+            errors.append(f"{label}: object required")
+            continue
+        for field in ("path", "class", "owner", "purpose", "retention"):
+            item = entry.get(field)
+            if not isinstance(item, str) or not item.strip():
+                errors.append(f"{label}: {field} must be a non-empty string")
+        rel = entry.get("path")
+        if isinstance(rel, str):
+            if rel in seen:
+                errors.append(f"{label}: duplicate path {rel}")
+            seen.add(rel)
+        if entry.get("class") not in ENTRY_CLASSES:
+            errors.append(f"{label}: invalid class {entry.get('class')!r}")
+        if entry.get("retention") not in RETENTIONS:
+            errors.append(
+                f"{label}: invalid retention {entry.get('retention')!r}"
+            )
+    return errors
+
+
+def inventory_policy_errors(policy: object) -> list[str]:
+    """Validate the authored-file inventory policy metadata."""
+    if not isinstance(policy, dict):
+        return ["governance/inventory.json: policy object required"]
+    errors: list[str] = []
+    if policy.get("docs_inventory_source") != "governance/inventory.json":
+        errors.append("governance/inventory.json: docs_inventory_source wrong")
+    if policy.get("generated_paths_are_excluded") is not True:
+        errors.append("governance/inventory.json: generated files not excluded")
+    exts = policy.get("scope_extensions")
+    if not isinstance(exts, list) or set(exts) != {".md", ".json", ".csv"}:
+        errors.append("governance/inventory.json: bad scope_extensions")
+    rule = policy.get("rule")
+    if not isinstance(rule, str) or not rule.strip():
+        errors.append("governance/inventory.json: rule must be a string")
+    return errors
+
+
+def load_inventory() -> tuple[dict, list[str]]:
+    """Load the authored-file allowlist, failing closed on any defect."""
+    path = ROOT / "governance" / "inventory.json"
+    if not path.is_file():
+        return {}, ["governance/inventory.json missing"]
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return {}, [f"governance/inventory.json unreadable: {exc}"]
+    if not isinstance(value, dict):
+        return {}, ["governance/inventory.json malformed: object required"]
+    entries = value.get("entries")
+    if not isinstance(entries, list):
+        return {}, [
+            "governance/inventory.json malformed: entries must be a list"
+        ]
+    errors = inventory_entry_errors(entries)
+    errors.extend(inventory_policy_errors(value.get("policy")))
+    if errors:
+        return {}, errors
+    return value, []
+
+
+def generated_rules() -> dict:
+    """Read generated-path classification from the root git policy."""
+    path = ROOT / "git-policy.json"
+    if not path.is_file():
+        return {}
+    try:
+        policy = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    rules = policy.get("generated_paths") if isinstance(policy, dict) else None
+    return rules if isinstance(rules, dict) else {}
+
+
+def is_generated(path: str, rules: dict) -> bool:
+    """Classify a path with the git-policy.json generated-path semantics."""
+    forbidden = set(rules.get("forbidden_components", []))
+    prefixes = tuple(rules.get("forbidden_component_prefixes", []))
+    suffixes = tuple(rules.get("forbidden_suffixes", []))
+    for part in path.split("/"):
+        if part in forbidden or part.startswith(prefixes):
+            return True
+    return path.endswith(suffixes)
 
 
 def check_reference_index() -> list[str]:
@@ -99,16 +202,54 @@ def check_documentation() -> list[str]:
 
 
 def check_docs_inventory() -> list[str]:
-    """Enforce the bounded canonical documentation set."""
-    errors: list[str] = []
+    """Require an exact set of allowlisted canonical docs under docs/."""
+    inventory, errors = load_inventory()
+    if errors:
+        return errors
+    expected = {
+        entry["path"]
+        for entry in inventory["entries"]
+        if entry["class"] == "canonical-doc"
+        and entry["path"].startswith("docs/")
+    }
     readme = ROOT / "docs" / "README.md"
     if not readme.is_file():
         errors.append("docs/README.md is required")
-    tracked = [p for p in git("ls-files", "docs/*.md") if p != "docs/README.md"]
-    if len(tracked) > 10:
-        errors.append(
-            f"docs inventory has {len(tracked)} Markdown files; limit is 10"
-        )
+    actual = {
+        path
+        for path in git("ls-files", "docs/*.md")
+        if path != "docs/README.md"
+    }
+    for path in sorted(actual - expected):
+        errors.append(f"docs inventory has unlisted file: {path}")
+    for path in sorted(expected - actual):
+        errors.append(f"docs inventory lists an absent file: {path}")
+    return errors
+
+
+def check_authored_inventory() -> list[str]:
+    """Reconcile tracked authored files with the exact allowlist."""
+    inventory, errors = load_inventory()
+    if errors:
+        return errors
+    rules = generated_rules()
+    if not rules:
+        return ["git-policy.json generated_paths rules missing"]
+    allowlisted = {entry["path"] for entry in inventory["entries"]}
+    tracked = set(git("ls-files", "*.md", "*.json", "*.csv"))
+    for path in sorted(tracked - allowlisted):
+        errors.append(f"authored file missing from inventory: {path}")
+    for path in sorted(allowlisted - tracked):
+        if (ROOT / path).is_file():
+            errors.append(f"inventory lists untracked file: {path}")
+        else:
+            errors.append(f"inventory lists missing file: {path}")
+    for path in sorted(allowlisted):
+        if is_generated(path, rules):
+            errors.append(f"generated path in inventory: {path}")
+    for path in sorted(tracked):
+        if is_generated(path, rules):
+            errors.append(f"generated authored file is tracked: {path}")
     return errors
 
 
@@ -217,6 +358,7 @@ def main() -> int:
         "reference-index": check_reference_index,
         "documentation": check_documentation,
         "docs-inventory": check_docs_inventory,
+        "authored-inventory": check_authored_inventory,
         "json": check_json,
         "tool-configs": check_tool_configs,
         "shell": check_shell,

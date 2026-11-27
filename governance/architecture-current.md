@@ -1,8 +1,12 @@
 # Current architecture — R8 target versus implemented state (2026-11-27)
 
 This document maps the target logical architecture of the R8 directive onto
-the code at HEAD `0b353f84f877764066eeb3dc0f70ac4ef645bf50`, including the
-R8 fail-closed corrections in this release. Statuses describe implementation
+the code at final main `1a91da2fb08995c9f6ee20e373d004ad28e58a72` (at PR
+#58), including the R8.1 corrections for exact-integer open interest and
+volume and the wall-clock journal replay field. The SHA is the PR #58 value;
+after this reorganization merges it is historical, so the authoritative
+current main SHA, CI runs and bundle digest are recorded in the final release
+bundle `MANIFEST.md` (external artifact). Statuses describe implementation
 evidence only: they do not mean qualified, certified or accepted.
 
 Legend: `IMPLEMENTED` means code exists for the stated scope; `PARTIAL` means
@@ -113,6 +117,8 @@ SEALED_NOT_EVALUATED; Upstox read-only V2 REST with no V3 endpoint call;
 V3 limited to CSV fixture-schema normalisation; FYERS profile probe only;
 no streaming; paper OMS not operational; power-loss durability NOT PROVEN;
 intraday/HFT UNSUPPORTED; multi-asset NOT ESTABLISHED; live execution
-DISABLED; decision NO TRADE. The R7 remediations and both W0 documents are
-included in this release; hosted exact-head evidence is recorded in GitHub
-Actions.
+DISABLED; decision NO TRADE. The R7 remediations, the R8.1 corrections and
+the reorganized governance records are included in this release; at PR #58,
+hosted CI runs `45969369813` and `45969624206` passed. Current main SHA, CI
+runs and bundle digest are recorded in the final release bundle `MANIFEST.md`
+(external artifact).

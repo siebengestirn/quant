@@ -1,5 +1,8 @@
 # QUANT correctness sprint — GATE 0 baseline
 
+> SUPERSEDED — historical snapshot; see current policy in `git-policy.json`
+> and current state in `docs/master-acceptance-register.md`.
+
 Date: 2026-11-25T08:45:07Z
 Commit: `48b3a95ebcefaab5333e85d932943527c75ad10e` (branch `main` at
 baseline; work continues on `correctness/gate0`)

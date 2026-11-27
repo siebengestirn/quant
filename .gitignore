@@ -11,6 +11,7 @@ quant_tests
 .DS_Store
 __pycache__/
 .pytest_cache/
+.ruff_cache/
 *.pyc
 
 # Owner-provided prompt backups (local only)

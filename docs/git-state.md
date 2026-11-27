@@ -1,5 +1,8 @@
 # QUANT Git policy adoption — 2026-11-25
 
+> SUPERSEDED — historical snapshot; see current policy in `git-policy.json`
+> and current state in `docs/master-acceptance-register.md`.
+
 Adapted from `/Users/tourist/Documents/siebensterne-workspace` Git policy.
 The authoritative local policy is `git-policy.json`.
 

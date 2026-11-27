@@ -11,18 +11,32 @@ Statuses: `NOT IMPLEMENTED`, `IMPLEMENTED`, `UNIT-TESTED`,
 
 ## CURRENT STATE (authoritative)
 
-Machine-readable release, governance and trading state at the current head:
+Machine-readable release, governance and trading state at the current head.
+The exact current main SHA, CI runs and bundle digest are in `MANIFEST.md`
+of the current final release bundle (external artifact); values marked as
+release history at PR #58 are not immutable current identifiers.
 
 ```yaml
 release:
-  current_main_sha_source: MANIFEST.md in the final release bundle
+  current_main_sha_source: MANIFEST.md in the current final release bundle
+  # Exact current main SHA, CI runs and bundle digest are external values
+  # in that MANIFEST.md, not immutable identifiers in this register.
+  # HISTORICAL baseline snapshot, not a current state claim:
   baseline_snapshot_sha: 0b353f84f877764066eeb3dc0f70ac4ef645bf50
-  final_main_sha: 99bc70c015a3744a27ffbaca76b32f3025cb7c37
+  # Release history at PR #58; later reorganization supersedes it:
+  final_main_sha: 1a91da2fb08995c9f6ee20e373d004ad28e58a72
   remediation_prs: MERGED
-  remediation_range: "47-53"
+  remediation_range: "47-58"
   final_release_record_pr: 54
   documentation_inventory_pr: 55
   r7_correction_pr: 56
+  r8_1_prs: [57, 58]
+  # At PR #58; current digest is in the bundle MANIFEST.md (external):
+  final_bundle_sha256:
+    5eb0e1a87b3925117f515808591c9049ee0a11ffec246b46f61f9f79c54462c7
+  final_bundle_manifest_entries: 98
+  final_head_ci_run: 45969369813
+  final_post_merge_ci_run: 45969624206
   open_prs: 0
 governance: >-
   model SINGLE_DEVELOPER, required_github_approvals 0,
@@ -35,15 +49,19 @@ trading: >-
 
 ## Release state reconciliation
 
-The authoritative state is the CURRENT STATE block above and the ACTIVE POLICY
-record in `docs/release-status.md`. The current `main` commit is recorded in
-`MANIFEST.md` of the final release bundle; it was `99bc70c…` at PR #56
-(full SHA `99bc70c015a3744a27ffbaca76b32f3025cb7c37`). PRs #47–#56 are all
-MERGED; zero PRs are open. Merges use the single-developer policy: zero
-required GitHub approvals, a self-review checklist and exact-head CI with
-three required checks. Independent external technical acceptance is
-PENDING / NOT RECORDED. The older `0b353f84…` SHA is the baseline snapshot
-retained as historical evidence, not a current state claim.
+The authoritative state is the CURRENT STATE block above and the ACTIVE
+POLICY record in `docs/release-status.md`. The exact current main SHA, CI
+runs and bundle digest are recorded in `MANIFEST.md` of the current final
+release bundle (external artifact), not as immutable identifiers here.
+Release history at PR #58 records `main` as `1a91da2…`
+(full SHA `1a91da2fb08995c9f6ee20e373d004ad28e58a72`) in the then-final
+bundle `MANIFEST.md`; `99bc70c…` was the state at PR #56 and is
+HISTORICAL. PRs #47–#58 are all MERGED; zero PRs are open. Merges use the
+single-developer policy: zero required GitHub approvals, a self-review
+checklist and exact-head CI with three required checks. Independent
+external technical acceptance is PENDING / NOT RECORDED. The older
+`0b353f84…` SHA is the baseline snapshot retained as historical evidence,
+not a current state claim.
 
 ### HISTORICAL / SUPERSEDED snapshot (retained as evidence, not current state)
 
@@ -127,11 +145,20 @@ The R8.1 corrective work — exact-integer OI parsing with C++/Python parity
 above 2^53, the integral-volume dataset contract and a wall-clock journal
 replay test — is IMPLEMENTED and MERGED in PR #57. Verification recorded
 14090 C++ checks, 14090 sanitizer checks, zero failures, 50 portable pytest
-passes and all portable assurance gates PASS. Hosted exact-head CI run
-45968572026 succeeded on head `21a62e3eca480440981a3c1fa0681f9a12493171`;
-post-merge CI run 45968891063 succeeded on the merge commit. The final
-bundle `MANIFEST.md` records the exact SHA and digest; the previous bundle
-does not cover R8.1. No independent acceptance is claimed.
+passes and all portable assurance gates PASS. At PR #57, hosted exact-head
+CI run 45968572026 succeeded on head
+`21a62e3eca480440981a3c1fa0681f9a12493171`; post-merge CI run 45968891063
+succeeded on the R8.1 merge commit `460b8f2d…`. PR #58 closed out the
+release: its head `fb9170ca5e9003b0dbea7c1191e874ff4e7fa8b2` passed hosted
+CI run 45969369813, and final post-merge CI run 45969624206 passed on
+`main` `1a91da2fb08995c9f6ee20e373d004ad28e58a72`. The then-final bundle
+`MANIFEST.md` recorded 98 verified entries and digest
+`5eb0e1a87b3925117f515808591c9049ee0a11ffec246b46f61f9f79c54462c7`;
+these are release-history values at PR #58. The exact current main SHA, CI
+runs and bundle digest are in the current final release bundle
+`MANIFEST.md` (external artifact). Earlier bundles are HISTORICAL.
+Independent acceptance is NOT RECORDED; native q hosted is GATED/NOT RUN
+and the trading decision remains NO TRADE.
 
 Provider scope (W2/W3): the live Upstox integration is read-only V2 REST
 (`https://api.upstox.com/v2` in `src/market_data.cpp`); there is no V3 HTTP
