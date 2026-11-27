@@ -1475,10 +1475,13 @@ const char* PaperOrderStateName(PaperOrderState state) {
 
 PaperBroker::PaperBroker(Config config,
                          Journal* journal,
-                         std::shared_ptr<Portfolio> portfolio)
+                         std::shared_ptr<Portfolio> portfolio,
+                         std::shared_ptr<DailyRiskState> risk_state)
     : config_(std::move(config)),
       journal_(journal),
-      portfolio_(std::move(portfolio)) {
+      portfolio_(std::move(portfolio)),
+      risk_state_(risk_state == nullptr ? std::make_shared<DailyRiskState>()
+                                        : std::move(risk_state)) {
 }
 
 namespace {
@@ -1594,6 +1597,7 @@ PaperOrder* PaperBroker::CreateIntent(const std::string& symbol,
   order.correlation_id = order.id;
   ++next_id_;
   order.symbol = symbol;
+  order.instrument_key = symbol + "-PERMANENT";
   order.side = side;
   order.quantity = quantity;
   order.limit_price = limit_price;
@@ -1606,8 +1610,10 @@ PaperOrder* PaperBroker::CreateIntent(const std::string& symbol,
 
 bool PaperBroker::RiskApprove(const std::string& id,
                               const RiskAuthorization& authorization,
+                              const Quote& market_snapshot,
                               int64_t now_ms,
                               std::string* error) {
+  std::lock_guard<std::recursive_mutex> guard(*authority_lock_);
   auto it = orders_.find(id);
   if (it == orders_.end() || it->second.state != PaperOrderState::kIntent) {
     if (error)
@@ -1616,16 +1622,39 @@ bool PaperBroker::RiskApprove(const std::string& id,
   }
   if (!authorization.Verify(it->second, config_, now_ms, error))
     return false;
-  if (!consumed_authorizations_.insert(authorization.signature()).second) {
+  if (!authorization.VerifyMarketDataSnapshot(market_snapshot, error))
+    return false;
+  if (risk_state_ == nullptr ||
+      !authorization.VerifyRiskState(*risk_state_, now_ms, error))
+    return false;
+  if (consumed_authorizations_.find(authorization.signature()) !=
+      consumed_authorizations_.end()) {
     if (error)
       *error = "risk authorization already consumed";
     return false;
   }
+  // Durable one-time consumption is journalled before the state transition.
+  if (journal_ != nullptr) {
+    Json::Object payload;
+    payload["action"] = Json::String("RISK_AUTH_CONSUMED");
+    payload["signature"] = Json::String(authorization.signature());
+    payload["order_id"] = Json::String(id);
+    Event event;
+    event.type = EventType::kHeartbeat;
+    event.payload = Json::ObjectValue(payload).Dump();
+    if (!journal_->Append(&event, error))
+      return false;
+  }
+  consumed_authorizations_.insert(authorization.signature());
   it->second.risk_policy_id = authorization.policy_version();
-  return Transition(&it->second,
-                    PaperOrderState::kRiskApproved,
-                    "approved by authoritative risk capability",
-                    error);
+  if (!Transition(&it->second,
+                  PaperOrderState::kRiskApproved,
+                  "approved by authoritative risk capability",
+                  error)) {
+    consumed_authorizations_.erase(authorization.signature());
+    return false;
+  }
+  return true;
 }
 
 bool PaperBroker::Reject(const std::string& id,
@@ -1894,6 +1923,18 @@ bool PaperBroker::RehydrateFromJournal(std::string* error) {
     Json payload;
     if (!Json::Parse(event.payload, &payload, error))
       return fail("paper journal event is not valid JSON");
+    if (event.type == EventType::kHeartbeat) {
+      const Json* action = payload.Find("action");
+      const Json* signature = payload.Find("signature");
+      if (action != nullptr && action->as_string() == "RISK_AUTH_CONSUMED") {
+        if (signature == nullptr || signature->type() != Json::Type::kString ||
+            signature->as_string().empty())
+          return fail("malformed risk authorization consumption record");
+        if (!consumed_authorizations_.insert(signature->as_string()).second)
+          return fail("duplicate risk authorization consumption record");
+      }
+      continue;
+    }
     if (event.type == EventType::kAccounting) {
       AccountingPosting posting;
       if (!ParseAccountingPosting(event, &posting, error))
@@ -3449,7 +3490,9 @@ RiskEngine::RiskEngine(Config config,
 RiskDecision RiskEngine::Evaluate(const Signal& signal,
                                   const Quote& quote,
                                   const Portfolio& portfolio,
-                                  int64_t now_ms) {
+                                  int64_t now_ms,
+                                  OrderSide side) {
+  std::lock_guard<std::recursive_mutex> guard(*authority_lock_);
   RiskDecision decision;
   decision.notional = Money::FromRupees(0.0);
   auto reject = [&decision](const std::string& reason) {
@@ -3459,6 +3502,13 @@ RiskDecision RiskEngine::Evaluate(const Signal& signal,
     return decision;
   };
 
+  if (signal.symbol.empty() || quote.symbol != signal.symbol ||
+      signal.permanent_id.empty() || quote.permanent_id.empty() ||
+      signal.permanent_id != quote.permanent_id || signal.venue.empty() ||
+      quote.venue.empty() || signal.venue != quote.venue ||
+      signal.listing_id.empty() || quote.listing_id.empty() ||
+      signal.listing_id != quote.listing_id)
+    return reject("signal and quote identity do not match");
   const std::string session = UtcSessionDate(now_ms);
   const Money equity = portfolio.equity();
   if (!equity.valid()) {
@@ -3559,12 +3609,13 @@ RiskDecision RiskEngine::Evaluate(const Signal& signal,
   }
 
   SizingInput sizing;
-  sizing.side = OrderSide::kBuy;
+  sizing.side = side;
   sizing.price = Money::FromRupees(quote.ask);  // Executable ask for a buy.
   sizing.volatility = signal.features.vol20;
   sizing.stop_distance = config_.stop_loss_fraction;
   sizing.delivery = config_.execution_delivery;
-  sizing.available_depth = quote.ask_qty;  // Side-specific depth.
+  sizing.available_depth =
+      side == OrderSide::kBuy ? quote.ask_qty : quote.bid_qty;
   sizing.current_exposure = portfolio.market_value();
   if (sizing.available_depth <= 0)
     return reject("missing executable ask depth");
@@ -3598,6 +3649,10 @@ std::string RiskAuthorization::ComputeSignature() const {
   add(order_id_);
   add(account_id_);
   add(instrument_id_);
+  add(venue_);
+  add(listing_id_);
+  add(std::to_string(static_cast<int>(market_data_source_)));
+  add(std::to_string(market_data_version_));
   add(symbol_);
   add(side_ == OrderSide::kBuy ? "BUY" : "SELL");
   add(std::to_string(quantity_));
@@ -3623,7 +3678,8 @@ bool RiskAuthorization::Verify(const PaperOrder& order,
   if (order.id != order_id_ || order.symbol != symbol_ || order.side != side_ ||
       order.quantity != quantity_ ||
       order.limit_price.paise() != limit_price_paise_ ||
-      order.instrument_key != instrument_id_)
+      order.instrument_key != instrument_id_ || order.venue != venue_ ||
+      order.listing_id != listing_id_)
     return fail("risk authorization is not bound to this order");
   if (config.account_id != account_id_)
     return fail("risk authorization account mismatch");
@@ -3639,19 +3695,75 @@ bool RiskAuthorization::Verify(const PaperOrder& order,
   return true;
 }
 
+bool RiskAuthorization::VerifyMarketDataSnapshot(const Quote& quote,
+                                                 std::string* error) const {
+  auto fail = [error](const char* reason) {
+    if (error)
+      *error = reason;
+    return false;
+  };
+  if (!valid_)
+    return fail("risk authorization is not valid");
+  if (quote.symbol != symbol_ || quote.permanent_id != instrument_id_ ||
+      quote.venue != venue_ || quote.listing_id != listing_id_ ||
+      quote.source != market_data_source_ ||
+      quote.sequence != market_data_version_)
+    return fail("market snapshot does not match authorized data version");
+  return true;
+}
+
+bool RiskAuthorization::VerifyRiskState(const DailyRiskState& state,
+                                        int64_t now_ms,
+                                        std::string* error) const {
+  auto fail = [error](const char* reason) {
+    if (error)
+      *error = reason;
+    return false;
+  };
+  if (!valid_)
+    return fail("risk authorization is not valid");
+  if (now_ms > expiry_ms_ || now_ms <= 0)
+    return fail("risk authorization expired or has invalid time");
+  if (state.halted)
+    return fail("risk kill switch active: authorization revoked");
+  if (state.policy_version != policy_version_)
+    return fail("risk policy changed: authorization revoked");
+  if (state.journal_sequence != state_revision_)
+    return fail("risk state revision changed: authorization revoked");
+  return true;
+}
+
 RiskAuthorization RiskEngine::Authorize(const Signal& signal,
                                         const Quote& quote,
                                         const Portfolio& portfolio,
                                         const PaperOrder& order,
                                         int64_t now_ms) {
   RiskAuthorization auth;
-  const RiskDecision decision = Evaluate(signal, quote, portfolio, now_ms);
+  std::lock_guard<std::recursive_mutex> guard(*authority_lock_);
+  if (signal.symbol.empty() || quote.symbol.empty() || order.symbol.empty() ||
+      signal.symbol != quote.symbol || signal.symbol != order.symbol ||
+      signal.permanent_id.empty() || quote.permanent_id.empty() ||
+      order.instrument_key.empty() ||
+      signal.permanent_id != quote.permanent_id ||
+      signal.permanent_id != order.instrument_key || signal.venue.empty() ||
+      quote.venue.empty() || order.venue.empty() ||
+      signal.venue != quote.venue || signal.venue != order.venue ||
+      signal.listing_id.empty() || quote.listing_id.empty() ||
+      order.listing_id.empty() || signal.listing_id != quote.listing_id ||
+      signal.listing_id != order.listing_id)
+    return auth;
+  const RiskDecision decision =
+      Evaluate(signal, quote, portfolio, now_ms, order.side);
   if (!decision.approved || decision.quantity < order.quantity ||
       !decision.notional.valid())
     return auth;  // Invalid capability: no authority granted.
   auth.order_id_ = order.id;
   auth.account_id_ = config_.account_id;
   auth.instrument_id_ = order.instrument_key;
+  auth.venue_ = order.venue;
+  auth.listing_id_ = order.listing_id;
+  auth.market_data_source_ = quote.source;
+  auth.market_data_version_ = quote.sequence;
   auth.symbol_ = order.symbol;
   auth.side_ = order.side;
   auth.quantity_ = order.quantity;
