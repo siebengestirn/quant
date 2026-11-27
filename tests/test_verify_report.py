@@ -30,6 +30,7 @@ REQUIRED_NAMES = (
     "core build and tests",
     "ASan/UBSan",
     "Style contract (reference guides)",
+    "Release assurance (offline)",
 )
 ALLOWED_STATUSES = {PASS, FAIL, GATED, NOT_APPLICABLE}
 COMMIT = "abc123def456"
@@ -260,7 +261,7 @@ def test_skipped_native_job_is_not_counted_as_pass(
     assert counts["native_q_result"] == GATED
     assert counts["jobs_skipped"] == 1
     assert counts["jobs_gated"] == 1
-    assert counts["jobs_passed"] == 3
+    assert counts["jobs_passed"] == 4
     assert counts["jobs_failed"] == 0
     native = gate["native_q"]
     assert native["enabled"] is False
@@ -283,7 +284,7 @@ def test_successful_native_job_counts_as_pass(
     native = gate["native_q"]
     assert gate["result"] == PASS
     assert counts["native_q_result"] == PASS
-    assert counts["jobs_passed"] == 4
+    assert counts["jobs_passed"] == 5
     assert counts["jobs_skipped"] == 0
     assert counts["jobs_gated"] == 0
     assert counts["jobs_failed"] == 0
@@ -477,6 +478,7 @@ def test_run_id_url_and_jobs_are_recorded(
         ("core build and tests", "success", PASS, 1),
         ("ASan/UBSan", "success", PASS, 2),
         ("Style contract (reference guides)", "success", PASS, 3),
+        ("Release assurance (offline)", "success", PASS, 4),
         (NATIVE_NAME, "skipped", GATED, 99),
     ]
 
