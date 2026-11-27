@@ -33,6 +33,25 @@ The in-process capability boundary of #48 remains an explicit limitation.
 A shared lock is not distributed authorization and is not protection against
 hostile code in another process.
 
+## Completion fields
+
+Implementation, verification and independent acceptance are tracked
+separately. `IMPLEMENTED` never means `CERTIFIED`, and green CI never means
+accepted.
+
+| Workstream | Implementation | Verification | Independent acceptance | Blocked by |
+|---|---|---|---|---|
+| W1 Instrument master | Not implemented | Not tested | Pending | none |
+| W2 Upstox V3 | Partial | Unit-tested corrections | Pending | W1 |
+| W3 FYERS Data Socket | Not implemented | Not tested | Pending | W1, valid token |
+| W4 Provider journal | Not proven | Synthetic coverage only | Pending | W2, W3 |
+| W12 Durability | Partial | Process/crash evidence only | Pending | W4, fault rig |
+| W16 Independent acceptance | Documented process | Register present | Pending | all relevant gates |
+
+Every workstream row below inherits these three separate fields. A failed
+upstream workstream blocks every dependent release decision; `Blocked by`
+contains requirement IDs from the same register.
+
 ## Workstreams
 
 | ID | Workstream | Current status | Dependencies | Exit evidence | Release blocking |
