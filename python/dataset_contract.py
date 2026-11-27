@@ -5,6 +5,10 @@ This module and the C++ implementation in src/dataset.cpp follow the single
 specification in docs/dataset-contract.md. SHA-256 is the only digest
 algorithm, so manifests are interchangeable across the two languages.
 
+In canonical CSV schema v3, open interest >= 0 is an available value, -1 is
+the unavailable sentinel, and every value < -1 is invalid. The same rule
+applies to both the C++ and Python readers and writers.
+
 Usage:
     python3 python/dataset_contract.py write <dir> <spec.json>
     python3 python/dataset_contract.py verify <dir>
@@ -29,6 +33,7 @@ SCHEMA_VERSION = 2
 DIGEST_ALGORITHM = "sha256"
 HEADER_V2 = ("date", "open", "high", "low", "close", "volume")
 HEADER_V3 = HEADER_V2 + ("open_interest",)
+MAX_OPEN_INTEREST = 2**63
 VALID_CSV_SCHEMAS = ("v2", "v3")
 CONTRACT_FILE = "contract.json"
 MANIFEST_FILE = "manifest.json"
@@ -399,10 +404,14 @@ def _read_csv_content(
         if csv_schema == "v3":
             try:
                 parsed_oi = int(fields[6])
-                if parsed_oi < -1 or float(fields[6]) != parsed_oi:
+                if (
+                    parsed_oi < -1
+                    or parsed_oi >= MAX_OPEN_INTEREST
+                    or float(fields[6]) != parsed_oi
+                ):
                     raise ValueError
                 open_interest = parsed_oi
-            except ValueError:
+            except (ValueError, OverflowError):
                 errors.append(f"{name}:{number}: invalid open interest")
                 continue
         if not all(math.isfinite(value) for value in values):

@@ -25,7 +25,7 @@ machine-readable policy is `git-policy.json`; this document must agree with it.
 | Force push | Prohibited |
 | CI | Required on the exact PR head before merge |
 | Strict base freshness | Topic branch must be current with `main` when CI requires it |
-| Merge review | Self-review checklist, CI evidence and independent review for critical work |
+| Merge review | Required: self-review checklist and exact-head CI evidence, zero GitHub approvals; optional external technical review; independent acceptance mandatory only for defined high-risk release gates |
 | Branch cleanup | After the merge is verified on `main` |
 | Final local branches | `main` only |
 | Final remote tracking | `origin/main` only |
@@ -72,6 +72,11 @@ resolution. This single-developer repository uses self-review plus independent
 CI with zero required GitHub approvals; a self-review checklist and exact-head
 CI evidence are mandatory for every PR. This replaces the earlier
 unsatisfiable non-author reviewer rule; no exception or bypass exists.
+
+CI evidence is an automated gate, not a human independent review. External
+technical review is optional for routine merges; independent acceptance is
+mandatory only at defined high-risk release gates, never for a routine PR
+merge.
 
 ## Never
 

@@ -184,18 +184,6 @@ partial accounting via persistent ledger, stop/horizon exits, drawdown and cost
 tracking. Limitations: no order-book history, no survivorship-bias correction,
 no intraday path simulation. Results are **SIMULATED**, not evidence of alpha.
 
-## Current verified outcome (2026-11-25)
-
-- Dynamic universe: 87,066 BOD records → 2,781 normalised NSE equities →
-  2,755 eligible after security-type/suspension/symbol filters.
-- 69 daily seed series and 3 index series downloaded from Upstox.
-- Backtest: 11 simulated trades, gross ₹7.68, net ₹2.47 after ₹1.65 of costs,
-  max drawdown ₹14.36, Sharpe 0.10. **INCONCLUSIVE** — no statistical alpha.
-- Purged walk-forward IC across four strategy families is at or near zero after
-  multiple-testing haircut. **NO TRADE** is the correct current decision.
-- Market report for the next session: **NO TRADE** — no candidate combined a
-  positive score, verified live depth, and risk approval outside market hours.
-
 ## Compliance
 
 SEBI circular (Feb 2025), NSE/INVG/67858 (05-May-2025), NSE/INVG/69255

@@ -665,33 +665,100 @@ bool RecoverUniversePublication(const std::string& path,
 // Normalisation helpers.
 
 // ---------------------------------------------------------------------------
+bool ParseFixedDecimal(const std::string& text,
+                       size_t at,
+                       size_t count,
+                       int* value) {
+  if (at > text.size() || count > text.size() - at)
+    return false;
+  int parsed = 0;
+  for (size_t i = 0; i < count; ++i) {
+    const unsigned char c = static_cast<unsigned char>(text[at + i]);
+    if (!std::isdigit(c))
+      return false;
+    parsed = parsed * 10 + (c - '0');
+  }
+  *value = parsed;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 int64_t ParseIsoTimestampMs(const std::string& text) {
-  if (text.size() < 19 || text[4] != '-' || text[7] != '-' || text[10] != 'T' ||
-      text[13] != ':' || text[16] != ':')
+  // Grammar: YYYY-MM-DDTHH:MM:SS[.1-3 digits](Z|z|+HH:MM|-HH:MM). Every
+  // component is validated before a calendar table is indexed or timegm is
+  // called. Each failure path returns the explicit sentinel -1.
+  constexpr size_t kShape = 19;
+  if (text.size() < kShape + 1 || text[4] != '-' || text[7] != '-' ||
+      text[10] != 'T' || text[13] != ':' || text[16] != ':')
     return -1;
-  auto digits = [&text](size_t at, size_t count) {
-    int value = 0;
-    for (size_t i = 0; i < count; ++i) {
-      if (at + i >= text.size() ||
-          !std::isdigit(static_cast<unsigned char>(text[at + i])))
-        return -1;
-      value = value * 10 + (text[at + i] - '0');
-    }
-    return value;
-  };
-  const int year = digits(0, 4);
-  const int month = digits(5, 2);
-  const int day = digits(8, 2);
-  const int hour = digits(11, 2);
-  const int minute = digits(14, 2);
-  const int second = digits(17, 2);
+
+  int year = 0;
+  int month = 0;
+  int day = 0;
+  int hour = 0;
+  int minute = 0;
+  int second = 0;
+  if (!ParseFixedDecimal(text, 0, 4, &year) ||
+      !ParseFixedDecimal(text, 5, 2, &month) ||
+      !ParseFixedDecimal(text, 8, 2, &day) ||
+      !ParseFixedDecimal(text, 11, 2, &hour) ||
+      !ParseFixedDecimal(text, 14, 2, &minute) ||
+      !ParseFixedDecimal(text, 17, 2, &second))
+    return -1;
+
+  // The month range check precedes the days-in-month lookup. A leap second
+  // is rejected rather than normalised into the following minute.
+  if (year < 1970 || month < 1 || month > 12)
+    return -1;
   static constexpr int kDaysInMonth[] = {
       31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
   const bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-  const int max_day = kDaysInMonth[month - 1] + (month == 2 && leap ? 1 : 0);
-  if (year < 1970 || month < 1 || month > 12 || day < 1 || day > max_day ||
-      hour > 23 || minute > 59 || second > 60)
+  const int max_day = kDaysInMonth[month - 1] + ((month == 2 && leap) ? 1 : 0);
+  if (day < 1 || day > max_day || hour > 23 || minute > 59 || second > 59)
     return -1;
+
+  size_t at = kShape;
+  int millis = 0;
+  if (at < text.size() && text[at] == '.') {
+    ++at;
+    size_t digits = 0;
+    while (at < text.size() &&
+           std::isdigit(static_cast<unsigned char>(text[at]))) {
+      if (digits < 3)
+        millis = millis * 10 + (text[at] - '0');
+      ++digits;
+      ++at;
+    }
+    if (digits < 1 || digits > 3)
+      return -1;
+    while (digits < 3) {
+      millis *= 10;
+      ++digits;
+    }
+  }
+
+  int offset_minutes = 0;
+  if (at < text.size() && (text[at] == 'Z' || text[at] == 'z')) {
+    ++at;
+  } else if (at + 6 <= text.size() && (text[at] == '+' || text[at] == '-')) {
+    if (text[at + 3] != ':')
+      return -1;
+    int offset_hour = 0;
+    int offset_minute = 0;
+    if (!ParseFixedDecimal(text, at + 1, 2, &offset_hour) ||
+        !ParseFixedDecimal(text, at + 4, 2, &offset_minute))
+      return -1;
+    if (offset_hour > 23 || offset_minute > 59)
+      return -1;
+    offset_minutes =
+        (text[at] == '+' ? 1 : -1) * (offset_hour * 60 + offset_minute);
+    at += 6;
+  } else {
+    return -1;
+  }
+  if (at != text.size())
+    return -1;
+
   std::tm time{};
   time.tm_year = year - 1900;
   time.tm_mon = month - 1;
@@ -702,37 +769,8 @@ int64_t ParseIsoTimestampMs(const std::string& text) {
   const std::time_t base = timegm(&time);
   if (base < 0)
     return -1;
-  int64_t millis = static_cast<int64_t>(base) * 1000;
-  size_t at = 19;
-  if (at < text.size() && text[at] == '.') {
-    ++at;
-    int factor = 100;
-    while (at < text.size() &&
-           std::isdigit(static_cast<unsigned char>(text[at]))) {
-      if (factor > 0) {
-        millis += (text[at] - '0') * factor;
-        factor /= 10;
-      }
-      ++at;
-    }
-  }
-  int offset_minutes = 0;
-  if (at < text.size() && (text[at] == 'Z' || text[at] == 'z')) {
-    ++at;
-  } else if (at + 5 < text.size() && (text[at] == '+' || text[at] == '-')) {
-    const int sign = text[at] == '+' ? 1 : -1;
-    const int oh = digits(at + 1, 2);
-    const int om = digits(at + 4, 2);
-    if (oh < 0 || om < 0 || oh > 23 || om > 59)
-      return -1;
-    offset_minutes = sign * (oh * 60 + om);
-    at += 6;
-  } else {
-    return -1;
-  }
-  if (at != text.size())
-    return -1;
-  return millis - static_cast<int64_t>(offset_minutes) * 60000;
+  return static_cast<int64_t>(base) * 1000 + millis -
+         static_cast<int64_t>(offset_minutes) * 60000;
 }
 
 int64_t ParseProviderMillis(const Json* value) {
@@ -786,6 +824,9 @@ Quote NormalizeUpstoxQuote(const Json& item,
       std::chrono::duration_cast<std::chrono::milliseconds>(
           std::chrono::system_clock::now().time_since_epoch())
           .count();
+  // Independent chronology field. The monotonic receive timestamp above is
+  // for elapsed-time measurement and is never treated as a UTC event time.
+  quote.receive_wall_clock_ms = wall_now;
   quote.provider_timestamp_ms = ParseProviderMillis(update);
   quote.last_trade_timestamp_ms = ParseProviderMillis(trade);
   if (!TimestampWithinSkew(quote.provider_timestamp_ms, wall_now) ||
@@ -1061,6 +1102,10 @@ bool StrictNumber(const Json& value, double* out) {
   return true;
 }
 
+// 2^63 is not representable as a signed 64-bit integer. Comparing against the
+// rounded double of INT64_MAX would admit 2^63, so use the exact power of two.
+constexpr double kMaxOpenInterest = 9223372036854775808.0;
+
 }  // namespace
 
 HistoryParseResult BuildHistoryCsv(const Json& candles,
@@ -1104,7 +1149,8 @@ HistoryParseResult BuildHistoryCsv(const Json& candles,
       }
     }
     const double open_interest = row.array().size() == 7 ? values[5] : -1.0;
-    if (open_interest < -1.0 || open_interest != std::floor(open_interest)) {
+    if (open_interest < -1.0 || open_interest >= kMaxOpenInterest ||
+        open_interest != std::floor(open_interest)) {
       result.errors.push_back(symbol + ": invalid open interest");
       return result;
     }

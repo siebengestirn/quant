@@ -41,8 +41,10 @@ commit-subject format; no published commit has been rewritten.
 - force pushes and branch deletion disabled;
 - conversation resolution required;
 - linear history not required;
-- approving reviews zero, because the repository has one developer. Self-review
-  plus CI and independent review for critical work is the substitute.
+- approving reviews zero, because the repository has one developer. Required
+  merge controls are the self-review checklist and exact-head CI evidence;
+  external technical review is optional; independent acceptance is mandatory
+  only for defined high-risk release gates, not for routine merges.
 
 `gh api repos/siebengestirn/quant -X PATCH` configured:
 

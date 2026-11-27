@@ -1175,6 +1175,7 @@ bool MarketDataPipeline::IngestQuote(const Quote& quote, std::string* error) {
   payload["last_trade_timestamp_ms"] =
       Json::Integer(quote.last_trade_timestamp_ms);
   payload["receive_timestamp_ms"] = Json::Integer(quote.receive_timestamp_ms);
+  payload["receive_wall_clock_ms"] = Json::Integer(quote.receive_wall_clock_ms);
   payload["quality"] = Json::String(quote.quality);
   Event event;
   event.type = EventType::kQuote;
@@ -1265,6 +1266,8 @@ PipelineResult MarketDataPipeline::Publish(const KdbxCheckpoint& checkpoint,
           static_cast<int64_t>(number("last_trade_timestamp_ms"));
       quote.receive_timestamp_ms =
           static_cast<int64_t>(number("receive_timestamp_ms"));
+      quote.receive_wall_clock_ms =
+          static_cast<int64_t>(number("receive_wall_clock_ms"));
       const Json* quality = payload.Find("quality");
       quote.quality = quality == nullptr ? "" : quality->as_string();
       ok = publisher->PublishQuote(quote, event.sequence, event.id, error);
