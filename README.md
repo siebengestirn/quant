@@ -1,15 +1,10 @@
-> **Current status (2026-11-26):** `main` at `8a45da3`, PRs #1–#44 merged.
-> All documented
-> historical reports below are retained as evidence of earlier states, not as
-> the current status. The current gate results, limits and acceptance states
-> are recorded in `docs/release-status-2026-11-26.md`.
-
 # QUANT
 
 [![QUANT CI](https://github.com/siebengestirn/quant/actions/workflows/ci.yml/badge.svg)](https://github.com/siebengestirn/quant/actions/workflows/ci.yml)
 
-Autonomous quantitative research and paper-trading platform for Indian cash
-equities.
+Autonomous quantitative research platform for Indian cash equities. Live
+execution is disabled; the authoritative release record is generated in the
+final evidence manifest, not embedded in this file.
 Initial venture capital: **Permanently compounding. No withdrawals, no
 external deposits, no leverage, long-only.**
 

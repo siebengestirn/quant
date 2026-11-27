@@ -2,7 +2,7 @@
 
 Final commit, hosted CI run and merged-PR count are generated from the exact
 final `main` head and the authenticated GitHub API in `MANIFEST.md` of the
-final evidence bundle; volatile identifiers are deliberately not copied here.
+final evidence bundle; volatile identifiers are not copied here.
 The public web PR index showed "29 closed" because it was not fully paginated;
 it is not the authoritative inventory. PR #44 was the last technical
 remediation; PR #45 enforced branch protection; PR #46 is this final evidence
@@ -61,8 +61,8 @@ Branch protection on `main` was updated to match `git-policy.json`:
 
 The exported setting is `docs/branch-protection-2026-11-26.json`.
 
-**Bootstrap exception (narrow, one-time, time-bounded).** PR #45 installs the
-approval requirement and PR #46 reconciles final evidence.
+**Bootstrap exception (narrow, closed by scope, time-limited).** PR #45
+installs the approval requirement and PR #46 reconciles final evidence.
 Only one maintainer account exists,
 so GitHub cannot supply an independent approving review for those PRs.
 `git-policy.json` records a single-maintainer exception expiring
@@ -101,3 +101,14 @@ trading NOT IMPLEMENTED. Native q hosted required check GATED/NOT REQUIRED;
 power-loss durability NOT PROVEN; intraday/HFT UNSUPPORTED; multi-asset venue
 conformance NOT ESTABLISHED; independent reviewer acceptance for historical
 releases NOT RECORDED; live execution DISABLED; trading decision NO TRADE.
+
+## Governance evidence refresh (27 November 2026)
+
+The branch-protection endpoint was exported again after PR #46. The response
+is `docs/branch-protection-2026-11-27.json`; the SHA-256 of the raw API
+response bytes is
+`59741f72e3971a2e4e38608ddea47fa87686e46f22282214eeebe0b4ddece989`.
+It requires three strict checks, one independent approving review,
+conversation resolution, last-push approval and administrator enforcement,
+and prohibits force pushes and branch deletion. This is an authenticated
+export of the live endpoint, not a static description.
