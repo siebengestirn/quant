@@ -56,6 +56,7 @@ REQUIRED_JOBS = (
     "core build and tests",
     "ASan/UBSan",
     "Style contract (reference guides)",
+    "Release assurance (offline)",
 )
 NATIVE_RESULTS = {SKIPPED: GATED, SUCCESS: PASS}
 REPORT_SCHEMA_VERSION = 1
