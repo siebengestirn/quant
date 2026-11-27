@@ -1,7 +1,7 @@
 # QUANT dataset contract v2 — language-neutral specification
 
 This document is the single authoritative definition of the dataset snapshot
-contract shared by the C++ and Python implementations. It deliberately avoids
+contract shared by the C++ and Python implementations. It avoids
 relying on either language's JSON serialiser for digest inputs.
 
 ## 1. Files
@@ -98,7 +98,7 @@ Each entry in `files` has exactly:
    sessions indicate a stale or mixed generation.
 9. `first_date`/`last_date` and `instrument_id` match the manifest/contract.
 
-`PARTIAL` means some files verified but at least one symbol failed.
+`PARTIAL` means at least one file verified and at least one symbol failed.
 `FAILED` means no file verified. `BLOCKED` means the contract itself could not
 be trusted (missing, malformed, mismatched, unknown schema or algorithm).
 A decision-support path must require `COMPLETE`; `PARTIAL` is available only as
