@@ -1,13 +1,10 @@
 # Documentation index
 
-This directory is the canonical documentation set for QUANT. It holds ten
-Markdown documents plus this index. New material belongs inside one of those
-documents; extra Markdown files are not admitted. Historical snapshots remain
-in Git history and in release bundles.
-
-The inventory limit is enforced by `scripts/style_contract.py` through the
-`docs-inventory` check. The check requires `docs/README.md` and at most ten
-tracked `docs/*.md` files.
+This directory is the curated canonical subject-documentation set for QUANT.
+Membership is defined by the exact allowlist in `governance/inventory.json` and
+enforced by `scripts/style_contract.py` checks `docs-inventory` and
+`authored-inventory`. Additions require an inventory entry with an owner and a
+purpose. Generated files and external release bundles are never documentation.
 
 | Document | Authority |
 |---|---|
@@ -18,9 +15,11 @@ tracked `docs/*.md` files.
 | `risk-authorization-model.md` | In-process authorization capability and its boundary |
 | `execution-compliance.md` | Zerodha lock, data-only mode and execution environment controls |
 | `git-workflow.md` | Branch model, merge policy, CI evidence and single-developer review rule |
-| `git-state.md` | Repository inventory and branch hygiene record |
-| `correctness-baseline.md` | Initial correctness requirements and baseline findings |
+| `git-state.md` | HISTORICAL: adoption-era repository inventory snapshot |
+| `correctness-baseline.md` | HISTORICAL: initial correctness requirements and baseline findings |
 | `correctness-fixes.md` | Remediation history for the baseline findings |
+
+The table above is an enumeration of current members, not a numeric quota.
 
 ## Reading order
 

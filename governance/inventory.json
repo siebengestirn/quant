@@ -1,0 +1,231 @@
+{
+  "entries": [
+    {
+      "class": "entrypoint-doc",
+      "owner": "maintainer",
+      "path": "AGENTS.md",
+      "purpose": "Agent behaviour rules and read-first map",
+      "retention": "current"
+    },
+    {
+      "class": "entrypoint-doc",
+      "owner": "maintainer",
+      "path": "ASSESSMENT.md",
+      "purpose": "Verified initial state and amendment record",
+      "retention": "historical"
+    },
+    {
+      "class": "tooling-config",
+      "owner": "maintainer",
+      "path": "CMakePresets.json",
+      "purpose": "CMake configure and build presets",
+      "retention": "current"
+    },
+    {
+      "class": "entrypoint-doc",
+      "owner": "maintainer",
+      "path": "CONTRIBUTING.md",
+      "purpose": "Contribution workflow and review expectations",
+      "retention": "current"
+    },
+    {
+      "class": "entrypoint-doc",
+      "owner": "maintainer",
+      "path": "README.md",
+      "purpose": "Repository scope and document map",
+      "retention": "current"
+    },
+    {
+      "class": "entrypoint-doc",
+      "owner": "maintainer",
+      "path": "STYLES.md",
+      "purpose": "Summary of binding style rules",
+      "retention": "current"
+    },
+    {
+      "class": "index",
+      "owner": "maintainer",
+      "path": "docs/README.md",
+      "purpose": "Canonical documentation index and authority table",
+      "retention": "current"
+    },
+    {
+      "class": "canonical-doc",
+      "owner": "QA",
+      "path": "docs/correctness-baseline.md",
+      "purpose": "Initial correctness requirements and baseline findings",
+      "retention": "historical"
+    },
+    {
+      "class": "canonical-doc",
+      "owner": "QA",
+      "path": "docs/correctness-fixes.md",
+      "purpose": "Remediation record for baseline findings",
+      "retention": "historical"
+    },
+    {
+      "class": "canonical-doc",
+      "owner": "maintainer",
+      "path": "docs/dataset-contract.md",
+      "purpose": "Snapshot identity and CSV schema contract",
+      "retention": "current"
+    },
+    {
+      "class": "canonical-doc",
+      "owner": "release coordinator",
+      "path": "docs/execution-compliance.md",
+      "purpose": "Execution environment and data-only controls",
+      "retention": "current"
+    },
+    {
+      "class": "canonical-doc",
+      "owner": "maintainer",
+      "path": "docs/financial-integrity.md",
+      "purpose": "Integer money, postings and replay invariants",
+      "retention": "current"
+    },
+    {
+      "class": "canonical-doc",
+      "owner": "maintainer",
+      "path": "docs/git-state.md",
+      "purpose": "Repository inventory and branch hygiene record",
+      "retention": "historical"
+    },
+    {
+      "class": "canonical-doc",
+      "owner": "maintainer",
+      "path": "docs/git-workflow.md",
+      "purpose": "Branch model, merge policy and CI evidence",
+      "retention": "current"
+    },
+    {
+      "class": "canonical-doc",
+      "owner": "release coordinator",
+      "path": "docs/master-acceptance-register.md",
+      "purpose": "Requirements, exit evidence and release blockers",
+      "retention": "current"
+    },
+    {
+      "class": "canonical-doc",
+      "owner": "release coordinator",
+      "path": "docs/release-status.md",
+      "purpose": "Final integrated state and verification results",
+      "retention": "current"
+    },
+    {
+      "class": "canonical-doc",
+      "owner": "QA",
+      "path": "docs/risk-authorization-model.md",
+      "purpose": "In-process authorization capability and boundary",
+      "retention": "current"
+    },
+    {
+      "class": "policy",
+      "owner": "maintainer",
+      "path": "git-policy.json",
+      "purpose": "Machine-readable git and release policy",
+      "retention": "current"
+    },
+    {
+      "class": "index",
+      "owner": "maintainer",
+      "path": "governance/README.md",
+      "purpose": "Index of curated governance records",
+      "retention": "current"
+    },
+    {
+      "class": "evidence-record",
+      "owner": "maintainer",
+      "path": "governance/architecture-current.md",
+      "purpose": "Current architecture record",
+      "retention": "current"
+    },
+    {
+      "class": "evidence-record",
+      "owner": "QA",
+      "path": "governance/baseline-inventory.md",
+      "purpose": "Baseline repository inventory record",
+      "retention": "historical"
+    },
+    {
+      "class": "evidence-record",
+      "owner": "release coordinator",
+      "path": "governance/branch-protection-capture.json",
+      "purpose": "Captured branch-protection settings",
+      "retention": "current"
+    },
+    {
+      "class": "historical-evidence",
+      "owner": "release coordinator",
+      "path": "governance/history/branch-protection-2026-11-26.json",
+      "purpose": "Archived branch-protection export from 2026-11-26",
+      "retention": "historical"
+    },
+    {
+      "class": "historical-evidence",
+      "owner": "release coordinator",
+      "path": "governance/history/branch-protection-2026-11-27.json",
+      "purpose": "Archived branch-protection export from 2026-11-27",
+      "retention": "historical"
+    },
+    {
+      "class": "policy",
+      "owner": "maintainer",
+      "path": "governance/inventory.json",
+      "purpose": "Authoritative allowlist of tracked authored files",
+      "retention": "current"
+    },
+    {
+      "class": "evidence-record",
+      "owner": "QA",
+      "path": "governance/requirements-traceability.csv",
+      "purpose": "Requirement-to-evidence traceability register",
+      "retention": "current"
+    },
+    {
+      "class": "evidence-record",
+      "owner": "QA",
+      "path": "governance/research-report-registry.csv",
+      "purpose": "Research report register",
+      "retention": "current"
+    },
+    {
+      "class": "evidence-record",
+      "owner": "QA",
+      "path": "governance/security-findings.csv",
+      "purpose": "Security finding register",
+      "retention": "current"
+    },
+    {
+      "class": "evidence-record",
+      "owner": "maintainer",
+      "path": "governance/technical-debt-register.csv",
+      "purpose": "Technical debt register",
+      "retention": "current"
+    },
+    {
+      "class": "index",
+      "owner": "maintainer",
+      "path": "references/index.md",
+      "purpose": "Pinned style reference inventory and digests",
+      "retention": "pinned-reference"
+    },
+    {
+      "class": "test-fixture",
+      "owner": "QA",
+      "path": "tests/fixtures/canonical_dates.csv",
+      "purpose": "Canonical date fixtures for automated tests",
+      "retention": "current"
+    }
+  ],
+  "policy": {
+    "docs_inventory_source": "governance/inventory.json",
+    "generated_paths_are_excluded": true,
+    "rule": "Tracked authored .md, .json and .csv files must be listed in this allowlist with an owner and purpose; generated files under data/, build*/, .pytest_cache/ and .ruff_cache/ are never tracked.",
+    "scope_extensions": [
+      ".md",
+      ".json",
+      ".csv"
+    ]
+  }
+}

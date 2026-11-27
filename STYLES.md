@@ -1,7 +1,9 @@
 # Agent instructions
 
 Read and follow these mandatory references. Local copies are in `references/`;
-their integrity is checked by `scripts/check_style_references.py`.
+their integrity is checked by the reference-index check in
+`scripts/style_contract.py` and by the "style reference integrity" and
+"reference integrity" gates in `scripts/assurance.py`.
 
 - https://google.github.io/styleguide/
 - https://github.com/qbists/style

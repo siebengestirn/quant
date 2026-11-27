@@ -1,20 +1,21 @@
-# QUANT release status — 26 November 2026 (final)
+# QUANT release status — 27 November 2026 (final, through PR #58)
 
-Final commit, hosted CI run and merged-PR count are generated from the exact
-final `main` head and the authenticated GitHub API in `MANIFEST.md` of the
-final evidence bundle; volatile identifiers are not copied here.
+The exact current main SHA, hosted CI runs and bundle digest are recorded in
+`MANIFEST.md` of the current final release bundle (external artifact), not
+as immutable identifiers in this document. Values labelled "at PR #58" are
+release history; they do not claim the current head after reorganization.
 The public web PR index showed "29 closed" because it was not fully paginated;
-it is not the authoritative inventory. PR #44 was the last technical
-remediation; PR #45 enforced branch protection; PR #46 is this final evidence
-reconciliation.
+it is not the authoritative inventory. PR #44 was an earlier technical
+remediation and PR #45 enforced branch protection. PR #58 is the final
+closeout; PR #56, PR #57 and PR #58 are the latest corrections.
 
 SUPERSEDED — historical policy before 2026-11-27: open PRs after PR #46: 0;
 branches: `main` only. This is a historical inventory snapshot, not the live
 configuration.
 
 This is the current record; superseded sections are labelled. The zero-approval
-single-developer model in the "Final integration record" section below is the
-ACTIVE POLICY. Earlier one-approval governance material is marked SUPERSEDED —
+single-developer model in the "ACTIVE POLICY — Integration record" section
+below governs. Earlier one-approval governance material is marked SUPERSEDED —
 historical policy before 2026-11-27 and is retained only as evidence.
 
 ## Status vocabulary
@@ -51,7 +52,7 @@ historical policy before 2026-11-27 and is retained only as evidence.
 | #42 | run `45863382305`, all required jobs pass | — |
 | #43 | run `45867909983`, all required jobs pass | — |
 | #44 | run `45869637951`, all required jobs pass | — |
-| final `main` | see bundle `MANIFEST.md` | post-merge success on the exact final commit |
+| final `main` | run `45969624206`, all three required jobs pass | post-merge success at PR #58 on `1a91da2…`; current head in bundle `MANIFEST.md` |
 
 It is therefore **not** true that every PR head was green: PR #34 was merged
 with a red style check and was repaired by PR #35. The final `main` is green.
@@ -71,7 +72,7 @@ Branch protection on `main` was updated to match `git-policy.json`:
 - administrators subject to the same rules; merge commits preserved
   (linear history not required).
 
-The exported setting is `docs/branch-protection-2026-11-26.json`.
+The exported setting is `governance/history/branch-protection-2026-11-26.json`.
 SUPERSEDED — historical policy before 2026-11-27: this export records the old
 one-approval configuration, not the live configuration. The JSON exports are
 untouched evidence; `git-policy.json` declares policy, while only an
@@ -94,7 +95,7 @@ PRs, including #34 and #37, were merged before this enforcement and show no
 approving review; that gap is recorded, not hidden. CI success is not
 independent acceptance.
 
-## Gate disposition after the eight remediation PRs
+## Gate disposition after remediation PRs #47–#53 and #56–#58
 
 | Gate | Status |
 |---|---|
@@ -124,8 +125,8 @@ releases NOT RECORDED; live execution DISABLED; trading decision NO TRADE.
 SUPERSEDED — historical policy before 2026-11-27: this section and its export
 record the superseded one-approval configuration, not the live configuration.
 The branch-protection endpoint was exported again after PR #46. The response
-is `docs/branch-protection-2026-11-27.json`; the SHA-256 of the raw API
-response bytes is
+is `governance/history/branch-protection-2026-11-27.json`; the SHA-256 of
+the raw API response bytes is
 `59741f72e3971a2e4e38608ddea47fa87686e46f22282214eeebe0b4ddece989`.
 It requires three strict checks, one independent approving review,
 conversation resolution, last-push approval and administrator enforcement,
@@ -134,18 +135,19 @@ export of the endpoint as configured at that time, not the live configuration.
 The JSON export is untouched evidence. `git-policy.json` declares policy;
 only an authenticated API export proves live GitHub configuration.
 
-## ACTIVE POLICY — Final integration record — 27 November 2026
+## ACTIVE POLICY — Integration record — 27 November 2026 (updated through PR #58) <!-- https://github.com/siebengestirn/quant/pull/58 -->
 
 This section is the ACTIVE POLICY. It supersedes the one-approval governance
 material above; zero PRs are open and `main` is the sole integration branch.
 
 All seven remediation PRs #47–#53 were merged sequentially with merge commits
-after fresh exact-head CI on each synced head. `main` is the sole integration
-branch. Branch protection was corrected to the single-developer policy already
-used in the sibling repositories: zero required GitHub approvals, explicit
-self-review checklist, exact-head CI evidence, three required checks, PR,
-conversation resolution, no force pushes and no branch deletion. No admin
-bypass or history rewrite was used.
+after fresh exact-head CI on each synced head; PRs #56–#58 were later merged
+under the same policy. `main` is the sole integration branch. Branch protection
+was corrected to the single-developer policy already used in the sibling
+repositories: zero required GitHub approvals, explicit self-review checklist,
+exact-head CI evidence, three required checks, PR, conversation resolution,
+no force pushes and no branch deletion. No admin bypass or history rewrite
+was used.
 
 This record supersedes the earlier seven-open-PR snapshot. Operating status is
 unchanged: research INCONCLUSIVE/negative; holdout SEALED_NOT_EVALUATED;
@@ -156,34 +158,41 @@ conformance NOT ESTABLISHED; live execution DISABLED; decision NO TRADE.
 
 ### Active release-bundle policy (R8.1 corrective release)
 
-PR #56 is MERGED. Its head `7c4895c9299480d33915c50172085c0527c17f2b`
-passed hosted CI run `45962275474`; post-merge CI run `45962576571` passed
-on the final `main` SHA `99bc70c015a3744a27ffbaca76b32f3025cb7c37`. The
-previous final bundle is `/Users/tourist/Desktop/quant-final-20261127.zip`,
-SHA-256
-`d94a625425bf3ed2090749f8eafa10d819e70d72dc3b58f47511d788afcf923e`,
-with 97 manifest entries verified. That bundle is HISTORICAL: it does not
-cover the R8.1 corrective work.
+Release history only: PR #56 is MERGED and its material is HISTORICAL. Its
+head `7c4895c9299480d33915c50172085c0527c17f2b` passed hosted CI run
+`45962275474`; post-merge CI run `45962576571` passed on
+`99bc70c015a3744a27ffbaca76b32f3025cb7c37`, which was `main` at PR #56
+and is not final. The historical bundle digests `d94a6254…` (97 entries)
+and `b5ff5ecc…` (98 entries) are HISTORICAL / SUPERSEDED, not current.
 
 PR #57 (R8.1 exact integer contract) is MERGED. Its head
 `21a62e3eca480440981a3c1fa0681f9a12493171` passed hosted CI run
 `45968572026`; post-merge CI run `45968891063` passed on the R8.1 merge
-commit. Portable verification recorded 14090 C++ checks, 14090 sanitizer
-checks, zero failures, 50 portable pytest passes and all style gates PASS.
-The R8.1 release regenerated the final bundle, and its `MANIFEST.md`
-records the superseding digest, exact-head CI and final main SHA; do not
-treat the previous digest as current.
+commit `460b8f2d…`. Portable verification recorded 14090 C++ checks,
+14090 sanitizer checks, zero failures, 50 portable pytest passes and all
+portable assurance gates PASS. PR #57 is not the final closeout.
+
+PR #58 is MERGED and was the final closeout at PR #58. Its head
+`fb9170ca5e9003b0dbea7c1191e874ff4e7fa8b2` passed hosted CI run
+`45969369813`; final post-merge CI run `45969624206` passed on `main`
+`1a91da2fb08995c9f6ee20e373d004ad28e58a72`. The then-final bundle
+`MANIFEST.md` recorded 98 verified entries and digest
+`5eb0e1a87b3925117f515808591c9049ee0a11ffec246b46f61f9f79c54462c7`.
+These are release-history values at PR #58, not immutable current
+identifiers: the exact current main SHA, CI runs and bundle digest are in
+`MANIFEST.md` of the current final release bundle (external artifact).
 
 Branch protection was captured from the authenticated endpoint
 `https://api.github.com/repos/siebengestirn/quant/branches/main/protection`
-at `2026-11-27T08:44:38Z` with HTTP 200, API version `2022-11-28` and response
-SHA-256
-`824414cccfa205a54326357edb182c4fb40e320b6755b323189eb1e1c5b7cc11`. The
-capture records main SHA `99bc70c015a3744a27ffbaca76b32f3025cb7c37`,
-`required_approvals` 0 and three required checks (`core build and tests`,
-`ASan/UBSan`, `Style contract (reference guides)`). The tracked record is the
-root file `branch-protection-capture.json`; the bundle copy is
-`evidence/branch-protection.json` in the regenerated final bundle.
-`git-policy.json` declares policy; only an authenticated API export proves the
-live GitHub configuration. The historical JSON exports do not establish the
-current zero-approval setting.
+at `2026-11-27T09:13:00Z` with HTTP 200, API version `2022-11-28` and
+response SHA-256
+`824414cccfa205a54326357edb182c4fb40e320b6755b323189eb1e1c5b7cc11`.
+The capture recorded `main` as `1a91da2fb08995c9f6ee20e373d004ad28e58a72`
+at capture time; later heads are in the bundle `MANIFEST.md`. It
+records `required_approvals` 0 and three required checks (`core build and
+tests`, `ASan/UBSan`, `Style contract (reference guides)`). The tracked
+record is `governance/branch-protection-capture.json` in the repository;
+the bundle copy is `evidence/branch-protection.json` in the external
+final bundle. `git-policy.json` declares policy; only an authenticated
+API export proves the live GitHub configuration. The historical JSON
+exports do not establish the current zero-approval setting.

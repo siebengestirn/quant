@@ -69,7 +69,12 @@ INDEPENDENTLY_VERIFIED or ACCEPTED.
 No gate is accepted. PR #1 was later merged into `main`; acceptance is a
 separate independent decision.
 
-## QG addendum — 2026-11-25
+## QG addendum — updated R8.1 (2026-11-27, PR #57/#58)
+
+Status note (updated R8.1): QG-007a (freshness) remains as recorded above.
+QG-007b (exact-integer OI/volume boundary fixtures at 2^53) is IMPLEMENTED
+and MERGED in PR #57, independently unreviewed; large-timestamp fixtures
+remain NOT IMPLEMENTED. No independent acceptance is claimed.
 
 - QG-003 persistence of daily risk state across restart: NOT IMPLEMENTED.
 - QG-004 research/execution universe separation: PARTIAL; execution eligibility

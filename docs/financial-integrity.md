@@ -144,7 +144,10 @@ report:
 
 ### Verification
 
-- C++ unit tests: 13520 checks, 0 failures.
+- C++ unit tests: 13520 checks, 0 failures — an early historical
+  verification count (2026-11-26), not the current baseline. Current portable
+  verification records 14090 checks, 0 failures; see
+  `docs/master-acceptance-register.md`.
 - Property-based accounting: independent reference ledger reconciled across
   40 randomized runs of 60 buy/mark/sell/expense steps each.
 - Sanitizer build and unit tests: PASS.
