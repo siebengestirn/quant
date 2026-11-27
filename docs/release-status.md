@@ -294,13 +294,14 @@ remains OPEN under TD-015.
 
 Branch protection was captured from the authenticated endpoint
 `https://api.github.com/repos/siebengestirn/quant/branches/main/protection`
-at `2026-11-27T13:18:16Z` with HTTP 200, API version `2022-11-28` and
+at `2026-11-27T16:10:19Z` with HTTP 200, API version `2022-11-28` and
 response SHA-256
-`824414cccfa205a54326357edb182c4fb40e320b6755b323189eb1e1c5b7cc11`.
-The capture recorded `main` as `464ea1bba57cdc91b3d93eb77804fd882e245022`
+`de633dabfe3016d17f2885c1179282d68736f50692cacd51e9cbdb31acf02356`.
+The capture recorded `main` as `47b75c246671c71accefcce8840532f9e7f01c0a`
 at capture time; later heads are in the bundle `MANIFEST.md`. It
-records `required_approvals` 0 and three required checks (`core build and
-tests`, `ASan/UBSan`, `Style contract (reference guides)`). The tracked
+records `required_approvals` 0 and four required checks (`core build and
+tests`, `ASan/UBSan`, `Style contract (reference guides)`,
+`Release assurance (offline)`). The tracked
 record is `governance/branch-protection-capture.json` in the repository;
 the bundle copy is `evidence/branch-protection.json` in the external
 final bundle. `git-policy.json` declares policy; only an authenticated
