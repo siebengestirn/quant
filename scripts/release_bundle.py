@@ -64,6 +64,7 @@ from pathlib import Path
 
 import audit_disposition
 from quant_common import (
+    AUDIT_EVIDENCE_FIELDS,
     BINARY_BUILD_DIR_KEY,
     BINARY_COMMIT_KEY,
     BINARY_DIGEST_KEY,
@@ -1707,13 +1708,7 @@ def check_report_evidence_coherence(
         )
     else:
         before = len(errors)
-        for field in (
-            "source_digest",
-            "finding_count",
-            "disposition_count",
-            "counts_by_class",
-            "owner_status",
-        ):
+        for field in AUDIT_EVIDENCE_FIELDS:
             if counts.get(field) != evidence.get(field):
                 errors.append(
                     f"report/evidence coherence: {field} mismatch: "
