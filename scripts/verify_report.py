@@ -6,9 +6,10 @@ Usage:
   python3 scripts/verify_report.py show [--path PATH]
 
 Every gate is executed from the repository root. The report records the
-exact commands, exit codes, parsed counts and results. A gated native-q
-job is recorded as GATED_NOT_RUN and is never reported as passed. The
-report is written even when a gate fails.
+exact commands, exit codes, parsed counts and results. A skipped native-q
+job is GATED_NOT_RUN; a successful one is PASS, and any other conclusion
+is FAIL. Skipped jobs never add to successful test counts. The report is
+written even when a gate fails.
 """
 
 from __future__ import annotations
@@ -33,7 +34,17 @@ BINDING_CATEGORIES = frozenset({"tautology", "audit_ignore"})
 PASS = "PASS"
 FAIL = "FAIL"
 GATED = "GATED_NOT_RUN"
+NOT_APPLICABLE = "NOT_APPLICABLE"
+SUCCESS = "success"
+SKIPPED = "skipped"
+NATIVE_LABEL = "native-q"
 NATIVE_MARKERS = ("native-q", "native kdb")
+REQUIRED_JOBS = (
+    "core build and tests",
+    "ASan/UBSan",
+    "Style contract (reference guides)",
+)
+NATIVE_RESULTS = {SKIPPED: GATED, SUCCESS: PASS}
 PYTEST_FILES = (
     "tests/test_dataset_contract.py",
     "tests/test_research.py",
@@ -349,20 +360,42 @@ def run_audit() -> dict:
 
 def is_native_job(name: str) -> bool:
     """Identify the gated native-q job by name."""
-    lower = name.lower()
+    lower = str(name).lower()
     return any(marker in lower for marker in NATIVE_MARKERS)
 
 
+def conclusion_value(conclusion: object) -> str:
+    """Return a comparable conclusion token; malformed data has no token."""
+    if not isinstance(conclusion, str):
+        return ""
+    return conclusion.strip().lower()
+
+
+def map_job_conclusion(name: str, conclusion: object) -> str:
+    """Map one hosted job conclusion to a verification status.
+
+    Only a skipped native-q job is gated; a successful native-q job passes.
+    Required jobs pass only on success, and unknown names never pass.
+    """
+    state = conclusion_value(conclusion)
+    job_name = str(name)
+    if is_native_job(job_name):
+        return NATIVE_RESULTS.get(state, FAIL)
+    if job_name in REQUIRED_JOBS and state == SUCCESS:
+        return PASS
+    return FAIL
+
+
 def map_job(job: dict) -> dict:
-    """Map a hosted job conclusion to a reported result."""
+    """Record a hosted job's raw conclusion and its mapped status."""
     name = str(job.get("name", ""))
     conclusion = job.get("conclusion")
-    result = (
-        GATED
-        if is_native_job(name)
-        else (PASS if conclusion == "success" else FAIL)
-    )
-    return {"name": name, "conclusion": conclusion, "result": result}
+    return {
+        "name": name,
+        "conclusion": conclusion,
+        "result": map_job_conclusion(name, conclusion),
+        "database_id": job.get("databaseId"),
+    }
 
 
 def parse_jobs(output: str) -> list[dict]:
@@ -385,7 +418,74 @@ def parse_run(output: str) -> dict:
     return run
 
 
-def hosted_gate(commit: str) -> dict:
+def native_job(jobs: list[dict]) -> dict | None:
+    """Return the recorded native-q job, if the run contains one."""
+    return next((job for job in jobs if is_native_job(job["name"])), None)
+
+
+def missing_jobs(jobs: list[dict], expect_native: bool) -> list[str]:
+    """Return expected job labels that the hosted run does not contain."""
+    names = [job["name"] for job in jobs]
+    missing = [name for name in REQUIRED_JOBS if name not in names]
+    if expect_native and not any(is_native_job(name) for name in names):
+        missing.append(NATIVE_LABEL)
+    return missing
+
+
+def job_counts(jobs: list[dict]) -> dict:
+    """Count statuses; skipped jobs stay out of successful counts."""
+    return {
+        "jobs_total": len(jobs),
+        "jobs_passed": len([j for j in jobs if j["result"] == PASS]),
+        "jobs_failed": len([j for j in jobs if j["result"] == FAIL]),
+        "jobs_gated": len([j for j in jobs if j["result"] == GATED]),
+        "jobs_skipped": len(
+            [
+                job
+                for job in jobs
+                if conclusion_value(job["conclusion"]) == SKIPPED
+            ]
+        ),
+    }
+
+
+def native_result(native: dict | None, expect_native: bool) -> str:
+    """Return the native-q status, including when its job is absent."""
+    if native is not None:
+        return native["result"]
+    return FAIL if expect_native else NOT_APPLICABLE
+
+
+def hosted_ok(
+    run: dict,
+    jobs: list[dict],
+    native: dict | None,
+    missing: list[str],
+    match: bool,
+    expect_native: bool,
+) -> bool:
+    """Decide whether hosted evidence satisfies all required jobs."""
+    if not match or run.get("conclusion") != SUCCESS or missing:
+        return False
+    required = [job for job in jobs if job["name"] in REQUIRED_JOBS]
+    if len(required) != len(REQUIRED_JOBS):
+        return False
+    if any(job["result"] != PASS for job in required):
+        return False
+    status = native_result(native, expect_native)
+    if expect_native:
+        if status not in (PASS, GATED):
+            return False
+    elif status not in (PASS, GATED, NOT_APPLICABLE):
+        return False
+    counts = job_counts(jobs)
+    return (
+        counts["jobs_failed"] == 0
+        and counts["jobs_passed"] == counts["jobs_total"] - counts["jobs_gated"]
+    )
+
+
+def hosted_gate(commit: str, expect_native: bool = True) -> dict:
     """Verify the hosted CI run, its head SHA and every job conclusion."""
     listing = step_result(
         "hosted CI list",
@@ -400,7 +500,7 @@ def hosted_gate(commit: str) -> dict:
             "--limit",
             "1",
             "--json",
-            "databaseId,headSha,conclusion",
+            "databaseId,headSha,conclusion,url",
         ],
     )
     run: dict = {}
@@ -410,14 +510,13 @@ def hosted_gate(commit: str) -> dict:
         run = parse_run(listing["output"])
     except ValueError as exc:
         error = str(exc)
-    run_id = run.get("databaseId")
     viewing = step_result(
         "hosted CI jobs",
         [
             "gh",
             "run",
             "view",
-            str(run_id),
+            str(run.get("databaseId")),
             "-R",
             REPOSITORY,
             "--json",
@@ -429,37 +528,44 @@ def hosted_gate(commit: str) -> dict:
             jobs = parse_jobs(viewing["output"])
         except ValueError as exc:
             error = str(exc)
-    native = next((job for job in jobs if is_native_job(job["name"])), None)
+    native = native_job(jobs)
     head_sha = str(run.get("headSha", ""))
-    conclusion = run.get("conclusion")
     match = bool(commit) and head_sha == commit
+    missing = missing_jobs(jobs, expect_native)
     counts = {
-        "run_id": run_id,
+        "run_id": run.get("databaseId"),
+        "run_url": run.get("url"),
         "head_sha": head_sha,
         "head_sha_match": match,
-        "conclusion": conclusion,
-        "jobs_total": len(jobs),
-        "jobs_passed": len([j for j in jobs if j["result"] == PASS]),
-        "jobs_failed": len([j for j in jobs if j["result"] == FAIL]),
+        "conclusion": run.get("conclusion"),
+        "commit": commit,
+        "native_expected": expect_native,
+        "missing_jobs": missing,
         "native_q_conclusion": native["conclusion"] if native else None,
-        "native_q_result": native["result"] if native else None,
+        "native_q_result": native_result(native, expect_native),
+        **job_counts(jobs),
     }
     if error:
         counts["error"] = error
-    ok = (
-        not error
-        and match
-        and conclusion == "success"
-        and native is not None
-        and native["result"] == GATED
-        and counts["jobs_failed"] == 0
-        and counts["jobs_passed"] == len(jobs) - 1
+    ok = not error and hosted_ok(
+        run, jobs, native, missing, match, expect_native
     )
     listing = finalize(listing, not error)
     viewing = finalize(viewing, not error and bool(jobs))
     gate = make_gate("hosted_ci", [listing, viewing], counts, ok)
     gate["jobs"] = jobs
-    gate["native_q"] = native or {"conclusion": None, "result": GATED}
+    gate["run"] = {
+        "id": run.get("databaseId"),
+        "url": run.get("url"),
+        "head_sha": head_sha,
+        "conclusion": run.get("conclusion"),
+    }
+    gate["native_q"] = native or {
+        "name": NATIVE_LABEL,
+        "conclusion": None,
+        "result": native_result(native, expect_native),
+        "database_id": None,
+    }
     return gate
 
 
@@ -535,7 +641,7 @@ def show_report(path: Path) -> int:
     native = hosted.get("native_q") or {}
     print(
         "- Native q tier: "
-        f"{native.get('result', GATED)} "
+        f"{native.get('result', FAIL)} "
         f"(hosted conclusion: {native.get('conclusion')})"
     )
     overall = report.get("overall", FAIL)

@@ -6,12 +6,19 @@ The module consumes only decoded bytes that were captured under
 Provider keys are external identifiers: a cash-equity identity is derived only
 from ISIN, exchange, segment and trading series, never from a symbol, name or
 provider token.
+
+Identity verification, contract conformance, trading status and eligibility
+are reported separately. Matching an ISIN establishes identity only; it never
+implies that comparable contract fields agree. Effective dating is partial:
+effective_from is derived from the supplied snapshot market_date and
+effective_to stays open because no validity interval is supplied.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
@@ -35,12 +42,20 @@ UNSUPPORTED = "UNSUPPORTED"
 VERIFIED = "VERIFIED"
 UNMAPPED = "UNMAPPED"
 AMBIGUOUS = "AMBIGUOUS"
+PASS = "PASS"
+CONFLICT = "CONFLICT"
+INCOMPLETE = "INCOMPLETE"
 INACTIVE = "INACTIVE"
 SUSPENDED = "SUSPENDED"
 ACTIVE = "ACTIVE"
 UNKNOWN = "UNKNOWN"
 ELIGIBLE = "ELIGIBLE"
 NOT_ELIGIBLE = "NOT_ELIGIBLE"
+
+IDENTITY_STATUSES = (VERIFIED, UNMAPPED, AMBIGUOUS)
+CONFORMANCE_STATUSES = (PASS, CONFLICT, INCOMPLETE)
+TRADING_STATUSES = (ACTIVE, INACTIVE, SUSPENDED, UNKNOWN)
+ELIGIBILITY_STATUSES = (ELIGIBLE, NOT_ELIGIBLE)
 
 MISSING_PROVIDER_KEY = "MISSING_PROVIDER_KEY"
 MISSING_ISIN = "MISSING_ISIN"
@@ -93,7 +108,21 @@ DIFF_FIELDS = (
     "effective_to",
     "trading_status",
     "crosswalk_status",
+    "conformance_status",
     "eligibility_status",
+)
+# Provider-specific fields such as provider_symbol, listing tokens and
+# trading_status are excluded; these are the comparable contract terms.
+CONFORMANCE_FIELDS = (
+    "exchange",
+    "segment",
+    "instrument_class",
+    "trading_series",
+    "isin",
+    "listing_id",
+    "tick_size",
+    "lot_size",
+    "contract_multiplier",
 )
 
 
@@ -243,9 +272,15 @@ class CanonicalInstrument(NamedTuple):
     last_observed_at: str
     trading_status: str
     crosswalk_status: str
+    conformance_status: str
     eligibility_status: str
     source_digest: str
     source_version: str
+
+    @property
+    def identity_status(self) -> str:
+        """Return the identity-only status held in crosswalk_status."""
+        return self.crosswalk_status
 
 
 class ParseResult(NamedTuple):
@@ -274,11 +309,18 @@ class DiffReport(NamedTuple):
 
 
 class CrosswalkReport(NamedTuple):
-    """Cross-provider result plus identities withheld from eligibility."""
+    """Cross-provider result plus identities withheld from eligibility.
+
+    status_counts holds identity counts for VERIFIED/UNMAPPED/AMBIGUOUS and
+    trading counts for INACTIVE/SUSPENDED. conformance_counts and
+    trading_counts report the two independent classifications explicitly.
+    """
 
     instruments: tuple[CanonicalInstrument, ...]
     quarantine: tuple[QuarantineEntry, ...]
     status_counts: dict[str, int]
+    conformance_counts: dict[str, int] = {}
+    trading_counts: dict[str, int] = {}
 
 
 def sha256_hex(payload: bytes) -> str:
@@ -689,27 +731,70 @@ def _combined_status(
     return UNKNOWN
 
 
-def _crosswalk_status(
-    group: Sequence[ProviderInstrument], identity: str, suspended: set[str]
-) -> str:
-    """Classify a crosswalk identity using only observed provider data."""
+def _identity_status(group: Sequence[ProviderInstrument]) -> str:
+    """Classify identity corroboration only, independent of contract fields."""
     providers = {item.provider for item in group}
     if len(group) != len(providers):
         return AMBIGUOUS
-    if identity in suspended:
-        return SUSPENDED
-    if any(item.trading_status == INACTIVE for item in group):
-        return INACTIVE
     if len(providers) > 1:
         return VERIFIED
     return UNMAPPED
 
 
+def _conformance_value(item: ProviderInstrument, field: str) -> object:
+    """Return a comparable field value, normalising the tick-size unit."""
+    value = getattr(item, field)
+    if field == "tick_size" and item.provider == PROVIDER_UPSTOX:
+        # Upstox reports paise and FYERS rupees; rescale for comparison only.
+        if value is not None:
+            return float(value) / 100
+    return value
+
+
+def _values_agree(left: object, right: object) -> bool:
+    """Compare two field values, tolerating harmless float rounding."""
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return math.isclose(
+            float(left), float(right), rel_tol=1e-12, abs_tol=1e-12
+        )
+    return left == right
+
+
+def contract_conformance(
+    group: Sequence[ProviderInstrument], identity_status: str
+) -> str:
+    """Compare contract terms; an ISIN match alone is not conformance."""
+    if identity_status != VERIFIED:
+        return INCOMPLETE
+    ordered = sorted(group, key=lambda item: item.provider)
+    for field in CONFORMANCE_FIELDS:
+        values = [_conformance_value(item, field) for item in ordered]
+        if any(value is None or value == "" for value in values):
+            return INCOMPLETE
+        if not all(_values_agree(values[0], value) for value in values[1:]):
+            return CONFLICT
+    return PASS
+
+
+def eligibility_status(
+    identity_status: str, conformance: str, trading_status: str
+) -> str:
+    """Grant eligibility only when identity, contract and trading all pass."""
+    if (
+        identity_status == VERIFIED
+        and conformance == PASS
+        and trading_status == ACTIVE
+    ):
+        return ELIGIBLE
+    return NOT_ELIGIBLE
+
+
 def _build_canonical(
     identity: str,
     group: Sequence[ProviderInstrument],
-    status: str,
-    suspended: set[str],
+    identity_status: str,
+    trading_status: str,
+    conformance: str,
 ) -> CanonicalInstrument:
     """Build one canonical instrument from its provider observations."""
     identifiers = tuple(
@@ -728,11 +813,8 @@ def _build_canonical(
     isin = _first_value(group, "isin")
     series = _first_value(group, "trading_series")
     tick_size = _first_value(group, "tick_size")
-    trading_status = _combined_status(group, identity, suspended)
-    eligibility = (
-        ELIGIBLE
-        if status == VERIFIED and trading_status == ACTIVE
-        else NOT_ELIGIBLE
+    eligibility = eligibility_status(
+        identity_status, conformance, trading_status
     )
     return CanonicalInstrument(
         canonical_instrument_id=identity,
@@ -754,12 +836,15 @@ def _build_canonical(
         expiry=None,
         strike=None,
         option_type=None,
+        # Partial effective dating only: the start comes from the supplied
+        # snapshot market_date and no end date is asserted.
         effective_from=min(item.market_date for item in group),
         effective_to=None,
         first_observed_at=min(item.observed_at_utc for item in group),
         last_observed_at=max(item.observed_at_utc for item in group),
         trading_status=trading_status,
-        crosswalk_status=status,
+        crosswalk_status=identity_status,
+        conformance_status=conformance,
         eligibility_status=eligibility,
         source_digest=_merged_digest(group),
         source_version=SCHEMA_VERSION,
@@ -815,22 +900,36 @@ def crosswalk(
         INACTIVE: 0,
         SUSPENDED: 0,
     }
+    conformance_counts = {status: 0 for status in CONFORMANCE_STATUSES}
+    trading_counts = {status: 0 for status in TRADING_STATUSES}
     for identity in sorted(groups):
         group = groups[identity]
         collisions = _collision_entries(identity, group)
         quarantine.extend(collisions)
-        status = (
-            AMBIGUOUS
-            if collisions
-            else _crosswalk_status(group, identity, suspended)
+        identity_status = AMBIGUOUS if collisions else _identity_status(group)
+        trading_status = _combined_status(group, identity, suspended)
+        conformance = contract_conformance(group, identity_status)
+        instruments.append(
+            _build_canonical(
+                identity, group, identity_status, trading_status, conformance
+            )
         )
-        instruments.append(_build_canonical(identity, group, status, suspended))
-        counts[status] += 1
-    return CrosswalkReport(tuple(instruments), tuple(quarantine), counts)
+        counts[identity_status] += 1
+        conformance_counts[conformance] += 1
+        trading_counts[trading_status] += 1
+        if trading_status in counts:
+            counts[trading_status] += 1
+    return CrosswalkReport(
+        tuple(instruments),
+        tuple(quarantine),
+        counts,
+        conformance_counts,
+        trading_counts,
+    )
 
 
 def is_eligible(instrument: CanonicalInstrument) -> bool:
-    """Return True only for a VERIFIED, active, non-suspended instrument."""
+    """Return True only for a VERIFIED, conforming, active instrument."""
     return instrument.eligibility_status == ELIGIBLE
 
 
