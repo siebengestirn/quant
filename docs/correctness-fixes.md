@@ -1,7 +1,7 @@
 # QUANT correctness sprint — P0 fixes (2026-11-25)
 
 Branch: `correctness/gate0`. Baseline:
-`docs/correctness-baseline-2026-11-25.md`.
+`docs/correctness-baseline.md`.
 
 | ID | Finding | Fix | Verification | State |
 |---|---|---|---|---|

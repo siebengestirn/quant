@@ -22,8 +22,8 @@ This file states the contribution workflow. `git-policy.json` and
 - Branches, merges and PRs: `docs/git-workflow.md`, `git-policy.json`.
 - Engineering rules: `AGENTS.md`.
 - Initial review record: `ASSESSMENT.md`.
-- Correctness records: `docs/correctness-baseline-2026-11-25.md` and
-  `docs/correctness-fixes-2026-11-25.md`.
+- Correctness records: `docs/correctness-baseline.md` and
+  `docs/correctness-fixes.md`.
 - Style references: `STYLES.md` and `references/`.
 
 A passing check does not authorize provider contact, paid subscriptions,

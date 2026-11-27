@@ -98,6 +98,20 @@ def check_documentation() -> list[str]:
     return errors
 
 
+def check_docs_inventory() -> list[str]:
+    """Enforce the bounded canonical documentation set."""
+    errors: list[str] = []
+    readme = ROOT / "docs" / "README.md"
+    if not readme.is_file():
+        errors.append("docs/README.md is required")
+    tracked = [p for p in git("ls-files", "docs/*.md") if p != "docs/README.md"]
+    if len(tracked) > 10:
+        errors.append(
+            f"docs inventory has {len(tracked)} Markdown files; limit is 10"
+        )
+    return errors
+
+
 def check_json() -> list[str]:
     """Validate tracked JSON formatting."""
     errors: list[str] = []
@@ -202,6 +216,7 @@ def main() -> int:
     checks = {
         "reference-index": check_reference_index,
         "documentation": check_documentation,
+        "docs-inventory": check_docs_inventory,
         "json": check_json,
         "tool-configs": check_tool_configs,
         "shell": check_shell,
