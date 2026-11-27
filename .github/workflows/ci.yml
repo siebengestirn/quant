@@ -87,10 +87,17 @@ jobs:
 
   native-q:
     name: Native KDB-X recovery (gated tier)
-    # This tier is NOT a required status check: it needs a licensed q runtime.
-    # Enable only on a governed runner with the license in protected secrets.
+    # PORTABLE_RESEARCH scope does not require this job: portable CI builds
+    # with QUANT_WITH_KDBX=OFF and certifies no q behaviour here. Enabling it
+    # requires the Q_PERSISTENCE scope, a governed self-hosted runner with a
+    # licensed q runtime in protected secrets, and the evidence checker below.
+    # A green pytest exit code alone is not proof: skips must become failures
+    # and the JUnit report must be cross-checked against recorded evidence.
+    # This job is NOT a required status check for PORTABLE_RESEARCH.
     if: vars.QUANT_NATIVE_Q_ENABLED == 'true'
     runs-on: self-hosted
+    env:
+      QUANT_NATIVE_Q_REQUIRED: '1'
     steps:
       - uses: actions/checkout@v7
 
@@ -98,16 +105,141 @@ jobs:
         env:
           QHOME: ${{ secrets.QUANT_QHOME }}
         run: |
+          test -n "$QHOME"
           test -x "$QHOME/bin/q"
+          command -v cmake
+          command -v ninja
           printf 'q runtime verified; license material not printed\n'
 
-      - name: Install Python test dependencies
-        run: python3 -m pip install --quiet pykx pytest
+      - name: Provision pinned test environment
+        run: |
+          python3 -m venv data/venv
+          data/venv/bin/python -m pip install --quiet -r requirements.txt
+          data/venv/bin/python - <<'PY'
+          from importlib.metadata import version
 
-      - name: Run native q persistence and recovery tests
+          print("pykx", version("pykx"))
+          print("pytest", version("pytest"))
+          PY
+
+      - name: Configure and build KDB-X C API
         env:
           QHOME: ${{ secrets.QUANT_QHOME }}
-        run: python3 -m pytest tests/test_kdbx.py -q
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DQUANT_WITH_KDBX=ON \
+            -DQUANT_PYTHON_EXECUTABLE="$GITHUB_WORKSPACE/data/venv/bin/python"
+          cmake --build build -j 2
+
+      - name: Record q runtime and C API evidence
+        env:
+          QHOME: ${{ secrets.QUANT_QHOME }}
+        run: |
+          data/venv/bin/python - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          from importlib.metadata import version
+          from pathlib import Path
+
+          root = Path(".")
+          assurance = root / "data" / "assurance"
+          assurance.mkdir(parents=True, exist_ok=True)
+          qbin = Path(os.environ["QHOME"]) / "bin" / "q"
+          probe = subprocess.run(
+              [str(qbin), "-q"],
+              input="echo 'QVERSION=', .z.K, '.', .z.k; exit 0\n",
+              capture_output=True,
+              text=True,
+              timeout=60,
+              check=False,
+          )
+          q_output = probe.stdout + probe.stderr
+          match = re.search(r"QVERSION=(\d+(?:\.\d+){1,3})", q_output)
+          if match is None:
+              raise SystemExit(
+                  "could not read q runtime version: " + q_output[-400:]
+              )
+          q_version = match.group(1)
+
+          doctor = subprocess.run(
+              [str(root / "build" / "quant"), "doctor"],
+              capture_output=True,
+              text=True,
+              timeout=60,
+              check=False,
+          )
+          available = "c_api=available" in (doctor.stdout + doctor.stderr)
+          compile_db = (root / "build" / "compile_commands.json").read_text(
+              encoding="utf-8"
+          )
+          compiled = "QUANT_HAS_KDBX=1" in compile_db
+          c_api = "compiled" if compiled and available else "not compiled"
+          detail = (
+              "compile_commands QUANT_HAS_KDBX=1="
+              + str(compiled).lower()
+              + "; quant doctor c_api="
+              + ("available" if available else "not compiled")
+          )
+          evidence = {
+              "q_runtime_version": q_version,
+              "pykx_version": version("pykx"),
+              "pytest_version": version("pytest"),
+              "python": str(root / "data" / "venv" / "bin" / "python"),
+              "quant_binary": str(root / "build" / "quant"),
+              "c_api": c_api,
+              "c_api_detail": detail,
+              "required": os.environ["QUANT_NATIVE_Q_REQUIRED"],
+          }
+          (assurance / "native-q-evidence.json").write_text(
+              json.dumps(evidence, indent=2) + "\n", encoding="utf-8"
+          )
+          (assurance / "native-q-runtime.txt").write_text(
+              "\n".join(
+                  [
+                      f"q_runtime_version={q_version}",
+                      f"pykx_version={evidence['pykx_version']}",
+                      f"pytest_version={evidence['pytest_version']}",
+                      f"c_api={c_api}",
+                      detail,
+                  ]
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+          print(detail)
+          if c_api != "compiled":
+              raise SystemExit("KDB-X C API not enabled in build/quant")
+          PY
+
+      - name: Native q persistence and recovery tests
+        env:
+          QHOME: ${{ secrets.QUANT_QHOME }}
+        run: >-
+          data/venv/bin/python -m pytest tests/test_kdbx.py -q
+          --junitxml=data/assurance/native-q-junit.xml
+
+      - name: Verify native-q results (no empty or skipped runs)
+        if: always()
+        run: >-
+          data/venv/bin/python scripts/check_native_q_results.py
+          --junit data/assurance/native-q-junit.xml
+          --evidence data/assurance/native-q-evidence.json
+
+      - name: Upload native-q evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-q-evidence
+          path: |
+            data/assurance/native-q-junit.xml
+            data/assurance/native-q-evidence.json
+            data/assurance/native-q-runtime.txt
+            build/CMakeCache.txt
+            build/compile_commands.json
+          if-no-files-found: warn
 
   style-contract:
     name: Style contract (reference guides)

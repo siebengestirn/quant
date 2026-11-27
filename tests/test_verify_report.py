@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline tests for hosted job conclusion mapping in verify_report."""
+"""Offline tests for the versioned verification report and native-q matrix."""
 
 from __future__ import annotations
 
@@ -21,7 +21,11 @@ PASS = VERIFY_REPORT.PASS
 FAIL = VERIFY_REPORT.FAIL
 GATED = VERIFY_REPORT.GATED
 NOT_APPLICABLE = VERIFY_REPORT.NOT_APPLICABLE
+RELEASE_SCOPE = VERIFY_REPORT.RELEASE_SCOPE
+PERSISTENCE_SCOPE = VERIFY_REPORT.PERSISTENCE_SCOPE
+REQUIRED_GATES = VERIFY_REPORT.REQUIRED_GATES
 NATIVE_NAME = "Native KDB-X recovery (gated tier)"
+NATIVE_STEP = VERIFY_REPORT.NATIVE_TEST_STEP
 REQUIRED_NAMES = (
     "core build and tests",
     "ASan/UBSan",
@@ -32,6 +36,11 @@ COMMIT = "abc123def456"
 RUN_ID = 12345
 RUN_URL = "https://github.com/siebengestirn/quant/actions/runs/12345"
 OMIT = object()
+NATIVE_LOG = f"{VERIFY_REPORT.NATIVE_TEST_FILE} tests 8 passed in 0.1s"
+SKIPPED_LOG = (
+    f"{VERIFY_REPORT.NATIVE_TEST_FILE} tests 6 passed, 2 skipped in 0.1s"
+)
+ZERO_LOG = "no tests ran in 0.05s"
 CONCLUSION_CASES = [
     ("skipped", GATED, FAIL),
     ("success", PASS, PASS),
@@ -63,6 +72,9 @@ CONCLUSION_IDS = [
 def make_jobs(
     native_conclusion: object = "success",
     required_conclusion: object = "success",
+    *,
+    native_steps: bool = True,
+    native_enabled: bool | None = None,
 ) -> list[dict]:
     """Build a complete hosted job list for offline gate tests."""
     jobs = [
@@ -74,13 +86,19 @@ def make_jobs(
         for number, name in enumerate(REQUIRED_NAMES, 1)
     ]
     if native_conclusion is not OMIT:
-        jobs.append(
-            {
-                "name": NATIVE_NAME,
-                "conclusion": native_conclusion,
-                "databaseId": 99,
-            }
-        )
+        job = {
+            "name": NATIVE_NAME,
+            "conclusion": native_conclusion,
+            "databaseId": 99,
+        }
+        if (
+            native_steps
+            and VERIFY_REPORT.conclusion_value(native_conclusion) == "success"
+        ):
+            job["steps"] = [{"name": NATIVE_STEP, "conclusion": "success"}]
+        if native_enabled is not None:
+            job["enabled"] = native_enabled
+        jobs.append(job)
     return jobs
 
 
@@ -91,6 +109,8 @@ def build_gate(
     head_sha: str = COMMIT,
     run_conclusion: str = "success",
     expect_native: bool = True,
+    scope: str = RELEASE_SCOPE,
+    native_log: str = NATIVE_LOG,
 ) -> dict:
     """Run the hosted gate against synthetic offline gh responses."""
     run = {
@@ -102,9 +122,12 @@ def build_gate(
 
     def fake_step_result(name: str, argv: list[str], env=None) -> dict:
         del env
-        output = (
-            json.dumps([run]) if "list" in argv else json.dumps({"jobs": jobs})
-        )
+        if "api" in argv:
+            output = native_log
+        elif "list" in argv:
+            output = json.dumps([run])
+        else:
+            output = json.dumps({"jobs": jobs})
         return {
             "name": name,
             "command": " ".join(argv),
@@ -115,7 +138,9 @@ def build_gate(
         }
 
     monkeypatch.setattr(VERIFY_REPORT, "step_result", fake_step_result)
-    return VERIFY_REPORT.hosted_gate(commit, expect_native=expect_native)
+    return VERIFY_REPORT.hosted_gate(
+        commit, expect_native=expect_native, scope=scope
+    )
 
 
 @pytest.mark.parametrize("name", [NATIVE_NAME, *REQUIRED_NAMES])
@@ -172,6 +197,8 @@ def test_map_job_records_each_field() -> None:
         "conclusion": "skipped",
         "result": GATED,
         "database_id": 777,
+        "steps": [],
+        "enabled_hint": None,
     }
 
 
@@ -213,7 +240,7 @@ def test_hosted_gate_native_conclusions(
     expected_status: str,
     expected_gate: str,
 ) -> None:
-    """The gate accepts only a skipped or successful native-q job."""
+    """Only a skipped or evidenced successful native job is accepted."""
     gate = build_gate(monkeypatch, make_jobs(conclusion))
     assert gate["counts"]["native_q_conclusion"] == conclusion
     assert gate["counts"]["native_q_result"] == expected_status
@@ -232,26 +259,126 @@ def test_skipped_native_job_is_not_counted_as_pass(
     assert counts["jobs_gated"] == 1
     assert counts["jobs_passed"] == 3
     assert counts["jobs_failed"] == 0
-    assert gate["native_q"] == {
-        "name": NATIVE_NAME,
-        "conclusion": "skipped",
-        "result": GATED,
-        "database_id": 99,
-    }
+    native = gate["native_q"]
+    assert native["enabled"] is False
+    assert native["conclusion"] == "skipped"
+    assert native["result"] == GATED
+    assert native["tests_executed"] == 0
+    assert native["tests_skipped"] == 0
+    assert native["tests_failed"] == 0
+    assert native["evidence"]["test_step_executed"] is False
+    assert "not enabled" in native["reason"]
+    assert native["database_id"] == 99
 
 
 def test_successful_native_job_counts_as_pass(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A successful native job is a pass and is counted as one."""
+    """A successful job with executed, unskipped integration tests passes."""
     gate = build_gate(monkeypatch, make_jobs("success"))
     counts = gate["counts"]
+    native = gate["native_q"]
     assert gate["result"] == PASS
     assert counts["native_q_result"] == PASS
     assert counts["jobs_passed"] == 4
     assert counts["jobs_skipped"] == 0
     assert counts["jobs_gated"] == 0
     assert counts["jobs_failed"] == 0
+    assert native["enabled"] is True
+    assert native["tests_executed"] == 8
+    assert native["tests_skipped"] == 0
+    assert native["tests_failed"] == 0
+    assert "executed" in native["reason"]
+    assert native["evidence"]["test_step_executed"] is True
+
+
+@pytest.mark.parametrize(
+    ("log", "skipped"),
+    [(ZERO_LOG, 0), (SKIPPED_LOG, 2)],
+    ids=["zero-tests", "skipped-tests"],
+)
+def test_native_success_needs_executed_unskipped_tests(
+    monkeypatch: pytest.MonkeyPatch, log: str, skipped: int
+) -> None:
+    """Success without executed tests, or with skips, is a failure."""
+    gate = build_gate(monkeypatch, make_jobs("success"), native_log=log)
+    native = gate["native_q"]
+    assert gate["result"] == FAIL
+    assert native["result"] == FAIL
+    assert native["tests_skipped"] == skipped
+    assert native["reason"]
+
+
+@pytest.mark.parametrize(
+    ("enabled", "log", "expected"),
+    [
+        (True, NATIVE_LOG, PASS),
+        (False, NATIVE_LOG, FAIL),
+        (True, ZERO_LOG, FAIL),
+    ],
+    ids=["enabled-pass", "disabled-failure", "enabled-but-no-tests"],
+)
+def test_explicit_native_enablement(
+    monkeypatch: pytest.MonkeyPatch,
+    enabled: bool,
+    log: str,
+    expected: str,
+) -> None:
+    """Explicit enablement is honoured but does not replace test evidence."""
+    jobs = make_jobs("success", native_enabled=enabled)
+    gate = build_gate(monkeypatch, jobs, native_log=log)
+    assert gate["native_q"]["enabled"] is enabled
+    assert gate["native_q"]["result"] == expected
+    assert gate["result"] == expected
+
+
+def test_explicitly_enabled_skipped_job_is_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An enabled tier cannot hide behind a skipped hosted job."""
+    jobs = make_jobs("skipped", native_enabled=True)
+    gate = build_gate(monkeypatch, jobs)
+    assert gate["native_q"]["result"] == FAIL
+    assert gate["native_q"]["reason"]
+    assert gate["result"] == FAIL
+
+
+@pytest.mark.parametrize(
+    ("scope", "expected"),
+    [(RELEASE_SCOPE, GATED), (PERSISTENCE_SCOPE, FAIL)],
+)
+def test_gated_native_requires_permissive_scope(
+    monkeypatch: pytest.MonkeyPatch, scope: str, expected: str
+) -> None:
+    """A gated native tier is only valid in the portable research scope."""
+    gate = build_gate(monkeypatch, make_jobs("skipped"), scope=scope)
+    assert gate["counts"]["native_q_result"] == expected
+    assert gate["result"] == (PASS if expected == GATED else FAIL)
+
+
+def test_persistence_scope_requires_executed_native_tests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The persistence scope accepts a native pass with full evidence."""
+    gate = build_gate(
+        monkeypatch, make_jobs("success"), scope=PERSISTENCE_SCOPE
+    )
+    assert gate["result"] == PASS
+    assert gate["native_q"]["result"] == PASS
+    gated = build_gate(
+        monkeypatch, make_jobs("skipped"), scope=PERSISTENCE_SCOPE
+    )
+    assert gated["result"] == FAIL
+
+
+def test_success_without_test_step_is_gated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful job with no integration test step ran no tests."""
+    gate = build_gate(monkeypatch, make_jobs("success", native_steps=False))
+    assert gate["native_q"]["result"] == GATED
+    assert gate["native_q"]["tests_executed"] == 0
+    assert gate["result"] == PASS
 
 
 @pytest.mark.parametrize("name", REQUIRED_NAMES)
@@ -281,6 +408,8 @@ def test_missing_native_job_is_rejected(
     assert gate["counts"]["missing_jobs"] == ["native-q"]
     assert gate["counts"]["native_q_result"] == FAIL
     assert gate["counts"]["native_q_conclusion"] is None
+    assert gate["native_q"]["result"] == FAIL
+    assert "missing" in gate["native_q"]["reason"]
 
 
 @pytest.mark.parametrize("name", REQUIRED_NAMES)
@@ -356,3 +485,133 @@ def test_malformed_jobs_response_rejects_gate(
     gate = build_gate(monkeypatch, [])
     assert gate["result"] == FAIL
     assert "error" in gate["counts"]
+
+
+def test_report_has_versioned_schema_and_all_gates(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A run writes the schema version, scope and every required gate."""
+    gates = [
+        {
+            "name": name,
+            "command": "recorded command",
+            "exit_code": 0,
+            "counts": {},
+            "result": PASS,
+            "steps": [],
+        }
+        for name in sorted(REQUIRED_GATES)
+    ]
+    monkeypatch.setattr(VERIFY_REPORT, "run_gates", lambda commit, scope: gates)
+    monkeypatch.setattr(VERIFY_REPORT, "git_commit", lambda: COMMIT)
+    monkeypatch.setattr(VERIFY_REPORT, "toolchain", lambda: {"python": "3"})
+    output = tmp_path / "report.json"
+    assert VERIFY_REPORT.run_report(output) == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["schema_version"] == VERIFY_REPORT.REPORT_SCHEMA_VERSION
+    assert report["release_scope"] == RELEASE_SCOPE
+    assert {gate["name"] for gate in report["gates"]} == set(REQUIRED_GATES)
+    assert report["overall"] == PASS
+
+
+@pytest.mark.parametrize(
+    ("factory", "name", "filename"),
+    [
+        (VERIFY_REPORT.run_w1_tests, "w1", "tests/test_instrument_master.py"),
+        (
+            VERIFY_REPORT.run_release_bundle_tests,
+            "release_bundle_tests",
+            "tests/test_release_bundle.py",
+        ),
+        (
+            VERIFY_REPORT.run_verify_report_tests,
+            "verify_report_tests",
+            "tests/test_verify_report.py",
+        ),
+    ],
+)
+def test_new_pytest_gates_reset_addopts(
+    monkeypatch: pytest.MonkeyPatch, factory, name: str, filename: str
+) -> None:
+    """New suites run with empty addopts and report their test counts."""
+    calls: list[list[str]] = []
+
+    def fake_step_result(gate_name: str, argv: list[str], env=None) -> dict:
+        del env, gate_name
+        calls.append(list(argv))
+        return {
+            "name": "pytest",
+            "command": VERIFY_REPORT.command_text(argv),
+            "exit_code": 0,
+            "counts": {},
+            "result": PASS,
+            "output": "11 passed in 0.1s",
+        }
+
+    monkeypatch.setattr(VERIFY_REPORT, "step_result", fake_step_result)
+    gate = factory()
+    assert gate["name"] == name
+    assert gate["result"] == PASS
+    assert gate["counts"]["passed"] == 11
+    argv = calls[-1]
+    assert filename in argv
+    assert argv[argv.index("-o") + 1] == "addopts="
+    assert "-q" in argv
+    assert "-o addopts='' -q" in gate["command"]
+
+
+def test_verify_report_gate_does_not_recurse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Running the report test gate never invokes another report run."""
+
+    def reject_run(*args, **kwargs) -> None:
+        raise AssertionError("verify_report run must not be called")
+
+    monkeypatch.setattr(VERIFY_REPORT, "run_report", reject_run)
+    monkeypatch.setattr(
+        VERIFY_REPORT,
+        "step_result",
+        lambda name, argv, env=None: {
+            "name": name,
+            "command": " ".join(argv),
+            "exit_code": 0,
+            "counts": {},
+            "result": PASS,
+            "output": "80 passed in 1.0s",
+        },
+    )
+    gate = VERIFY_REPORT.run_verify_report_tests()
+    assert gate["name"] == "verify_report_tests"
+    assert gate["counts"]["passed"] == 80
+
+
+def test_show_report_renders_recorded_native_reason(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """The summary prints the report's explanation, not a fixed claim."""
+    report = {
+        "commit": COMMIT,
+        "branch": "main",
+        "schema_version": 1,
+        "release_scope": RELEASE_SCOPE,
+        "overall": PASS,
+        "gates": [],
+    }
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps(report), encoding="utf-8")
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        VERIFY_REPORT,
+        "gate_named",
+        lambda rep, name: {
+            "native_q": {"result": PASS, "reason": "recorded explanation"},
+        },
+    )
+    try:
+        assert VERIFY_REPORT.show_report(path) == 0
+    finally:
+        monkeypatch.undo()
+    output = capsys.readouterr().out
+    assert "Native q tier: PASS (recorded explanation)" in output
+    assert "GATED / NOT RUN" not in output

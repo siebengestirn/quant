@@ -10,9 +10,11 @@ Build first fetches authoritative refs and verifies that HEAD is exactly
 published ``main`` with a clean tree. It then stages the exact committed
 tree from ``git archive HEAD`` together with pinned raw instrument
 snapshots, derives every volatile identifier from repository state and the
-authenticated GitHub API, and embeds the portable verification report as
-evidence. Generated timestamps vary between runs, so a build is repeatable
-and self-verifying but is not byte-identical across times. Verify checks
+authenticated GitHub API, and embeds the versioned verification report as
+evidence. The default release scope is PORTABLE_RESEARCH; a gated native-q
+tier is permitted there but carries no q persistence qualification.
+Generated timestamps vary between runs, so a build is repeatable and
+self-verifying but is not byte-identical across times. Verify checks
 ZIP integrity, the SHA-256 manifest table, the embedded evidence report
 and the digests of any bundled instrument snapshots.
 """
@@ -43,6 +45,64 @@ MANIFEST_NAME = "MANIFEST.md"
 REPORT_ENTRY = f"{PREFIX}evidence/verification-report.json"
 ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 HEX_DIGITS = frozenset("0123456789abcdef")
+REPORT_SCHEMA_VERSION = 1
+RELEASE_SCOPE = "PORTABLE_RESEARCH"
+PERSISTENCE_SCOPE = "Q_PERSISTENCE"
+# Only the scopes named by the versioned evidence schema are accepted.
+RELEASE_SCOPES = frozenset((PERSISTENCE_SCOPE, RELEASE_SCOPE))
+# Gate names are versioned together with the report schema.
+GATE_NAMES = (
+    "portable_cpp",
+    "sanitizer",
+    "portable_pytest",
+    "w1",
+) + (
+    "hosted_ci",
+    "style",
+    "state_freshness",
+    "terminology_audit",
+    "release_bundle_tests",
+    "verify_report_tests",
+)
+REQUIRED_GATES = frozenset(GATE_NAMES)
+REQUIRED_COUNTS = {
+    "portable_cpp": ("checks", "failures", "ctest_passed", "ctest_total"),
+    "sanitizer": (
+        "sanitizer_checks",
+        "sanitizer_failures",
+        "sanitizer_ctest_passed",
+        "sanitizer_ctest_total",
+    ),
+    "portable_pytest": ("passed",),
+    "w1": ("passed",),
+    "release_bundle_tests": ("passed",),
+    "verify_report_tests": ("passed",),
+    "style": ("pass_checks", "checks_total"),
+    "state_freshness": ("findings",),
+    "terminology_audit": ("findings", "binding", "advisory"),
+    "hosted_ci": (
+        "run_id",
+        "jobs_total",
+        "jobs_passed",
+        "jobs_failed",
+        "jobs_gated",
+        "native_q_tests_executed",
+        "native_q_tests_skipped",
+        "native_q_tests_failed",
+    ),
+}
+REPORT_METADATA = ("generated_at", "started_at", "completed_at", "toolchain")
+NATIVE_RESULTS = frozenset({"GATED_NOT_RUN", "PASS"})
+NATIVE_FIELDS = (
+    "enabled",
+    "conclusion",
+    "result",
+    "tests_executed",
+    "tests_skipped",
+    "tests_failed",
+    "evidence",
+    "reason",
+)
 MANIFEST_COMMIT_RE = re.compile(r"Final commit: `([0-9a-f]{40})` on `([^`]+)`")
 REPO_URL_MARKER = f"repos/{REPOSITORY}"
 GITHUB_REMOTE_URLS = (
@@ -586,29 +646,198 @@ def report_gate(report: dict, name: str) -> dict:
     raise ValueError(f"verification report is missing gate: {name}")
 
 
-def validate_report(report: object, head: str) -> dict:
-    """Reject reports that do not attest to the exact committed tree."""
-    if not isinstance(report, dict):
-        raise ValueError("verification report must be a JSON object")
-    gates = report.get("gates")
-    if not isinstance(gates, list) or not gates:
-        raise ValueError("verification report has no gates")
+def valid_count(value: object) -> bool:
+    """Return True for a non-negative integer count."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def has_text(record: dict, key: str) -> bool:
+    """Return True when a record carries a non-empty string field."""
+    value = record.get(key)
+    return isinstance(value, str) and bool(value.strip())
+
+
+def validate_gate_metadata(gate: dict, name: str) -> None:
+    """Require command, execution metadata and typed counts for one gate."""
+    if not has_text(gate, "command"):
+        raise ValueError(f"{name}: missing command")
+    exit_code = gate.get("exit_code")
+    if not valid_count(exit_code) or exit_code != 0:
+        raise ValueError(f"{name}: missing or nonzero exit code")
+    steps = gate.get("steps")
+    if not isinstance(steps, list) or not steps:
+        raise ValueError(f"{name}: missing execution metadata")
+    for number, step in enumerate(steps, 1):
+        if not isinstance(step, dict):
+            raise ValueError(f"{name}: step {number} is not an object")
+        if not has_text(step, "command"):
+            raise ValueError(f"{name}: step {number} has no command")
+        if not valid_count(step.get("exit_code")):
+            raise ValueError(f"{name}: step {number} has no exit code")
+    counts = gate.get("counts")
+    if not isinstance(counts, dict) or not counts:
+        raise ValueError(f"{name}: missing counts")
+    for key in REQUIRED_COUNTS[name]:
+        if key not in counts or not valid_count(counts[key]):
+            raise ValueError(f"{name}: invalid count: {key}")
+
+
+def validate_gate_values(report: dict) -> None:
+    """Reject reports whose parsed gate counts contradict their verdict."""
+    for name in ("portable_cpp", "sanitizer"):
+        counts = gate_counts(report, name)
+        prefix = "sanitizer_" if name == "sanitizer" else ""
+        checks = counts[prefix + "checks"]
+        failures = counts[prefix + "failures"]
+        total = counts[prefix + "ctest_total"]
+        if checks <= 0 or failures != 0:
+            raise ValueError(f"{name}: unsafe unit test counts")
+        if total <= 0 or counts[prefix + "ctest_passed"] != total:
+            raise ValueError(f"{name}: incomplete CTest counts")
+    for name in (
+        "portable_pytest",
+        "w1",
+        "release_bundle_tests",
+        "verify_report_tests",
+    ):
+        if gate_counts(report, name)["passed"] <= 0:
+            raise ValueError(f"{name}: no tests passed")
+    style = gate_counts(report, "style")
+    if (
+        style["checks_total"] <= 0
+        or style["pass_checks"] != style["checks_total"]
+    ):
+        raise ValueError("style: inconsistent checks")
+    freshness = gate_counts(report, "state_freshness")
+    if freshness.get("self_test") != "PASS" or freshness["findings"] != 0:
+        raise ValueError("state_freshness: self-test or findings failed")
+    audit = gate_counts(report, "terminology_audit")
+    if audit["binding"] != 0:
+        raise ValueError("terminology_audit: binding findings are present")
+    hosted = gate_counts(report, "hosted_ci")
+    if hosted["jobs_failed"] != 0 or (
+        hosted["jobs_passed"] + hosted["jobs_gated"] != hosted["jobs_total"]
+    ):
+        raise ValueError("hosted_ci: inconsistent job counts")
+
+
+def validate_native_pass(native: dict) -> None:
+    """Require full integration evidence for a native PASS."""
+    if native["enabled"] is not True:
+        raise ValueError("native q PASS requires explicit enablement")
+    if native["conclusion"] != "success":
+        raise ValueError("native q PASS requires a successful job")
+    if native["tests_executed"] <= 0:
+        raise ValueError("native q PASS requires executed tests")
+    if native["tests_skipped"] != 0 or native["tests_failed"] != 0:
+        raise ValueError("native q PASS requires no skipped or failed tests")
+
+
+def validate_native_gated(native: dict, scope: str) -> None:
+    """Require a skipped, unexecuted tier for GATED_NOT_RUN."""
+    if native["conclusion"] != "skipped":
+        raise ValueError("native q GATED_NOT_RUN requires a skipped job")
+    if native["tests_executed"] != 0:
+        raise ValueError("native q GATED_NOT_RUN must execute no tests")
+    if native["tests_skipped"] != 0 or native["tests_failed"] != 0:
+        raise ValueError("native q GATED_NOT_RUN has recorded test failures")
+    if scope == PERSISTENCE_SCOPE:
+        raise ValueError(
+            "native q GATED_NOT_RUN is not permitted under release scope "
+            f"{scope}"
+        )
+
+
+def validate_native_record(native: object, scope: str) -> None:
+    """Apply the native-q result matrix for the requested release scope."""
+    if not isinstance(native, dict):
+        raise ValueError("native q record is missing")
+    for key in NATIVE_FIELDS:
+        if key not in native:
+            raise ValueError(f"native q field missing: {key}")
+    result = native["result"]
+    if result not in NATIVE_RESULTS:
+        raise ValueError(f"native q result {result!r} is not accepted")
+    for key in ("tests_executed", "tests_skipped", "tests_failed"):
+        if not valid_count(native[key]):
+            raise ValueError(f"native q invalid count: {key}")
+    if result == "PASS":
+        validate_native_pass(native)
+    else:
+        validate_native_gated(native, scope)
+
+
+def validate_report_header(report: dict, scope: str) -> None:
+    """Reject a wrong schema version, scope, branch or missing metadata."""
+    if scope not in RELEASE_SCOPES:
+        raise ValueError(f"unknown release scope: {scope!r}")
+    version = report.get("schema_version")
+    if isinstance(version, bool) or version != REPORT_SCHEMA_VERSION:
+        raise ValueError(f"unexpected report schema version: {version!r}")
+    if report.get("branch") != BRANCH:
+        raise ValueError(f"report branch is not {BRANCH!r}")
+    if report.get("release_scope") != scope:
+        raise ValueError(f"report release scope is not {scope!r}")
+    for key in REPORT_METADATA[:3]:
+        if not has_text(report, key):
+            raise ValueError(f"missing execution metadata: {key}")
+    toolchain = report.get("toolchain")
+    if not isinstance(toolchain, dict) or not toolchain:
+        raise ValueError("missing execution metadata: toolchain")
+    if report.get("overall") != "PASS":
+        raise ValueError("overall status is inconsistent with gate results")
+
+
+def validate_gate_names(gates: list) -> None:
+    """Require each versioned gate exactly once and no extras."""
+    names = []
     for gate in gates:
-        if not isinstance(gate, dict) or gate.get("result") != "PASS":
-            name = gate.get("name") if isinstance(gate, dict) else repr(gate)
-            raise ValueError(f"required gate failed: {name}")
+        if not isinstance(gate, dict) or not has_text(gate, "name"):
+            raise ValueError("gate is missing a name")
+        names.append(gate["name"])
+    if len(names) != len(set(names)):
+        raise ValueError("duplicate gate names are present")
+    unknown = sorted(set(names) - REQUIRED_GATES)
+    if unknown:
+        raise ValueError(f"unknown gate names: {', '.join(unknown)}")
+    missing = sorted(REQUIRED_GATES - set(names))
+    if missing:
+        raise ValueError(f"missing required gates: {', '.join(missing)}")
+
+
+def validate_hosted_evidence(report: dict, head: str) -> dict:
+    """Require a successful, exact-head hosted CI run."""
     hosted = report_gate(report, "hosted_ci")
     counts = hosted.get("counts") or {}
     if counts.get("conclusion") != "success":
         raise ValueError("hosted CI conclusion is not success")
     if counts.get("head_sha_match") is not True:
         raise ValueError("hosted CI head SHA does not match HEAD")
+    if not has_text(counts, "head_sha"):
+        raise ValueError("hosted CI head SHA is missing")
     validate_commit_chain(report, head)
-    native = hosted.get("native_q") or {}
-    if native.get("result") != "GATED_NOT_RUN":
-        raise ValueError("native q is not reported as GATED_NOT_RUN")
-    if native.get("conclusion") == "skipped" and native.get("result") == "PASS":
-        raise ValueError("native q skipped but reported as passed")
+    return hosted
+
+
+def validate_report(
+    report: object, head: str, scope: str = RELEASE_SCOPE
+) -> dict:
+    """Reject reports that do not attest to the exact committed tree."""
+    if not isinstance(report, dict):
+        raise ValueError("verification report must be a JSON object")
+    validate_report_header(report, scope)
+    gates = report.get("gates")
+    if not isinstance(gates, list) or not gates:
+        raise ValueError("verification report has no gates")
+    validate_gate_names(gates)
+    for gate in gates:
+        name = gate["name"]
+        if gate.get("result") != "PASS":
+            raise ValueError(f"required gate failed: {name}")
+        validate_gate_metadata(gate, name)
+    validate_gate_values(report)
+    hosted = validate_hosted_evidence(report, head)
+    validate_native_record(hosted.get("native_q"), scope)
     return report
 
 
@@ -638,10 +867,16 @@ def render_verification(report: dict) -> list[str]:
     portable = gate_counts(report, "portable_cpp")
     sanitizer = gate_counts(report, "sanitizer")
     pytest = gate_counts(report, "portable_pytest")
+    w1 = gate_counts(report, "w1")
+    bundle_tests = gate_counts(report, "release_bundle_tests")
+    report_tests = gate_counts(report, "verify_report_tests")
     style = gate_counts(report, "style")
+    freshness = gate_counts(report, "state_freshness")
     audit = gate_counts(report, "terminology_audit")
     hosted = gate_counts(report, "hosted_ci")
     native = report_gate(report, "hosted_ci").get("native_q") or {}
+    native_status = native.get("result", "MISSING")
+    native_reason = native.get("reason") or "no explanation recorded"
     return [
         "## Verification",
         "",
@@ -657,10 +892,15 @@ def render_verification(report: dict) -> list[str]:
         f"{sanitizer.get('sanitizer_checks')} checks, "
         f"{sanitizer.get('sanitizer_failures')} failures.",
         "- Portable pytest (dataset contract, research, adversarial): "
-        f"{pytest.get('passed')} passed.",
-        "- Portable assurance gates: PASS; style contract: "
+        f"{pytest.get('passed')} passed; pinned instrument-master (W1): "
+        f"{w1.get('passed')} passed.",
+        f"- Release bundle suite: {bundle_tests.get('passed')} passed; "
+        f"verification report suite: {report_tests.get('passed')} passed.",
+        "- Style contract: "
         f"{style.get('pass_checks')}/{style.get('checks_total')} PASS, "
         "including the exact authored-file allowlist.",
+        f"- State freshness self-test: {freshness.get('self_test')}; "
+        f"findings: {freshness.get('findings')}.",
         f"- Terminology audit: {audit.get('binding')} binding findings "
         f"and {audit.get('advisory')} advisory findings.",
         "- Exact-integer OI/volume parity and wall-clock journal replay "
@@ -669,9 +909,22 @@ def render_verification(report: dict) -> list[str]:
         f"({hosted.get('conclusion')}); native q job conclusion "
         f"{native.get('conclusion')} reported as "
         f"{native.get('result')}.",
-        "- Native q tier: GATED / NOT RUN (KDB-X C API unavailable "
-        "locally). CI is an automated gate, not human independent review.",
+        f"- Native q tier: {native_status}: {native_reason}.",
+        "- CI is an automated gate, not human independent review.",
     ]
+
+
+def q_persistence_limit(scope: str, native: dict) -> str:
+    """State the persistence qualification implied by scope and evidence."""
+    if scope == PERSISTENCE_SCOPE and native.get("result") == "PASS":
+        return (
+            f"q persistence is QUALIFIED at release scope {scope} with "
+            f"{native.get('tests_executed')} native integration tests"
+        )
+    return (
+        f"q persistence is NOT QUALIFIED at release scope {scope}; "
+        "persistence qualification is not claimed"
+    )
 
 
 def stage_verification_report(quant_root: Path, report_path: Path) -> None:
@@ -692,13 +945,16 @@ def render_manifest(
     *,
     report: dict,
     rows: list[tuple[str, int, str]],
+    scope: str = RELEASE_SCOPE,
 ) -> str:
     """Render the MANIFEST.md text from computed facts and manifest rows."""
+    native = report_gate(report, "hosted_ci").get("native_q") or {}
     lines = [
         "# QUANT final evidence bundle",
         "",
         f"Generated: {generated}",
         f"Final commit: `{final_sha}` on `{BRANCH}`",
+        f"Release scope: {scope}",
         (
             f"Merged PRs: {pr_count} (#{pr_range[0]}-#{pr_range[1]}), "
             "verified by authenticated GitHub API"
@@ -715,12 +971,12 @@ def render_manifest(
             "",
             "Research INCONCLUSIVE/negative; holdout SEALED_NOT_EVALUATED; "
             "provider streaming, contract-note reconciliation, corporate "
-            "actions and operational paper trading NOT IMPLEMENTED; native q "
-            "hosted tier GATED; power-loss durability NOT PROVEN; "
-            "intraday/HFT UNSUPPORTED; multi-asset venue conformance NOT "
-            "ESTABLISHED; live execution DISABLED; decision NO TRADE. "
-            "Independent external technical acceptance is PENDING and is "
-            "not claimed.",
+            "actions and operational paper trading NOT IMPLEMENTED; "
+            + q_persistence_limit(scope, native)
+            + "; power-loss durability NOT PROVEN; intraday/HFT "
+            "UNSUPPORTED; multi-asset venue conformance NOT ESTABLISHED; "
+            "live execution DISABLED; decision NO TRADE. Independent "
+            "external technical acceptance is PENDING and is not claimed.",
             "",
             "## SHA-256 manifest",
             "",
@@ -818,13 +1074,17 @@ def verification_lines(manifest: str) -> list[str]:
 
 
 def check_evidence(
-    archive: zipfile.ZipFile, manifest_text: str, errors: list[str]
+    archive: zipfile.ZipFile,
+    manifest_text: str,
+    errors: list[str],
+    scope: str = RELEASE_SCOPE,
 ) -> dict[str, object]:
     """Verify the embedded report, its commit and the rendered totals."""
     details: dict[str, object] = {
         "report": False,
         "commit": "",
         "native_q": "missing",
+        "release_scope": scope,
     }
     if REPORT_ENTRY not in archive.namelist():
         errors.append(f"missing {REPORT_ENTRY}")
@@ -834,9 +1094,10 @@ def check_evidence(
         commit = manifest_final_commit(manifest_text)
         details["report"] = True
         details["commit"] = commit
-        validate_report(report, commit)
+        validate_report(report, commit, scope)
         native = report_gate(report, "hosted_ci").get("native_q") or {}
         details["native_q"] = native.get("result", "missing")
+        details["release_scope"] = report.get("release_scope", "missing")
         if verification_lines(manifest_text) != render_verification(report):
             errors.append("MANIFEST.md verification totals do not match report")
     except (ValueError, KeyError, TypeError, UnicodeDecodeError) as exc:
@@ -907,7 +1168,9 @@ def verification_result(
     return result
 
 
-def verify_bundle(bundle: Path) -> dict[str, object]:
+def verify_bundle(
+    bundle: Path, scope: str = RELEASE_SCOPE
+) -> dict[str, object]:
     """Verify ZIP integrity and all regular files against the manifest."""
     errors: list[str] = []
     if not bundle.is_file():
@@ -928,7 +1191,7 @@ def verify_bundle(bundle: Path) -> dict[str, object]:
                 return verification_result(errors, 0, 0, "")
             manifest_text = archive.read(manifest_path).decode("utf-8")
             manifest = parse_manifest(manifest_text)
-            details = check_evidence(archive, manifest_text, errors)
+            details = check_evidence(archive, manifest_text, errors, scope)
             details["instrument_snapshots"] = verify_instrument_snapshots(
                 archive, errors
             )
@@ -983,13 +1246,19 @@ def print_summary(bundle: Path, result: dict[str, object]) -> None:
     print(f"Manifest commit: {result.get('commit', '')}")
     print(f"Instrument snapshots: {result.get('instrument_snapshots', 0)}")
     print(f"Native q tier: {result.get('native_q')}")
+    print(f"Release scope: {result.get('release_scope', 'missing')}")
     for error in result["errors"]:
         print(f"ERROR: {error}")
     print(f"Verification: {status}")
 
 
 def build_stage(
-    stage: Path, output: Path, report_path: Path, report: dict, head: str
+    stage: Path,
+    output: Path,
+    report_path: Path,
+    report: dict,
+    head: str,
+    scope: str,
 ) -> None:
     """Stage, render, zip and verify one bundle in a prepared directory."""
     quant_root = stage / "quant"
@@ -1011,10 +1280,11 @@ def build_stage(
         summarize_protection(protection),
         report=report,
         rows=manifest_rows(quant_root),
+        scope=scope,
     )
     (quant_root / MANIFEST_NAME).write_text(manifest, encoding="utf-8")
     create_zip(quant_root, output)
-    result = verify_bundle(output)
+    result = verify_bundle(output, scope)
     if not result["ok"]:
         raise RuntimeError(
             "generated bundle failed verification: "
@@ -1025,19 +1295,22 @@ def build_stage(
 
 
 def build(
-    output: Path, report_path: Path, staging_dir: Path | None = None
+    output: Path,
+    report_path: Path,
+    staging_dir: Path | None = None,
+    scope: str = RELEASE_SCOPE,
 ) -> None:
     """Guard provenance, validate evidence and build a verified bundle."""
     head = verify_provenance()
-    report = validate_report(load_report(report_path), head)
+    report = validate_report(load_report(report_path), head, scope)
     if staging_dir is None:
         with tempfile.TemporaryDirectory(prefix="quant-") as name:
-            build_stage(Path(name), output, report_path, report, head)
+            build_stage(Path(name), output, report_path, report, head, scope)
         return
     staging_dir.mkdir(parents=True, exist_ok=True)
     if any(staging_dir.iterdir()):
         raise RuntimeError(f"staging directory is not empty: {staging_dir}")
-    build_stage(staging_dir, output, report_path, report, head)
+    build_stage(staging_dir, output, report_path, report, head, scope)
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -1059,11 +1332,23 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         type=Path,
         help="keep the staging tree at this (initially empty) path",
     )
+    build_parser.add_argument(
+        "--scope",
+        choices=sorted(RELEASE_SCOPES),
+        default=RELEASE_SCOPE,
+        help="release scope asserted by the bundle",
+    )
     verify_parser = subparsers.add_parser(
         "verify", help="verify an existing bundle"
     )
     verify_parser.add_argument(
         "--bundle", type=Path, default=DEFAULT_OUTPUT, help="bundle ZIP path"
+    )
+    verify_parser.add_argument(
+        "--scope",
+        choices=sorted(RELEASE_SCOPES),
+        default=RELEASE_SCOPE,
+        help="release scope asserted by the bundle",
     )
     return parser.parse_args(argv)
 
@@ -1073,9 +1358,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         if args.command == "build":
-            build(args.output, args.report, args.staging_dir)
+            build(args.output, args.report, args.staging_dir, args.scope)
         else:
-            result = verify_bundle(args.bundle)
+            result = verify_bundle(args.bundle, args.scope)
             print_summary(args.bundle, result)
             if not result["ok"]:
                 return 1

@@ -1,4 +1,4 @@
-"""Offline tests for release bundle provenance and snapshot staging."""
+"""Offline tests for release bundle provenance, scope and report evidence."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import importlib.util
 import json
 import subprocess
 import tempfile
+import zipfile
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,8 +26,16 @@ LOADER.exec_module(RELEASE_BUNDLE)
 COMMIT = "a" * 40
 OTHER_COMMIT = "b" * 40
 CI_COMMIT = "c" * 40
+SCHEMA_VERSION = RELEASE_BUNDLE.REPORT_SCHEMA_VERSION
+RELEASE_SCOPE = RELEASE_BUNDLE.RELEASE_SCOPE
+PERSISTENCE_SCOPE = RELEASE_BUNDLE.PERSISTENCE_SCOPE
+REQUIRED_GATES = RELEASE_BUNDLE.REQUIRED_GATES
 ORIGINAL_BYTES = b"pinned original snapshot bytes\n"
 DECODED_BYTES = b"pinned decoded snapshot bytes\n"
+GATED_REASON = "native-q feature is not enabled; hosted job skipped"
+PASS_REASON = (
+    "native-q integration tests executed: 8 passed, 0 skipped, 0 failed"
+)
 
 
 @dataclass(frozen=True)
@@ -66,8 +75,8 @@ def commit_identity(repo: Path) -> None:
     git(["config", "user.name", "Release Bundle Test"], repo)
 
 
-@pytest.fixture
-def sandbox(monkeypatch: pytest.MonkeyPatch) -> Iterator[Sandbox]:
+@pytest.fixture(name="sandbox")
+def _sandbox(monkeypatch: pytest.MonkeyPatch) -> Iterator[Sandbox]:
     """Build a clean main with a local origin and patch the module root."""
     with tempfile.TemporaryDirectory(prefix="quant-") as name:
         base = Path(name)
@@ -86,15 +95,15 @@ def sandbox(monkeypatch: pytest.MonkeyPatch) -> Iterator[Sandbox]:
         yield Sandbox(base=base, repo=repo, remote=remote)
 
 
-@pytest.fixture
-def workspace() -> Iterator[Path]:
+@pytest.fixture(name="workspace")
+def _workspace() -> Iterator[Path]:
     """Provide an approved temporary directory for staging and ZIP output."""
     with tempfile.TemporaryDirectory(prefix="quant-") as name:
         yield Path(name)
 
 
-@pytest.fixture
-def snapshots() -> Iterator[SnapshotFixture]:
+@pytest.fixture(name="snapshots")
+def _snapshots() -> Iterator[SnapshotFixture]:
     """Write a tiny, valid pinned snapshot pair and its provenance."""
     with tempfile.TemporaryDirectory(prefix="quant-") as name:
         base = Path(name)
@@ -227,88 +236,460 @@ def test_commit_chain_requires_matching_attestations() -> None:
     with pytest.raises(ValueError, match="report commit"):
         RELEASE_BUNDLE.validate_commit_chain(report, COMMIT)
     report["commit"] = COMMIT
-    report["gates"][-1]["counts"]["head_sha"] = CI_COMMIT
+    host_gate(report)["counts"]["head_sha"] = CI_COMMIT
     with pytest.raises(ValueError, match="ci commit"):
         RELEASE_BUNDLE.validate_commit_chain(report, COMMIT)
 
 
-def test_validate_report_rejects_ci_commit_mismatch() -> None:
-    """The build path rejects a report whose CI commit differs from HEAD."""
+def make_gate(name: str, counts: dict, result: str = "PASS") -> dict:
+    """Build a gate with command, execution metadata and typed counts."""
+    return {
+        "name": name,
+        "command": f"python3 -m verify {name}",
+        "exit_code": 0,
+        "counts": dict(counts),
+        "result": result,
+        "steps": [
+            {
+                "name": f"{name} step",
+                "command": f"python3 -m verify {name} --step",
+                "exit_code": 0,
+                "counts": {},
+                "result": "PASS",
+                "output": "ok",
+            }
+        ],
+    }
+
+
+def host_gate(report: dict) -> dict:
+    """Return the hosted CI gate of a sample report."""
+    return next(gate for gate in report["gates"] if gate["name"] == "hosted_ci")
+
+
+def gated_native() -> dict:
+    """Return a gated native-q record for the portable research scope."""
+    return {
+        "name": "native-q",
+        "enabled": False,
+        "conclusion": "skipped",
+        "result": "GATED_NOT_RUN",
+        "tests_executed": 0,
+        "tests_skipped": 0,
+        "tests_failed": 0,
+        "evidence": {
+            "source": "hosted job step",
+            "test_step_executed": False,
+        },
+        "reason": GATED_REASON,
+        "database_id": None,
+    }
+
+
+def passed_native() -> dict:
+    """Return a fully evidenced native-q PASS record."""
+    return {
+        "name": "native-q",
+        "enabled": True,
+        "conclusion": "success",
+        "result": "PASS",
+        "tests_executed": 8,
+        "tests_skipped": 0,
+        "tests_failed": 0,
+        "evidence": {
+            "source": "hosted job log",
+            "test_step_executed": True,
+            "pytest_counts": {"passed": 8},
+        },
+        "reason": PASS_REASON,
+        "database_id": 99,
+    }
+
+
+def sample_report(commit: str, *, native: dict | None = None) -> dict:
+    """Return a report that passes every bundle validation check."""
+    counts = {
+        "portable_cpp": {
+            "checks": 100,
+            "failures": 0,
+            "ctest_passed": 3,
+            "ctest_percent": 100,
+            "ctest_total": 3,
+        },
+        "sanitizer": {
+            "sanitizer_checks": 100,
+            "sanitizer_failures": 0,
+            "sanitizer_ctest_passed": 3,
+            "sanitizer_ctest_percent": 100,
+            "sanitizer_ctest_total": 3,
+        },
+        "portable_pytest": {"passed": 51},
+        "w1": {"passed": 11},
+        "release_bundle_tests": {"passed": 44},
+        "verify_report_tests": {"passed": 120},
+        "style": {"pass_checks": 8, "checks_total": 8},
+        "state_freshness": {"self_test": "PASS", "findings": 0},
+        "terminology_audit": {"findings": 0, "binding": 0, "advisory": 0},
+        "hosted_ci": {
+            "run_id": 12345,
+            "run_url": "https://github.com/siebengestirn/quant/actions/runs/1",
+            "head_sha": commit,
+            "head_sha_match": True,
+            "conclusion": "success",
+            "commit": commit,
+            "native_q_conclusion": "skipped",
+            "native_q_result": "GATED_NOT_RUN",
+            "native_q_tests_executed": 0,
+            "native_q_tests_skipped": 0,
+            "native_q_tests_failed": 0,
+            "jobs_total": 4,
+            "jobs_passed": 3,
+            "jobs_failed": 0,
+            "jobs_gated": 1,
+        },
+    }
+    gates = [
+        make_gate(name, gate_counts) for name, gate_counts in counts.items()
+    ]
+    hosted = host_gate({"gates": gates})
+    hosted["native_q"] = native if native is not None else gated_native()
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "release_scope": RELEASE_SCOPE,
+        "commit": commit,
+        "branch": "main",
+        "generated_at": "2026-11-27T00:00:00Z",
+        "started_at": "2026-11-27T00:00:00Z",
+        "completed_at": "2026-11-27T00:01:00Z",
+        "toolchain": {"python": "Python 3.12"},
+        "presets": ["portable-ci", "sanitizers"],
+        "overall": "PASS",
+        "gates": gates,
+    }
+
+
+def passed_report(commit: str) -> dict:
+    """Return a valid report whose native tier PASSed with full evidence."""
+    report = sample_report(commit, native=passed_native())
+    hosted = host_gate(report)
+    hosted["counts"].update(
+        {
+            "native_q_conclusion": "success",
+            "native_q_result": "PASS",
+            "native_q_tests_executed": 8,
+            "jobs_passed": 4,
+            "jobs_gated": 0,
+        }
+    )
+    return report
+
+
+def test_validate_report_accepts_gated_portable_report() -> None:
+    """A gated native tier is valid for the default release scope."""
     report = sample_report(COMMIT)
-    report["gates"][-1]["counts"]["head_sha"] = CI_COMMIT
-    with pytest.raises(ValueError, match="ci commit"):
+    assert RELEASE_BUNDLE.validate_report(report, COMMIT) is report
+    assert len(report["gates"]) == len(REQUIRED_GATES)
+
+
+def test_validate_report_accepts_native_pass() -> None:
+    """A fully evidenced native PASS is accepted for either scope."""
+    report = passed_report(COMMIT)
+    assert RELEASE_BUNDLE.validate_report(report, COMMIT) is report
+    report["release_scope"] = PERSISTENCE_SCOPE
+    assert (
+        RELEASE_BUNDLE.validate_report(report, COMMIT, PERSISTENCE_SCOPE)
+        is report
+    )
+
+
+@pytest.mark.parametrize("name", sorted(REQUIRED_GATES - {"hosted_ci"}))
+def test_missing_required_gate_is_rejected(name: str) -> None:
+    """Every required gate must be present in the report."""
+    report = sample_report(COMMIT)
+    report["gates"] = [gate for gate in report["gates"] if gate["name"] != name]
+    with pytest.raises(ValueError, match="missing required gates"):
         RELEASE_BUNDLE.validate_report(report, COMMIT)
 
 
-def test_stage_instrument_snapshots(
-    snapshots: SnapshotFixture, workspace: Path
-) -> None:
-    """Pinned snapshots are copied to their provenance paths."""
-    stage = workspace / "stage"
-    stage.mkdir()
-    count = RELEASE_BUNDLE.stage_instrument_snapshots(
-        stage, snapshots.data_root, snapshots.provenance
-    )
-    assert count == 2
-    for relative, payload in snapshots.payloads.items():
-        staged = stage / RELEASE_BUNDLE.INSTRUMENT_DIR / relative
-        assert staged.read_bytes() == payload
+def test_duplicate_gate_names_are_rejected() -> None:
+    """A repeated gate name cannot inflate coverage."""
+    report = sample_report(COMMIT)
+    report["gates"].append(dict(report["gates"][0]))
+    with pytest.raises(ValueError, match="duplicate gate names"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
 
 
-def test_missing_instrument_snapshot_fails(
-    snapshots: SnapshotFixture, workspace: Path
-) -> None:
-    """A missing pinned snapshot names the fetch remedy."""
-    for path in snapshots.data_root.rglob("*"):
-        if path.is_file():
-            path.unlink()
-            break
-    with pytest.raises(RuntimeError, match="fetch_instrument_snapshots.py"):
-        RELEASE_BUNDLE.stage_instrument_snapshots(
-            workspace / "stage", snapshots.data_root, snapshots.provenance
+def test_unknown_gate_names_are_rejected() -> None:
+    """A gate outside the versioned schema cannot replace a required one."""
+    report = sample_report(COMMIT)
+    report["gates"][0]["name"] = "unlisted-gate"
+    with pytest.raises(ValueError, match="unknown gate names"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+@pytest.mark.parametrize("name", ["portable_cpp", "w1", "hosted_ci"])
+def test_missing_gate_count_is_rejected(name: str) -> None:
+    """A required count key cannot be omitted."""
+    report = sample_report(COMMIT)
+    gate = next(item for item in report["gates"] if item["name"] == name)
+    del gate["counts"][RELEASE_BUNDLE.REQUIRED_COUNTS[name][0]]
+    with pytest.raises(ValueError, match="missing counts|invalid count"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+@pytest.mark.parametrize("value", ["51", True, -1])
+def test_invalid_gate_count_is_rejected(value: object) -> None:
+    """Counts must be non-negative integers, not strings or booleans."""
+    report = sample_report(COMMIT)
+    report["gates"][2]["counts"]["passed"] = value
+    with pytest.raises(ValueError, match="invalid count"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+def test_empty_gate_counts_are_rejected() -> None:
+    """A gate with no parsed counts is not evidence."""
+    report = sample_report(COMMIT)
+    report["gates"][2]["counts"] = {}
+    with pytest.raises(ValueError, match="missing counts"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+def test_missing_gate_command_is_rejected() -> None:
+    """Every gate must record the command it executed."""
+    report = sample_report(COMMIT)
+    del report["gates"][0]["command"]
+    with pytest.raises(ValueError, match="missing command"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+def test_missing_step_metadata_is_rejected() -> None:
+    """Execution metadata must include at least one recorded step."""
+    report = sample_report(COMMIT)
+    report["gates"][0]["steps"] = []
+    with pytest.raises(ValueError, match="missing execution metadata"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+@pytest.mark.parametrize("key", ["generated_at", "started_at", "toolchain"])
+def test_missing_report_metadata_is_rejected(key: str) -> None:
+    """Top-level execution metadata cannot be absent."""
+    report = sample_report(COMMIT)
+    del report[key]
+    with pytest.raises(ValueError, match="missing execution metadata"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+def test_nonzero_gate_exit_code_is_rejected() -> None:
+    """A gate that exited nonzero cannot support a release."""
+    report = sample_report(COMMIT)
+    report["gates"][0]["exit_code"] = 1
+    with pytest.raises(ValueError, match="nonzero exit code"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+@pytest.mark.parametrize("version", [2, "1", True, None])
+def test_unexpected_schema_version_is_rejected(version: object) -> None:
+    """Only the pinned schema version is accepted."""
+    report = sample_report(COMMIT)
+    report["schema_version"] = version
+    with pytest.raises(ValueError, match="schema version"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+def test_wrong_branch_is_rejected() -> None:
+    """A report from another branch cannot qualify main."""
+    report = sample_report(COMMIT)
+    report["branch"] = "dev"
+    with pytest.raises(ValueError, match="report branch"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+def test_wrong_release_scope_is_rejected() -> None:
+    """A report's scope must equal the requested build scope."""
+    report = sample_report(COMMIT)
+    report["release_scope"] = PERSISTENCE_SCOPE
+    with pytest.raises(ValueError, match="report release scope"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+    with pytest.raises(ValueError, match="report release scope"):
+        RELEASE_BUNDLE.validate_report(
+            sample_report(COMMIT), COMMIT, PERSISTENCE_SCOPE
         )
 
 
-def test_corrupt_instrument_snapshot_fails(
-    snapshots: SnapshotFixture, workspace: Path
-) -> None:
-    """Corrupt source bytes are rejected before staging."""
-    path = next(
-        path for path in snapshots.data_root.rglob("*") if path.is_file()
-    )
-    path.write_bytes(b"corrupt snapshot bytes\n")
-    with pytest.raises(ValueError, match="SHA-256 mismatch"):
-        RELEASE_BUNDLE.stage_instrument_snapshots(
-            workspace / "stage", snapshots.data_root, snapshots.provenance
-        )
+def test_unknown_release_scope_is_rejected() -> None:
+    """An undefined scope cannot be used to build a bundle."""
+    with pytest.raises(ValueError, match="unknown release scope"):
+        RELEASE_BUNDLE.validate_report(sample_report(COMMIT), COMMIT, "OTHER")
 
 
-def sample_report(commit: str) -> dict:
-    """Return a minimal report that passes bundle validation."""
-    simple = (
-        "portable_cpp",
-        "sanitizer",
-        "portable_pytest",
-        "style",
-        "terminology_audit",
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    [
+        ("report", "report commit"),
+        ("ci", "ci commit"),
+        ("match", "head SHA does not match"),
+    ],
+)
+def test_inconsistent_commits_are_rejected(mutate: str, match: str) -> None:
+    """Report, CI and release commits must name one verified HEAD."""
+    report = sample_report(COMMIT)
+    if mutate == "report":
+        report["commit"] = OTHER_COMMIT
+    elif mutate == "ci":
+        host_gate(report)["counts"]["head_sha"] = CI_COMMIT
+    else:
+        host_gate(report)["counts"]["head_sha_match"] = False
+    with pytest.raises(ValueError, match=match):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+def test_overall_status_must_match_gate_results() -> None:
+    """A FAIL overall cannot accompany all-PASS gates."""
+    report = sample_report(COMMIT)
+    report["overall"] = "FAIL"
+    with pytest.raises(ValueError, match="overall status"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+def test_gate_result_must_be_pass() -> None:
+    """Every gate must carry a PASS verdict."""
+    report = sample_report(COMMIT)
+    report["gates"][0]["result"] = "FAIL"
+    with pytest.raises(ValueError, match="required gate failed"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+def test_hosted_conclusion_must_be_success() -> None:
+    """A hosted run without a success conclusion is not evidence."""
+    report = sample_report(COMMIT)
+    host_gate(report)["counts"]["conclusion"] = "failure"
+    with pytest.raises(ValueError, match="hosted CI conclusion"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+@pytest.mark.parametrize("result", ["MAYBE", None, "Gated_Not_Run"])
+def test_unknown_native_result_is_rejected(result: object) -> None:
+    """Only the two native-q result tokens are accepted."""
+    report = sample_report(COMMIT)
+    host_gate(report)["native_q"]["result"] = result
+    with pytest.raises(ValueError, match="not accepted"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "enabled",
+        "conclusion",
+        "result",
+        "tests_executed",
+        "tests_skipped",
+        "tests_failed",
+        "evidence",
+        "reason",
+    ],
+)
+def test_missing_native_field_is_rejected(key: str) -> None:
+    """The native record must carry every schema field."""
+    report = sample_report(COMMIT)
+    del host_gate(report)["native_q"][key]
+    with pytest.raises(ValueError, match="native q field missing"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    [
+        ("enabled", "explicit enablement"),
+        ("executed", "executed tests"),
+        ("skipped", "no skipped or failed"),
+        ("failed", "no skipped or failed"),
+        ("conclusion", "successful job"),
+    ],
+)
+def test_native_pass_requires_full_evidence(mutate: str, match: str) -> None:
+    """A native PASS needs enablement, executed tests and no skips/fails."""
+    report = passed_report(COMMIT)
+    native = host_gate(report)["native_q"]
+    if mutate == "enabled":
+        native["enabled"] = False
+    elif mutate == "executed":
+        native["tests_executed"] = 0
+    elif mutate == "skipped":
+        native["tests_skipped"] = 2
+    elif mutate == "failed":
+        native["tests_failed"] = 1
+    else:
+        native["conclusion"] = "skipped"
+    with pytest.raises(ValueError, match=match):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+def test_gated_native_requires_skipped_conclusion() -> None:
+    """A GATED_NOT_RUN record must describe a skipped job."""
+    report = sample_report(COMMIT)
+    host_gate(report)["native_q"]["conclusion"] = "success"
+    with pytest.raises(ValueError, match="requires a skipped job"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+def test_gated_native_must_not_report_executed_tests() -> None:
+    """A gated tier cannot claim executed tests."""
+    report = sample_report(COMMIT)
+    host_gate(report)["native_q"]["tests_executed"] = 8
+    with pytest.raises(ValueError, match="must execute no tests"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+def test_gated_native_is_rejected_for_persistence_scope() -> None:
+    """The persistence scope requires an executed native tier."""
+    report = sample_report(COMMIT)
+    report["release_scope"] = PERSISTENCE_SCOPE
+    with pytest.raises(ValueError, match="not permitted"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT, PERSISTENCE_SCOPE)
+
+
+def test_manifest_states_scope_without_persistence_claim() -> None:
+    """The portable manifest states its scope and limits q persistence."""
+    report = sample_report(COMMIT)
+    manifest = RELEASE_BUNDLE.render_manifest(
+        "2026-11-27T00:00:00Z",
+        COMMIT,
+        1,
+        (1, 1),
+        0,
+        "main only (local and remote)",
+        "PR required.",
+        report=report,
+        rows=[],
     )
-    gates = [{"name": name, "counts": {}, "result": "PASS"} for name in simple]
-    gates.append(
-        {
-            "name": "hosted_ci",
-            "counts": {
-                "conclusion": "success",
-                "head_sha": commit,
-                "head_sha_match": True,
-            },
-            "native_q": {
-                "conclusion": "skipped",
-                "result": "GATED_NOT_RUN",
-            },
-            "result": "PASS",
-        }
+    assert f"Release scope: {RELEASE_SCOPE}" in manifest
+    assert (
+        "q persistence is NOT QUALIFIED at release scope PORTABLE_RESEARCH"
+        in manifest
     )
-    return {"commit": commit, "gates": gates}
+    assert "Q_PERSISTENCE" not in manifest
+    assert f"Native q tier: GATED_NOT_RUN: {GATED_REASON}." in manifest
+    assert "GATED / NOT RUN" not in manifest
+
+
+def test_manifest_renders_native_pass_from_report() -> None:
+    """A passed native tier is rendered from its recorded explanation."""
+    report = passed_report(COMMIT)
+    manifest = RELEASE_BUNDLE.render_manifest(
+        "2026-11-27T00:00:00Z",
+        COMMIT,
+        1,
+        (1, 1),
+        0,
+        "main only (local and remote)",
+        "PR required.",
+        report=report,
+        rows=[],
+    )
+    assert f"Native q tier: PASS: {PASS_REASON}." in manifest
+    assert "GATED_NOT_RUN" not in manifest
+    assert "q persistence is NOT QUALIFIED" in manifest
 
 
 def test_bundle_verify_checks_instrument_digests(
@@ -319,6 +700,7 @@ def test_bundle_verify_checks_instrument_digests(
     result = RELEASE_BUNDLE.verify_bundle(bundle)
     assert result["ok"], result["errors"]
     assert result["instrument_snapshots"] == 2
+    assert result["native_q"] == "GATED_NOT_RUN"
 
 
 def test_bundle_verify_rejects_corrupt_snapshot(
@@ -334,15 +716,47 @@ def test_bundle_verify_rejects_corrupt_snapshot(
     )
 
 
+def test_bundle_with_native_pass_verifies(
+    snapshots: SnapshotFixture, workspace: Path
+) -> None:
+    """A bundle with an evidenced native PASS verifies end to end."""
+    report = passed_report(COMMIT)
+    bundle = write_test_bundle(
+        workspace, snapshots, corrupt=False, report=report
+    )
+    result = RELEASE_BUNDLE.verify_bundle(bundle)
+    assert result["ok"], result["errors"]
+    assert result["native_q"] == "PASS"
+    with zipfile.ZipFile(bundle) as archive:
+        manifest = archive.read("quant/MANIFEST.md").decode("utf-8")
+    assert f"Native q tier: PASS: {PASS_REASON}." in manifest
+
+
+def test_bundle_scope_mismatch_fails(
+    snapshots: SnapshotFixture, workspace: Path
+) -> None:
+    """Verification under the wrong release scope fails closed."""
+    bundle = write_test_bundle(workspace, snapshots, corrupt=False)
+    result = RELEASE_BUNDLE.verify_bundle(bundle, PERSISTENCE_SCOPE)
+    assert not result["ok"]
+    assert any("report release scope" in error for error in result["errors"])
+
+
 def write_test_bundle(
-    workspace: Path, snapshots: SnapshotFixture, *, corrupt: bool
+    workspace: Path,
+    snapshots: SnapshotFixture,
+    *,
+    corrupt: bool,
+    report: dict | None = None,
+    scope: str = RELEASE_SCOPE,
 ) -> Path:
     """Write a small bundle with a report, provenance and snapshots."""
     quant_root = workspace / "quant"
     quant_root.mkdir()
     evidence = quant_root / "evidence"
     evidence.mkdir()
-    report = sample_report(COMMIT)
+    if report is None:
+        report = sample_report(COMMIT)
     (evidence / "verification-report.json").write_text(
         json.dumps(report), encoding="utf-8"
     )
@@ -365,6 +779,7 @@ def write_test_bundle(
         "PR required.",
         report=report,
         rows=RELEASE_BUNDLE.manifest_rows(quant_root),
+        scope=scope,
     )
     (quant_root / "MANIFEST.md").write_text(manifest, encoding="utf-8")
     output = workspace / "bundle.zip"
