@@ -16,7 +16,9 @@ tier is permitted there but carries no q persistence qualification.
 Generated timestamps vary between runs, so a build is repeatable and
 self-verifying but is not byte-identical across times. Verify checks
 ZIP integrity, the SHA-256 manifest table, the embedded evidence report
-and the digests of any bundled instrument snapshots.
+and the digests of any bundled instrument snapshots. The only verification
+report is canonical ``evidence/verification-report.json``; a working-tree
+copy under assurance is a pre-bundle historical input and is not staged.
 
 The versioned report carries a ``config`` object whose only skip-related
 field is ``allowed_skips``: records with a ``test_id`` and a non-empty
@@ -168,6 +170,14 @@ AUDIT_DISPOSITION_SCRIPT = (
 GENERATED_ASSURANCE_FILES = frozenset(
     {"audit-dispositions.json", "audit-disposition-review.json"}
 )
+# The canonical report lives at evidence/verification-report.json and is
+# written from the validated report object. A copy under assurance/ would be
+# a stale pre-bundle historical input, so it is excluded from staging.
+AUXILIARY_REPORT_FILE = "verification-report.json"
+EXCLUDED_ASSURANCE_FILES = frozenset(
+    {*GENERATED_ASSURANCE_FILES, AUXILIARY_REPORT_FILE}
+)
+AUXILIARY_REPORT_ENTRY = f"{PREFIX}evidence/assurance/{AUXILIARY_REPORT_FILE}"
 RUNNER_NOT_OBSERVED = "NOT_OBSERVED"
 ATTESTATION_CHECKED = "CHECKED"
 PASS = "PASS"
@@ -407,11 +417,14 @@ def stage_optional_evidence(quant_root: Path) -> None:
     Disposition files from the working tree are excluded: they
     are regenerated from the staged audit bytes by
     ``regenerate_audit_dispositions`` and must never be bundled stale.
+    A working-tree verification report is excluded too: the only canonical
+    report is written from the validated object at evidence/verification-
+    report.json, not copied as an auxiliary historical input.
     """
     copy_tree(
         ROOT / "data" / "assurance",
         quant_root / "evidence" / "assurance",
-        exclude=GENERATED_ASSURANCE_FILES,
+        exclude=EXCLUDED_ASSURANCE_FILES,
     )
     copy_tree(
         ROOT / "data" / "review-fixtures",
@@ -1885,6 +1898,11 @@ def verify_bundle(
             if damaged is not None:
                 errors.append(f"corrupt ZIP member: {damaged}")
             names = archive.namelist()
+            if AUXILIARY_REPORT_ENTRY in names:
+                errors.append(
+                    "auxiliary verification report is not permitted: "
+                    f"{AUXILIARY_REPORT_ENTRY}"
+                )
             manifest_path = f"{PREFIX}{MANIFEST_NAME}"
             if manifest_path not in names:
                 errors.append("missing MANIFEST.md")

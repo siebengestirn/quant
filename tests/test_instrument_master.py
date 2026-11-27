@@ -49,6 +49,12 @@ MARUTI_ISIN = "INE585B01010"
 MARUTI_KEY = f"NSE_EQ|{MARUTI_ISIN}"
 MARUTI_TICKER = "NSE:MARUTI-EQ"
 MARUTI_FY_TOKEN = "101000000010999"
+CID = "NSE-CASH-BITEMPORAL-TEST"
+DAY = "2026-11-26"
+NEXT_DAY = "2026-11-27"
+T0 = "2026-11-26T09:00:00Z"
+T1 = "2026-11-27T09:00:00Z"
+T2 = "2026-11-28T09:00:00Z"
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -78,6 +84,64 @@ def _prepare_snapshots(
     except fetcher.EvidenceUnavailable as exc:
         pytest.fail(str(exc))
     return source.root, source.source
+
+
+def _obs(
+    attribute: str,
+    value: object,
+    *,
+    identity: str = CID,
+    observed_at: str = T1,
+    ingested_at: str | None = None,
+    valid_from: str | None = None,
+    valid_to: str | None = None,
+    digest: str = "a" * 64,
+) -> im.Observation:
+    """Build one observation with explicit validity and observation times."""
+    return im.observation(
+        identity,
+        attribute,
+        value,
+        observed_at=observed_at,
+        ingested_at=ingested_at,
+        valid_from=valid_from,
+        valid_to=valid_to,
+        source_digest=digest,
+    )
+
+
+def _eligible_rows() -> list[im.Observation]:
+    """Return observations affirming every independent eligibility gate."""
+    return [
+        _obs(im.ATTR_IDENTITY_STATUS, im.VERIFIED),
+        _obs(im.ATTR_CONFORMANCE_STATUS, im.PASS),
+        _obs(im.ATTR_PROVIDER_TRADING_STATUS, im.ACTIVE),
+        _obs(im.ATTR_EXCHANGE_STATUS, im.OPEN),
+        _obs(im.ATTR_EXCHANGE_ELIGIBILITY, im.ALLOWED),
+        _obs(im.ATTR_DATA_FRESHNESS, im.FRESH),
+        _obs(
+            im.provider_attribute("fyers", im.PROVIDER_KEY_ATTRIBUTE),
+            im.provider_alias("fyers", MARUTI_FY_TOKEN),
+        ),
+        _obs(
+            im.provider_attribute("upstox", im.PROVIDER_KEY_ATTRIBUTE),
+            im.provider_alias("upstox", MARUTI_KEY),
+        ),
+    ]
+
+
+def _replace_value(
+    rows: list[im.Observation], attribute: str, value: object
+) -> list[im.Observation]:
+    """Return rows with one attribute's value replaced by a new value."""
+    return [
+        (
+            row._replace(attribute_value=value)
+            if row.attribute_name == attribute
+            else row
+        )
+        for row in rows
+    ]
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -378,9 +442,13 @@ def test_crosswalk_matches_snapshot_identities_and_marks_eligibility(
         im.SUSPENDED: 0,
     }
     assert crosswalk_data.conformance_counts == {
-        im.PASS: 10100,
+        im.PASS: 9926,
         im.CONFLICT: 0,
-        im.INCOMPLETE: 0,
+        im.INCOMPLETE: 174,
+    }
+    assert crosswalk_data.coverage_counts == {
+        im.SINGLE_SOURCE: 174,
+        im.MULTI_SOURCE: 9926,
     }
     assert crosswalk_data.trading_counts == {
         im.ACTIVE: 10100,
@@ -418,8 +486,9 @@ def test_identity_collision_is_ambiguous_and_ineligible(upstox_data):
     assert report.status_counts[im.AMBIGUOUS] == 1
     instrument = report.instruments[0]
     assert instrument.crosswalk_status == im.AMBIGUOUS
-    # Conformance compares contract fields only; identical duplicates agree.
-    assert instrument.conformance_status == im.PASS
+    # One provider cannot supply cross-provider conformance, even twice.
+    assert instrument.conformance_status == im.INCOMPLETE
+    assert instrument.provider_coverage == im.SINGLE_SOURCE
     assert not im.is_eligible(instrument)
     assert any(
         entry.reason == im.IDENTITY_COLLISION for entry in report.quarantine
@@ -543,6 +612,7 @@ def test_conformance_all_fields_agree_is_pass(upstox_data, fyers_data):
     up, fy = _maruti_pair(upstox_data, fyers_data)
     report = im.contract_conformance((up, fy))
     assert report.status == im.PASS
+    assert report.provider_coverage == im.MULTI_SOURCE
     assert report.conflicts == ()
     assert report.incomplete == ()
     assert report.fields == report.passed
@@ -556,11 +626,14 @@ def test_conformance_stays_separate_from_unmapped_identity(upstox_data):
         if record.provider_key == MARUTI_KEY
     )
     report = im.contract_conformance((up,))
-    assert report.status == im.PASS
+    assert report.provider_coverage == im.SINGLE_SOURCE
+    assert report.status == im.INCOMPLETE
+    assert report.fields[0].status == im.PASS
     instrument = im.crosswalk([im.ParseResult((up,), (), 1)]).instruments[0]
     assert instrument.identity_status == im.UNMAPPED
-    assert instrument.conformance_status == im.PASS
-    assert instrument.conformance_report.status == im.PASS
+    assert instrument.conformance_status == im.INCOMPLETE
+    assert instrument.provider_coverage == im.SINGLE_SOURCE
+    assert instrument.conformance_report.status == im.INCOMPLETE
     assert not im.is_eligible(instrument)
 
 
@@ -1169,6 +1242,9 @@ def test_evidence_report_contents_match_pinned_digests(tmp_path: Path) -> None:
     assert report["schema_version"] == fetcher.REPORT_SCHEMA_VERSION
     assert report["verification_status"] == fetcher.PASS
     assert report["provenance_source"] == fetcher.SOURCE_REFERENCE
+    assert report["source_root"] == fetcher.SOURCE_REFERENCE
+    assert not Path(report["source_root"]).is_absolute()
+    assert str(ROOT) not in json.dumps(report)
     assert report["extraction_command"] == ""
     assert report["snapshot_count"] == 2
     assert {item["provider"] for item in report["snapshots"]} == {
@@ -1202,11 +1278,10 @@ def test_evidence_report_contents_match_pinned_digests(tmp_path: Path) -> None:
                 and not meta.original_filename.endswith(".gz")
                 else meta.decoded_sha256
             )
-            assert Path(record["path"]) == path.resolve()
-            assert (
-                record["relative_path"]
-                == path.resolve().relative_to(ROOT).as_posix()
-            )
+            relative = path.resolve().relative_to(ROOT).as_posix()
+            assert record["path"] == relative
+            assert record["relative_path"] == relative
+            assert not Path(record["path"]).is_absolute()
             assert record["bytes"] == size
             assert record["sha256"] == digest
             assert record["expected_bytes"] == size
@@ -1252,3 +1327,180 @@ def test_evidence_report_command_is_registered() -> None:
     assert args.command == "evidence-report"
     assert args.output_report == Path("/tmp/report.json")
     assert args.bundle is None
+
+
+def test_unknown_effective_date_stays_unknown() -> None:
+    """No source establishes validity bounds, so they stay unknown."""
+    rows = [
+        _obs(im.ATTR_EFFECTIVE_FROM, None),
+        _obs(im.ATTR_EFFECTIVE_TO, None),
+        _obs(im.ATTR_PROVIDER_TRADING_STATUS, im.ACTIVE, observed_at=T0),
+    ]
+    state = im.build_registry(rows).as_of(DAY, T1)[CID]
+    assert state.effective_from is None
+    assert state.effective_to is None
+    assert state.market_date == DAY
+    assert im.ATTR_EFFECTIVE_FROM in state.attributes
+
+    dated = im.build_registry(
+        [_obs(im.ATTR_EFFECTIVE_FROM, NEXT_DAY, observed_at=T1)]
+    )
+    assert dated.as_of(DAY, T0) == {}
+    assert dated.as_of(DAY, T1)[CID].effective_from == NEXT_DAY
+    assert dated.as_of(NEXT_DAY, T1)[CID].effective_from == NEXT_DAY
+
+
+def test_later_correction_does_not_overwrite_original() -> None:
+    """A correction is appended; historical queries retain the old fact."""
+    original = _obs(im.ATTR_PROVIDER_TRADING_STATUS, im.ACTIVE, observed_at=T1)
+    correction = _obs(
+        im.ATTR_PROVIDER_TRADING_STATUS, im.INACTIVE, observed_at=T2
+    )
+    registry = im.build_registry([correction, original])
+    assert registry.observations == (original, correction)
+    assert registry.as_of(DAY, T1)[CID].provider_trading_status == im.ACTIVE
+    assert registry.as_of(DAY, T2)[CID].provider_trading_status == im.INACTIVE
+
+
+def test_historical_as_of_separates_valid_and_observation_time() -> None:
+    """Queries return what QUANT knew then and what was valid then."""
+    late_valid = _obs("tick_size", 2.0, observed_at=T1, valid_from=NEXT_DAY)
+    expiring = _obs("lot_size", 7, observed_at=T1, valid_to=NEXT_DAY)
+    unmapped = _obs(im.ATTR_IDENTITY_STATUS, im.UNMAPPED, observed_at=T1)
+    verified = _obs(im.ATTR_IDENTITY_STATUS, im.VERIFIED, observed_at=T2)
+    registry = im.build_registry([late_valid, expiring, unmapped, verified])
+
+    before = registry.as_of(DAY, T1)[CID]
+    assert "tick_size" not in before.attributes
+    assert before.attributes["lot_size"] == 7
+    assert before.identity_status == im.UNMAPPED
+
+    later = registry.as_of(NEXT_DAY, T1)[CID]
+    assert later.attributes["tick_size"] == 2.0
+    assert "lot_size" not in later.attributes
+    assert later.identity_status == im.UNMAPPED
+    assert registry.as_of(NEXT_DAY, T2)[CID].identity_status == im.VERIFIED
+
+
+def test_single_source_never_reports_cross_provider_pass() -> None:
+    """One provider's self-agreement is not cross-provider conformance."""
+    up = _obs(
+        im.provider_attribute("upstox", "isin"),
+        MARUTI_ISIN,
+        digest="b" * 64,
+    )
+    fy = _obs(
+        im.provider_attribute("fyers", "isin"),
+        MARUTI_ISIN,
+        digest="c" * 64,
+    )
+    single = im.build_registry([up]).as_of(DAY, T1)[CID]
+    multi = im.build_registry([up, fy]).as_of(DAY, T1)[CID]
+    assert single.provider_coverage == im.SINGLE_SOURCE
+    assert single.conformance_status == im.INCOMPLETE
+    assert single.quant_eligibility == im.NOT_ELIGIBLE
+    assert multi.provider_coverage == im.MULTI_SOURCE
+    assert multi.conformance_status == im.PASS
+    assert im.provider_coverage(im.build_registry([up]), CID) == (
+        im.SINGLE_SOURCE
+    )
+
+
+def test_eligibility_fails_closed_on_stale_conflict_and_unknown() -> None:
+    """Every independent gate must affirm eligibility explicitly."""
+    rows = _eligible_rows()
+    registry = im.build_registry(rows)
+    assert registry.as_of(DAY, T1)[CID].quant_eligibility == im.ELIGIBLE
+    mutations = (
+        (im.ATTR_DATA_FRESHNESS, im.STALE),
+        (im.ATTR_CONFORMANCE_STATUS, im.CONFLICT),
+        (im.ATTR_EXCHANGE_STATUS, im.UNKNOWN),
+        (im.ATTR_EXCHANGE_ELIGIBILITY, im.UNKNOWN),
+        (im.ATTR_PROVIDER_TRADING_STATUS, im.INACTIVE),
+        (im.ATTR_IDENTITY_STATUS, im.UNKNOWN),
+    )
+    for attribute, value in mutations:
+        state = im.build_registry(_replace_value(rows, attribute, value)).as_of(
+            DAY, T1
+        )[CID]
+        assert state.quant_eligibility == im.NOT_ELIGIBLE
+    uncovered = im.build_registry(rows[:6]).as_of(DAY, T1)[CID]
+    assert uncovered.provider_coverage == im.UNKNOWN
+    assert uncovered.quant_eligibility == im.NOT_ELIGIBLE
+
+
+def test_provider_alias_resolves_only_when_known() -> None:
+    """Canonical IDs and provider alias tokens resolve at the query time."""
+    alias = im.provider_alias("fyers", MARUTI_FY_TOKEN)
+    rows = [
+        _obs(im.ATTR_IDENTITY_STATUS, im.VERIFIED, observed_at=T1),
+        _obs(
+            im.provider_attribute("fyers", im.PROVIDER_KEY_ATTRIBUTE),
+            alias,
+            observed_at=T2,
+            digest="d" * 64,
+        ),
+    ]
+    registry = im.build_registry(rows)
+    assert registry.resolve(alias, T1) is None
+    assert registry.resolve(MARUTI_FY_TOKEN, T1) is None
+    resolved = registry.resolve(alias, T2)
+    assert resolved is not None
+    assert resolved.canonical_instrument_id == CID
+    assert registry.resolve(CID, T2) is not None
+    assert registry.canonical_id_for(alias, as_of=T1) is None
+    assert registry.canonical_id_for(alias, as_of=T2) == CID
+
+
+def test_load_provenance_accepts_extended_fields(tmp_path: Path) -> None:
+    """The canonical provenance with reference-data fields is accepted."""
+    metas = im.load_provenance(PROVENANCE)
+    assert set(metas) == {"upstox", "fyers"}
+    assert metas["upstox"].market_date == "2026-11-26"
+    assert metas["fyers"].schema_version == im.SCHEMA_VERSION
+    document = json.loads(PROVENANCE.read_text(encoding="utf-8"))
+    document["snapshots"][0]["unexpected"] = 1
+    candidate = tmp_path / "candidate.json"
+    candidate.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(ValueError, match="unknown snapshot provenance"):
+        im.load_provenance(candidate)
+
+
+def test_evidence_report_uses_relative_reference_paths(tmp_path: Path) -> None:
+    """The default evidence report carries no machine-local path."""
+    output = tmp_path / "instrument-evidence.json"
+    report, code = fetcher.evidence_report(
+        output,
+        tmp_path / "absent-data",
+        tmp_path / "absent-evidence",
+        PROVENANCE,
+        "",
+    )
+    assert code == 0
+    assert report["provenance_source"] == fetcher.SOURCE_REFERENCE
+    text = output.read_text(encoding="utf-8")
+    assert "/Users/" not in text
+    assert str(ROOT) not in text
+    assert not Path(report["source_root"]).is_absolute()
+    for entry in report["snapshots"]:
+        for kind in ("original", "decoded"):
+            record = entry[kind]
+            path = record["path"]
+            assert not Path(path).is_absolute()
+            assert path.startswith("reference-data/instrument-master/")
+            assert record["relative_path"] == path
+
+
+def test_module_query_aliases_match_registry_methods() -> None:
+    """Public module-level queries survive the shadowing-safe rename."""
+    registry = im.build_registry(
+        [_obs(im.ATTR_IDENTITY_STATUS, im.VERIFIED, observed_at=T1)]
+    )
+    assert im.as_of(registry, DAY, T1) == registry.as_of(DAY, T1)
+    assert im.resolve(registry, CID, T1) == registry.resolve(CID, T1)
+    assert im.provider_coverage(registry, CID) == registry.provider_coverage(
+        CID
+    )
+    missing = "missing_query"
+    with pytest.raises(AttributeError, match="no attribute"):
+        getattr(im, missing)
