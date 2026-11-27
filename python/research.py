@@ -81,7 +81,7 @@ def parse_iso_date(value: str) -> date | None:
 
 
 def canonical_digest(value: object) -> str:
-    """Enforce the QUANT style contract."""
+    """Return the SHA-256 digest of canonical JSON bytes."""
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -289,7 +289,7 @@ class ValidatedDataset:
     code_version: str = ""
 
     def __post_init__(self) -> None:
-        """Enforce the QUANT style contract."""
+        """Validate the decoded dataset fields after construction."""
         if self.status_errors is None:
             self.status_errors = []
         if self.coverage_gaps is None:
@@ -410,7 +410,7 @@ def features(rows: list[dict[str, float]], index: int) -> dict[str, float]:
     volume = [row["volume"] for row in window]
 
     def ret(periods: int) -> float:
-        """Enforce the QUANT style contract."""
+        """Return the simple return over the requested lag."""
         if len(close) <= periods or close[-1 - periods] <= 0:
             return 0.0
         return close[-1] / close[-1 - periods] - 1.0
@@ -493,12 +493,12 @@ def feature_history(rows: list[dict[str, float]]) -> list[dict[str, float]]:
 
 
 def clamp(value: float, low: float = -1.0, high: float = 1.0) -> float:
-    """Enforce the QUANT style contract."""
+    """Bound a value to the inclusive numeric range."""
     return max(low, min(high, value))
 
 
 def score_momentum(f: dict[str, float]) -> float:
-    """Enforce the QUANT style contract."""
+    """Score an instrument by short-horizon price momentum."""
     raw = (
         0.15 * f["ret5"]
         + 0.25 * f["ret20"]
@@ -509,12 +509,12 @@ def score_momentum(f: dict[str, float]) -> float:
 
 
 def score_trend(f: dict[str, float]) -> float:
-    """Enforce the QUANT style contract."""
+    """Score an instrument by medium-horizon trend strength."""
     return clamp((f["trend"] - 0.5) * 2 + f["breakout"] * 0.3)
 
 
 def score_breakout(f: dict[str, float]) -> float:
-    """Enforce the QUANT style contract."""
+    """Score an instrument by range-breakout position."""
     return clamp(
         f["breakout"] * 0.6
         + clamp(f["volume_surprise"], -1, 2) * 0.2
@@ -544,7 +544,7 @@ def spearman(xs: list[float], ys: list[float]) -> float:
         return 0.0
 
     def ranks(values: list[float]) -> list[float]:
-        """Enforce the QUANT style contract."""
+        """Return ascending cross-sectional ranks without ties."""
         order = sorted(range(len(values)), key=lambda i: values[i])
         out = [0.0] * len(values)
         position = 0
@@ -572,7 +572,7 @@ def spearman(xs: list[float], ys: list[float]) -> float:
 def forward_return(
     rows: list[dict[str, float]], index: int, sessions: int
 ) -> float:
-    """Enforce the QUANT style contract."""
+    """Return the realized return over the forward horizon."""
     end = min(index + sessions, len(rows) - 1)
     if end <= index or rows[index]["close"] <= 0:
         return 0.0
@@ -1415,7 +1415,7 @@ def selection_test_status(trial_matrix: list[list[float]] | None) -> dict:
 def bootstrap_ci(
     values: list[float], draws: int = BOOTSTRAP_DRAWS
 ) -> list[float]:
-    """Enforce the QUANT style contract."""
+    """Return a percentile bootstrap interval for the values."""
     if not values:
         return [0.0, 0.0, 0.0]
     rng = random.Random(SEED)
@@ -1432,7 +1432,7 @@ def bootstrap_ci(
 
 
 def deflated(value: float, trials: int, observations: int) -> float:
-    """Enforce the QUANT style contract."""
+    """Apply a deflation factor for the declared trial count."""
     if observations < 3:
         return 0.0
     factor = math.sqrt(
@@ -1591,7 +1591,7 @@ def analyze(
     root: Path,
     dataset: ValidatedDataset | None = None,
 ) -> dict:
-    """Enforce the QUANT style contract."""
+    """Produce a research report from a validated dataset."""
     if dataset is not None and dataset.status in (
         "BLOCKED",
         "PARTIAL",
@@ -1828,7 +1828,7 @@ def analyze(
 
 
 def render_markdown(report: dict) -> str:
-    """Enforce the QUANT style contract."""
+    """Render the research report as Markdown."""
     lines = [
         "# QUANT research verification",
         "",
@@ -1891,7 +1891,7 @@ def render_markdown(report: dict) -> str:
 
 
 def self_test() -> int:
-    """Enforce the QUANT style contract."""
+    """Exercise research functions on deterministic simulated data."""
     history = synthetic_history()
     report = analyze(history, Path(__file__).resolve().parent.parent)
     assert report["input_series"] == 5, report["input_series"]
@@ -1909,7 +1909,7 @@ def self_test() -> int:
 
 
 def main() -> int:
-    """Enforce the QUANT style contract."""
+    """Parse arguments and run the research command."""
     parser = argparse.ArgumentParser(description=__doc__)
     root = Path(__file__).resolve().parent.parent
     parser.add_argument(

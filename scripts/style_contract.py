@@ -26,7 +26,7 @@ MAX_LINE = 80
 
 
 def git(*args: str) -> list[str]:
-    """Enforce the QUANT style contract."""
+    """Run a Git command and return its standard output."""
     result = subprocess.run(
         ["git", *args], cwd=ROOT, capture_output=True, text=True, check=False
     )
@@ -34,7 +34,7 @@ def git(*args: str) -> list[str]:
 
 
 def check_reference_index() -> list[str]:
-    """Enforce the QUANT style contract."""
+    """Validate the reference index entries and hashes."""
     errors: list[str] = []
     index = ROOT / "references" / "index.md"
     if not index.is_file():
@@ -65,7 +65,7 @@ def check_reference_index() -> list[str]:
 
 
 def check_documentation() -> list[str]:
-    """Enforce the QUANT style contract."""
+    """Validate prose style and fence language rules."""
     errors: list[str] = []
     for rel in git("ls-files", "*.md"):
         path = ROOT / rel
@@ -99,7 +99,7 @@ def check_documentation() -> list[str]:
 
 
 def check_json() -> list[str]:
-    """Enforce the QUANT style contract."""
+    """Validate tracked JSON formatting."""
     errors: list[str] = []
     for rel in git("ls-files", "*.json"):
         path = ROOT / rel
@@ -138,7 +138,7 @@ def check_q_guide() -> list[str]:
 
 
 def check_tool_configs() -> list[str]:
-    """Enforce the QUANT style contract."""
+    """Validate required formatter and linter settings."""
     errors: list[str] = []
     required = {
         ".clang-format": ["BasedOnStyle: Google", "ColumnLimit: 80"],
@@ -174,7 +174,7 @@ def check_tool_configs() -> list[str]:
 
 
 def check_shell() -> list[str]:
-    """Enforce the QUANT style contract."""
+    """Validate shell script syntax and style."""
     errors: list[str] = []
     shell = pathlib.Path("/usr/bin/env")
     del shell  # Shell sources are checked by shellcheck in CI when present.
@@ -195,7 +195,7 @@ def check_shell() -> list[str]:
 
 
 def main() -> int:
-    """Enforce the QUANT style contract."""
+    """Parse arguments and run the research command."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json-out", default="")
     args = parser.parse_args()

@@ -759,7 +759,7 @@ CostBreakdown CostAggregator::Estimate(Money turnover,
                                        const std::string& symbol,
                                        const std::string& session) {
   // Estimation is pure. DP entitlement is recognised only by
-  // RecognizeExecution when an execution is actually committed.
+  // RecognizeExecution when a committed execution is recognized.
   (void)symbol;
   (void)session;
   return EstimateCosts(turnover, delivery, is_buy, slippage_bps, false);
