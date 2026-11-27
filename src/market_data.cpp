@@ -25,6 +25,8 @@ constexpr const char* kAssetsBase =
     "https://assets.upstox.com/market-quote/instruments/exchange";
 constexpr const char* kFyersBase = "https://api-t1.fyers.in/api/v3";
 
+bool StrictVolume(const Json& value, double* out);
+
 std::string UrlEncode(std::string_view value) {
   static constexpr char kHex[] = "0123456789ABCDEF";
   std::string out;
@@ -816,7 +818,15 @@ Quote NormalizeUpstoxQuote(const Json& item,
   const Json* last = item.Find("last_price");
   quote.last = last == nullptr ? 0.0 : last->as_double(0.0);
   const Json* volume = item.Find("volume");
-  quote.volume = volume == nullptr ? 0.0 : volume->as_double(0.0);
+  if (volume == nullptr) {
+    quote.volume_validity = VolumeValidity::kMissing;
+    quote.volume = 0.0;
+  } else if (!StrictVolume(*volume, &quote.volume)) {
+    quote.volume_validity = VolumeValidity::kInvalid;
+    quote.volume = 0.0;
+  } else {
+    quote.volume_validity = VolumeValidity::kValid;
+  }
   // Upstox provides distinct feed-update and last-trade times. Keep both.
   const Json* update = item.Find("timestamp");
   const Json* trade = item.Find("last_trade_time");
@@ -1105,6 +1115,40 @@ bool StrictNumber(const Json& value, double* out) {
 // Above 2^53 a double cannot represent every integer. A floating-point token
 // is accepted as a count only inside the exactly representable range.
 constexpr double kMaxExactDoubleInteger = 9007199254740992.0;
+constexpr int64_t kMaxExactVolume = 9007199254740992LL;
+
+// Volume is a non-negative count, not a price. Validate the exact integer
+// token before any floating-point conversion. A floating-point token is
+// accepted only strictly inside the exactly representable range, so a value
+// that would be rounded at 2^53 is rejected rather than silently changed.
+bool StrictVolume(const Json& value, double* out) {
+  if (out == nullptr)
+    return false;
+  if (value.type() == Json::Type::kInteger) {
+    const int64_t parsed = value.as_int(0);
+    if (parsed < 0 || parsed > kMaxExactVolume)
+      return false;
+    *out = static_cast<double>(parsed);
+    return true;
+  }
+  if (value.type() == Json::Type::kUInteger) {
+    uint64_t parsed = 0;
+    if (!value.as_uinteger(&parsed) ||
+        parsed > static_cast<uint64_t>(kMaxExactVolume))
+      return false;
+    *out = static_cast<double>(parsed);
+    return true;
+  }
+  if (value.type() == Json::Type::kNumber) {
+    const double number = value.as_double(0.0);
+    if (!std::isfinite(number) || number < 0.0 ||
+        number >= kMaxExactDoubleInteger || number != std::floor(number))
+      return false;
+    *out = number;
+    return true;
+  }
+  return false;
+}
 
 // Open interest is a signed count, not a price. Preserve the exact integer
 // token instead of routing it through a double: a JSON UInteger of
@@ -1172,12 +1216,17 @@ HistoryParseResult BuildHistoryCsv(const Json& candles,
       result.errors.push_back(symbol + ": duplicate date " + date);
       return result;
     }
-    double values[5] = {};
-    for (size_t i = 0; i < 5; ++i) {
+    double values[4] = {};
+    for (size_t i = 0; i < 4; ++i) {
       if (!StrictNumber(row.array()[i + 1], &values[i])) {
         result.errors.push_back(symbol + ": non-numeric field");
         return result;
       }
+    }
+    double volume = 0.0;
+    if (!StrictVolume(row.array()[5], &volume)) {
+      result.errors.push_back(symbol + ": invalid volume");
+      return result;
     }
     int64_t open_interest = -1;
     if (row.array().size() == 7 &&
@@ -1189,10 +1238,8 @@ HistoryParseResult BuildHistoryCsv(const Json& candles,
     const double high = values[1];
     const double low = values[2];
     const double close = values[3];
-    const double volume = values[4];
     if (low <= 0.0 || close <= 0.0 || low > std::min(open, close) ||
-        std::max(open, close) > high || volume < 0.0 ||
-        volume > kMaxExactDoubleInteger || volume != std::floor(volume)) {
+        std::max(open, close) > high) {
       result.errors.push_back(symbol + ": invalid OHLCV relationship");
       return result;
     }

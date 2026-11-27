@@ -232,6 +232,38 @@ def test_cross_language_volume_is_integral(tmp_path: Path):
     assert code != 0
 
 
+def test_cross_language_exact_volume_parity(tmp_path: Path):
+    """Large integer volume is never rounded by either canonical reader."""
+    header = "date,open,high,low,close,volume\n"
+    for value in (
+        "9007199254740993",
+        "9007199254740994",
+        "9223372036854775807",
+    ):
+        content = f"{header}2026-01-01,100,103,99,102,{value}\n".encode()
+        rows, errors = contract._read_csv_content(content, "x.csv", "v2")
+        assert errors and not rows
+    for value in ("0", "1", "9007199254740991", "9007199254740992"):
+        content = f"{header}2026-01-01,100,103,99,102,{value}\n".encode()
+        rows, errors = contract._read_csv_content(content, "x.csv", "v2")
+        assert not errors and rows[0]["volume"] == float(value)
+
+    accepted = tmp_path / "accepted-volume"
+    accepted.mkdir()
+    key = contract.storage_key("ID-AAA")
+    (accepted / f"{key}.csv").write_text(
+        header + "2026-01-01,100,103,99,102,9007199254740992\n",
+        encoding="utf-8",
+    )
+    expected = _spec(["AAA"], ["2026-01-01"])
+    (accepted / "spec.json").write_text(json.dumps(expected), encoding="utf-8")
+    assert contract.write_contract(accepted, expected) == []
+    assert contract.write_manifest(accepted, expected) == []
+    code, result = _cpp("verify", str(accepted))
+    assert code == 0 and result["status"] == "COMPLETE"
+    assert contract.verify_dataset(accepted).status == "COMPLETE"
+
+
 def result_rows(directory: Path, key: str) -> list[list[str]]:
     """Return raw CSV rows for assertion helpers."""
     return [

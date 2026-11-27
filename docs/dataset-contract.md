@@ -156,11 +156,22 @@ the exactly representable `2^53` range. A larger floating-point token is
 rejected instead of being silently rounded. Canonical CSV readers in both
 languages parse the seventh field as a bounded decimal integer.
 
-Volume is a non-negative integral count. It is carried as a double for
-analytics and is therefore exact only up to `2^53`; fractional volumes and
-counts above that bound are rejected by the provider adapter and both
-canonical CSV readers. Derived depth calculations must respect the same
-bound before converting a count to an integer.
+Volume is a non-negative integral count, not a price. The original decimal
+text or JSON integer token is validated before any floating-point conversion.
+Signed and unsigned integer tokens are accepted through `2^53`; a
+floating-point token is accepted only strictly below `2^53`, so a value that
+would be rounded at the boundary is rejected. Canonical CSV readers parse the
+original digits as a bounded unsigned integer and only then convert to the
+double used by analytics. Fractional, negative, numeric-string and out-of-range
+counts are rejected with an explicit volume error.
+
+A quote carries `volume_validity`: `VALID`, `MISSING`, `INVALID` or `UNKNOWN`.
+The provider adapter sets this explicitly; a missing or malformed count is
+never reported as a genuine zero. The journal records the state and replay
+restores it. A legacy event without the field defaults to `VALID`, since a
+directly constructed quote asserts its own count. Only `VALID` volume enters
+the durable market-data pipeline. Derived depth calculations respect the same
+`2^53` bound before converting a count to an integer.
 
 ## Provider timestamp policy
 

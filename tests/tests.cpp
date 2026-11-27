@@ -1039,6 +1039,52 @@ void TestIsoTimestampFailClosed() {
         "monotonic receipt distinct from wall-clock receipt");
 }
 
+void TestQuoteVolumeValidity() {
+  Json::Object item;
+  item["last_price"] = Json::Number(100.0);
+  item["timestamp"] = Json::String("2026-11-27T04:45:30Z");
+  item["last_trade_time"] = Json::String("1795754730000");
+  Json::Object buy;
+  buy["price"] = Json::Number(99.9);
+  buy["quantity"] = Json::Number(100.0);
+  Json::Object sell;
+  sell["price"] = Json::Number(100.1);
+  sell["quantity"] = Json::Number(100.0);
+  Json::Object depth;
+  depth["buy"] = Json::Array({Json::ObjectValue(buy)});
+  depth["sell"] = Json::Array({Json::ObjectValue(sell)});
+  item["depth"] = Json::ObjectValue(depth);
+
+  auto normalized = [&](bool include, const Json& value) {
+    Json::Object candidate = item;
+    if (include)
+      candidate["volume"] = value;
+    else
+      candidate.erase("volume");
+    return NormalizeUpstoxQuote(
+        Json::ObjectValue(candidate), "AAA", "UPSTOX:AAA");
+  };
+  const Quote missing = normalized(false, Json::Null());
+  Check(missing.volume_validity == VolumeValidity::kMissing &&
+            missing.volume == 0.0,
+        "missing provider volume is explicit, not a genuine zero");
+  const Quote string_volume = normalized(true, Json::String("1000"));
+  Check(string_volume.volume_validity == VolumeValidity::kInvalid,
+        "numeric-string volume rejected");
+  const Quote rounded = normalized(true, Json::UInteger(9007199254740993ULL));
+  Check(rounded.volume_validity == VolumeValidity::kInvalid &&
+            rounded.volume == 0.0,
+        "out-of-range provider volume rejected before conversion");
+  const Quote valid = normalized(true, Json::Integer(1000));
+  Check(
+      valid.volume_validity == VolumeValidity::kValid && valid.volume == 1000.0,
+      "valid integer volume preserved");
+  const Quote boundary = normalized(true, Json::UInteger(9007199254740992ULL));
+  Check(boundary.volume_validity == VolumeValidity::kValid &&
+            boundary.volume == 9007199254740992.0,
+        "exact 2^53 volume boundary preserved");
+}
+
 void TestExactIntegerOpenInterest() {
   auto row = [](const Json& oi) {
     return Json::Array({Json::String("2026-01-01"),
@@ -1172,29 +1218,68 @@ void TestProviderHistoryValidation() {
                      "v3"),
         "canonical v3 reader rejects out-of-range open interest");
   auto with_volume = [](const Json& volume) {
-    return Json::Array({Json::Array({Json::String("2026-01-01"),
-                                     Json::Number(100.0),
-                                     Json::Number(103.0),
-                                     Json::Number(99.0),
-                                     Json::Number(102.0),
-                                     volume,
-                                     Json::Number(7.0)})});
+    return Json::Array({Json::String("2026-01-01"),
+                        Json::Number(100.0),
+                        Json::Number(103.0),
+                        Json::Number(99.0),
+                        Json::Number(102.0),
+                        volume,
+                        Json::Number(7.0)});
   };
-  Check(
-      !BuildHistoryCsv(Json::Array({with_volume(Json::Number(1000.5))}), "AAA")
-           .errors.empty(),
-      "fractional volume rejected");
-  Check(!BuildHistoryCsv(
-             Json::Array({with_volume(Json::UInteger(9007199254740993ULL))}),
-             "AAA")
-             .errors.empty(),
-        "volume above exact double integer range rejected");
+  auto convert_volume = [&](const Json& volume) {
+    return BuildHistoryCsv(Json::Array({with_volume(volume)}), "AAA");
+  };
+  auto reject_volume = [&](const Json& volume, const std::string& label) {
+    const HistoryParseResult result = convert_volume(volume);
+    bool reason = false;
+    for (const std::string& issue : result.errors)
+      reason = reason || issue.find("invalid volume") != std::string::npos;
+    Check(!result.errors.empty() && reason, label);
+  };
+  const std::pair<uint64_t, const char*> good_volumes[] = {
+      {0, "0"},
+      {1, "1"},
+      {9007199254740991ULL, "9007199254740991"},
+      {9007199254740992ULL, "9007199254740992"},
+  };
+  for (const auto& item : good_volumes) {
+    const HistoryParseResult result =
+        convert_volume(Json::UInteger(item.first));
+    Check(result.errors.empty() &&
+              result.csv.find(std::string(",") + item.second + ",7\n") !=
+                  std::string::npos,
+          std::string("exact volume preserved: ") + item.second);
+  }
+  reject_volume(Json::Number(1000.5), "fractional volume rejected");
+  reject_volume(Json::String("1000"), "numeric-string volume rejected");
+  reject_volume(Json::Integer(-1), "negative volume rejected");
+  reject_volume(Json::UInteger(9007199254740993ULL),
+                "volume at 2^53+1 rejected");
+  reject_volume(Json::UInteger(9007199254740994ULL),
+                "volume at 2^53+2 rejected");
+  reject_volume(Json::Integer(std::numeric_limits<int64_t>::max()),
+                "volume at INT64_MAX rejected");
+  reject_volume(Json::UInteger(9223372036854775808ULL),
+                "volume at 2^63 rejected");
   Check(!ReadCsvText("date,open,high,low,close,volume\n"
                      "2026-01-01,100,103,99,102,1000.5\n",
                      &bounded_candles,
                      &error,
                      "v2"),
         "canonical v2 reader rejects fractional volume");
+  Check(!ReadCsvText("date,open,high,low,close,volume\n"
+                     "2026-01-01,100,103,99,102,9007199254740993\n",
+                     &bounded_candles,
+                     &error,
+                     "v2"),
+        "canonical v2 reader rejects rounded large volume");
+  Check(ReadCsvText("date,open,high,low,close,volume\n"
+                    "2026-01-01,100,103,99,102,9007199254740992\n",
+                    &bounded_candles,
+                    &error,
+                    "v2") &&
+            bounded_candles[0].volume == 9007199254740992.0,
+        "canonical v2 reader preserves exact boundary volume");
 
   HistoryParseResult reversed = BuildHistoryCsv(
       Json::Array({ValidCandleRow("2026-01-02"), ValidCandleRow("2026-01-01")}),
@@ -3183,6 +3268,8 @@ void TestWallClockJournalReplay() {
   Check(restored.receive_timestamp_ms == 4242 &&
             restored.receive_timestamp_ms != restored.receive_wall_clock_ms,
         "monotonic receipt preserved and not presented as UTC");
+  Check(restored.volume_validity == VolumeValidity::kValid,
+        "volume validity state survives journal replay");
   reopened.Close();
 
   const std::string legacy_path = TempPath("wall_clock_legacy.jnl");
@@ -3959,6 +4046,7 @@ int main() {
   TestExactIntegerOpenInterest();
   TestUpstoxQuoteTimestampNormalization();
   TestIsoTimestampFailClosed();
+  TestQuoteVolumeValidity();
   TestPaperOrderReducer();
   TestFillAverageArithmetic();
   TestReplayFillConflicts();
