@@ -836,7 +836,111 @@ Json ValidCandleRow(const std::string& date) {
                       Json::Number(103.0),
                       Json::Number(99.0),
                       Json::Number(102.0),
-                      Json::Number(1000.0)});
+                      Json::Number(1000.0),
+                      Json::Number(7.0)});
+}
+
+void TestUpstoxQuoteTimestampNormalization() {
+  Json::Object item;
+  item["last_price"] = Json::Number(100.0);
+  item["timestamp"] = Json::String("2026-11-27T10:15:30+05:30");
+  item["last_trade_time"] = Json::String("1764219930000");
+  Json::Object buy;
+  buy["price"] = Json::Number(99.9);
+  buy["quantity"] = Json::Number(100.0);
+  Json::Object sell;
+  sell["price"] = Json::Number(100.1);
+  sell["quantity"] = Json::Number(100.0);
+  std::vector<Json> buy_levels;
+  buy_levels.push_back(Json::ObjectValue(buy));
+  std::vector<Json> sell_levels;
+  sell_levels.push_back(Json::ObjectValue(sell));
+  Json::Object depth;
+  depth["buy"] = Json::Array(buy_levels);
+  depth["sell"] = Json::Array(sell_levels);
+  item["depth"] = Json::ObjectValue(depth);
+  const Quote quote =
+      NormalizeUpstoxQuote(Json::ObjectValue(item), "AAA", "UPSTOX:AAA");
+  Check(quote.provider_timestamp_ms > 0,
+        "ISO provider timestamp parsed instead of becoming zero");
+  Check(quote.last_trade_timestamp_ms == 1764219930000,
+        "last trade millisecond timestamp preserved");
+  Check(quote.quality == "ok", "valid timestamp quote accepted");
+
+  Json::Object future = item;
+  future["timestamp"] = Json::String("2999-01-01T00:00:00Z");
+  const Quote invalid =
+      NormalizeUpstoxQuote(Json::ObjectValue(future), "AAA", "UPSTOX:AAA");
+  Check(invalid.quality == "invalid_timestamp" &&
+            invalid.provider_timestamp_ms == 0,
+        "future timestamp quarantined with unknown freshness");
+
+  auto normalized = [&](const Json& value) {
+    return NormalizeUpstoxQuote(value, "AAA", "UPSTOX:AAA");
+  };
+  const int64_t wall_now =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count();
+  Json::Object missing_update = item;
+  missing_update.erase("timestamp");
+  Check(normalized(Json::ObjectValue(missing_update)).quality ==
+            "invalid_timestamp",
+        "missing provider timestamp is explicit");
+  Json::Object missing_trade = item;
+  missing_trade.erase("last_trade_time");
+  Check(normalized(Json::ObjectValue(missing_trade)).quality ==
+            "invalid_timestamp",
+        "missing trade timestamp is explicit under fail-closed policy");
+  Json::Object null_update = item;
+  null_update["timestamp"] = Json::Null();
+  Check(
+      normalized(Json::ObjectValue(null_update)).quality == "invalid_timestamp",
+      "null timestamp is rejected");
+  Json::Object empty_update = item;
+  empty_update["timestamp"] = Json::String("");
+  Check(normalized(Json::ObjectValue(empty_update)).quality ==
+            "invalid_timestamp",
+        "empty timestamp is rejected");
+  Json::Object numeric_update = item;
+  numeric_update["timestamp"] = Json::Integer(wall_now - 1000);
+  Check(normalized(Json::ObjectValue(numeric_update)).quality == "ok",
+        "numeric millisecond timestamp accepted");
+  Json::Object zulu = item;
+  zulu["timestamp"] = Json::String("2026-11-27T04:45:30.123Z");
+  Check(normalized(Json::ObjectValue(zulu)).quality == "ok",
+        "ISO Z timestamp accepted");
+  Json::Object positive_offset = item;
+  positive_offset["timestamp"] = Json::String("2026-11-27T10:15:30.123+05:30");
+  Check(normalized(Json::ObjectValue(positive_offset)).quality == "ok",
+        "positive timezone offset accepted");
+  Json::Object negative_offset = item;
+  negative_offset["timestamp"] = Json::String("2026-11-26T23:15:30.123-05:00");
+  Check(normalized(Json::ObjectValue(negative_offset)).quality == "ok",
+        "negative timezone offset accepted");
+  Json::Object invalid_day = item;
+  invalid_day["timestamp"] = Json::String("2026-02-31T10:15:30Z");
+  Check(
+      normalized(Json::ObjectValue(invalid_day)).quality == "invalid_timestamp",
+      "invalid calendar date rejected");
+  Json::Object invalid_offset = item;
+  invalid_offset["timestamp"] = Json::String("2026-11-27T10:15:30+99:99");
+  Check(normalized(Json::ObjectValue(invalid_offset)).quality ==
+            "invalid_timestamp",
+        "invalid timezone offset rejected");
+  Json::Object excess_fraction = item;
+  excess_fraction["timestamp"] =
+      Json::String("2026-11-27T10:15:30.123456789+05:30");
+  Check(normalized(Json::ObjectValue(excess_fraction)).quality == "ok",
+        "excess fractional precision truncated to milliseconds");
+  Json::Object slight_future = item;
+  slight_future["timestamp"] = Json::Integer(wall_now + 60000);
+  Check(normalized(Json::ObjectValue(slight_future)).quality == "ok",
+        "slightly future timestamp inside tolerance accepted");
+  Json::Object outside = item;
+  outside["timestamp"] = Json::Integer(wall_now + 600000);
+  Check(normalized(Json::ObjectValue(outside)).quality == "invalid_timestamp",
+        "timestamp outside future tolerance rejected");
 }
 
 void TestProviderHistoryValidation() {
@@ -856,10 +960,43 @@ void TestProviderHistoryValidation() {
                                                 Json::Number(99.0),
                                                 Json::Number(102.0),
                                                 Json::Number(1000.0),
-                                                Json::Number(7.0)})}),
+                                                Json::Number(7.0),
+                                                Json::Number(8.0)})}),
                       "AAA");
   Check(!width.errors.empty() && width.accepted == 0,
-        "extra provider column rejected");
+        "unexpected eighth field rejected");
+
+  Check(
+      result.csv.find("2026-01-01,100,103,99,102,1000,7") != std::string::npos,
+      "open interest is preserved in canonical output");
+  const HistoryParseResult negative_oi =
+      BuildHistoryCsv(Json::Array({Json::Array({Json::String("2026-01-01"),
+                                                Json::Number(100.0),
+                                                Json::Number(103.0),
+                                                Json::Number(99.0),
+                                                Json::Number(102.0),
+                                                Json::Number(1000.0),
+                                                Json::Number(-2.0)})}),
+                      "AAA");
+  Check(!negative_oi.errors.empty(), "negative open interest rejected");
+  const HistoryParseResult string_oi =
+      BuildHistoryCsv(Json::Array({Json::Array({Json::String("2026-01-01"),
+                                                Json::Number(100.0),
+                                                Json::Number(103.0),
+                                                Json::Number(99.0),
+                                                Json::Number(102.0),
+                                                Json::Number(1000.0),
+                                                Json::String("7")})}),
+                      "AAA");
+  Check(!string_oi.errors.empty(), "non-numeric open interest rejected");
+
+  HistoryParseResult reversed = BuildHistoryCsv(
+      Json::Array({ValidCandleRow("2026-01-02"), ValidCandleRow("2026-01-01")}),
+      "AAA");
+  Check(reversed.errors.empty() && reversed.accepted == 2 &&
+            reversed.csv.find("2026-01-01,100") <
+                reversed.csv.find("2026-01-02,100"),
+        "newest-first provider history normalized to ascending sessions");
 
   HistoryParseResult missing =
       BuildHistoryCsv(Json::Array({Json::Array({Json::String("2026-01-01"),
@@ -956,8 +1093,11 @@ DatasetExpectations TestDatasetExpectations(
   expected.first_date = sessions.front();
   expected.last_date = sessions.back();
   expected.min_rows = min_rows;
-  for (const std::string& symbol : symbols)
+  for (const std::string& symbol : symbols) {
     expected.instrument_ids[symbol] = "ID-" + symbol;
+    expected.storage_keys[symbol] =
+        DatasetStorageKey(expected.instrument_ids[symbol]);
+  }
   return expected;
 }
 
@@ -969,9 +1109,9 @@ void TestDatasetManifestContract() {
       "2026-01-01,100,103,99,102,1000\n"
       "2026-01-02,102,105,101,104,1200\n";
   std::filesystem::create_directories(dir);
-  std::ofstream(dir + "/AAA.csv") << csv;
   const DatasetExpectations expected =
       TestDatasetExpectations({"AAA"}, {"2026-01-01", "2026-01-02"});
+  std::ofstream(dir + "/" + expected.storage_keys.at("AAA") + ".csv") << csv;
   std::string error;
   Check(VerifyDataset(dir, &error).status == DatasetStatus::kBlocked,
         "dataset without authoritative expectations is blocked");
@@ -986,11 +1126,12 @@ void TestDatasetManifestContract() {
   Check(result.file_digests.at("AAA") == Sha256Hex(csv),
         "manifest uses the SHA-256 digest algorithm");
 
-  std::ofstream(dir + "/AAA.csv") << "date,open,high,low,close,volume\n";
+  std::ofstream(dir + "/" + expected.storage_keys.at("AAA") + ".csv")
+      << "date,open,high,low,close,volume\n";
   result = VerifyDataset(dir, &expected, &error);
   Check(result.status == DatasetStatus::kFailed && !result.errors.empty(),
         "zero-row dataset is rejected");
-  std::ofstream(dir + "/AAA.csv") << csv;
+  std::ofstream(dir + "/" + expected.storage_keys.at("AAA") + ".csv") << csv;
 
   DatasetExpectations omitted = expected;
   omitted.sessions = {"2026-01-01"};
@@ -1000,6 +1141,7 @@ void TestDatasetManifestContract() {
   DatasetExpectations extra = expected;
   extra.symbols = {"AAA", "BBB"};
   extra.instrument_ids["BBB"] = "ID-BBB";
+  extra.storage_keys["BBB"] = DatasetStorageKey(extra.instrument_ids["BBB"]);
   Check(VerifyDataset(dir, &extra, &error).status == DatasetStatus::kBlocked,
         "omitted required instrument is blocked");
   DatasetExpectations stale = expected;
@@ -1007,17 +1149,17 @@ void TestDatasetManifestContract() {
   Check(VerifyDataset(dir, &stale, &error).status == DatasetStatus::kBlocked,
         "stale generation is blocked");
 
-  std::ofstream(dir + "/BBB.csv") << csv;
+  std::ofstream(dir + "/" + extra.storage_keys.at("BBB") + ".csv") << csv;
   Check(WriteDatasetManifest(dir, extra, &error),
         "two-symbol snapshot published");
-  std::filesystem::remove(dir + "/BBB.csv");
+  std::filesystem::remove(dir + "/" + extra.storage_keys.at("BBB") + ".csv");
   result = VerifyDataset(dir, &extra, &error);
   Check(result.status == DatasetStatus::kPartial,
         "missing required series is PARTIAL, never COMPLETE");
   Check(VerifyDataset(dir, &expected, &error).status == DatasetStatus::kBlocked,
         "unexpected additional instrument is blocked");
 
-  std::ofstream(dir + "/BBB.csv") << csv;
+  std::ofstream(dir + "/" + extra.storage_keys.at("BBB") + ".csv") << csv;
   std::ifstream manifest_input(dir + "/manifest.json");
   std::string manifest((std::istreambuf_iterator<char>(manifest_input)),
                        std::istreambuf_iterator<char>());
@@ -3260,6 +3402,7 @@ int main() {
   TestDatasetManifestContract();
   TestInstrumentReferenceModel();
   TestProviderHistoryValidation();
+  TestUpstoxQuoteTimestampNormalization();
   TestPaperOrderReducer();
   TestFillAverageArithmetic();
   TestReplayFillConflicts();

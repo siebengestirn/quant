@@ -17,7 +17,9 @@ import csv
 import hashlib
 import json
 import math
+import os
 import re
+import stat
 import sys
 from dataclasses import dataclass, field
 from datetime import date
@@ -25,13 +27,16 @@ from pathlib import Path
 
 SCHEMA_VERSION = 2
 DIGEST_ALGORITHM = "sha256"
-HEADER = ("date", "open", "high", "low", "close", "volume")
+HEADER_V2 = ("date", "open", "high", "low", "close", "volume")
+HEADER_V3 = HEADER_V2 + ("open_interest",)
+VALID_CSV_SCHEMAS = ("v2", "v3")
 CONTRACT_FILE = "contract.json"
 MANIFEST_FILE = "manifest.json"
 CONTRACT_PREFIX = "QUANT-DATASET-CONTRACT-V2"
 
 _SYMBOL_RE = re.compile(r"^[A-Z0-9 .&/_-]+$")
 _ID_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
+_STORAGE_KEY_RE = re.compile(r"^s[0-9a-f]{31}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 CONTRACT_FIELDS = {
@@ -46,6 +51,8 @@ CONTRACT_FIELDS = {
     "last_date",
     "min_rows",
     "instrument_ids",
+    "storage_keys",
+    "csv_schema",
 }
 MANIFEST_FIELDS = {
     "schema_version",
@@ -61,6 +68,7 @@ FILE_FIELDS = {
     "first_date",
     "last_date",
     "instrument_id",
+    "storage_key",
     "raw_digest",
 }
 
@@ -74,6 +82,26 @@ class DatasetResult:
     file_digests: dict[str, str] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
     rows: dict[str, int] = field(default_factory=dict)
+
+
+def strict_json_loads(text: str) -> object:
+    """Parse JSON, rejecting duplicate object keys in every object."""
+
+    def no_duplicates(pairs: list[tuple[str, object]]) -> dict:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON object key: {key}")
+            result[key] = value
+        return result
+
+    return json.loads(text, object_pairs_hook=no_duplicates)
+
+
+def storage_key(instrument_id: str) -> str:
+    """Derive the sole physical filename from permanent instrument identity."""
+    material = f"QUANT-DATASET-STORAGE-V1\n{instrument_id}".encode()
+    return "s" + hashlib.sha256(material).hexdigest()[:31]
 
 
 def sha256_hex(content: bytes) -> str:
@@ -102,7 +130,7 @@ def canonical_expectations(expectations: dict) -> str:
     symbols = sorted(expectations["symbols"])
     sessions = sorted(expectations["sessions"])
     ids = expectations["instrument_ids"]
-    pairs = ",".join(f"{symbol}:{ids[symbol]}" for symbol in symbols)
+    pairs = ",".join(f"{symbol}:{ids.get(symbol, '')}" for symbol in symbols)
     lines = [
         CONTRACT_PREFIX,
         "schema_version=2",
@@ -116,7 +144,13 @@ def canonical_expectations(expectations: dict) -> str:
         f"first_date={expectations['first_date']}",
         f"last_date={expectations['last_date']}",
         f"min_rows={expectations['min_rows']}",
+        f"csv_schema={expectations.get('csv_schema', 'v2')}",
         f"instrument_ids={pairs}",
+        "storage_keys="
+        + ",".join(
+            f"{symbol}:{expectations.get('storage_keys', {}).get(symbol, '')}"
+            for symbol in symbols
+        ),
     ]
     return "".join(f"{line}\n" for line in lines)
 
@@ -124,6 +158,54 @@ def canonical_expectations(expectations: dict) -> str:
 def contract_digest(expectations: dict) -> str:
     """Hash the canonical expectations with the only accepted algorithm."""
     return sha256_hex(canonical_expectations(expectations).encode("utf-8"))
+
+
+OBJECT_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+OBJECT_WRITE_FLAGS = (
+    os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC
+)
+
+
+def open_snapshot_root(directory: Path) -> int:
+    """Pin the dataset directory with a descriptor for relative access."""
+    return os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+
+
+def read_object(root_fd: int, name: str) -> bytes:
+    """Read one snapshot object without following links or reopening it."""
+    fd = os.open(name, OBJECT_READ_FLAGS, dir_fd=root_fd)
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"{name}: snapshot object is not a regular file")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, 16384)
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+
+
+def write_object(root_fd: int, name: str, content: bytes) -> None:
+    """Write one snapshot object without following links."""
+    fd = os.open(name, OBJECT_WRITE_FLAGS, 0o600, dir_fd=root_fd)
+    try:
+        view = memoryview(content)
+        while view:
+            written = os.write(fd, view)
+            view = view[written:]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def valid_raw_digest(value: object) -> bool:
+    """Accept only the empty marker or a full lowercase SHA-256 digest."""
+    return isinstance(value, str) and (
+        value == "" or re.fullmatch(r"[0-9a-f]{64}", value) is not None
+    )
 
 
 def _validate_identity(expectations: dict) -> list[str]:
@@ -174,6 +256,10 @@ def _validate_range(expectations: dict) -> list[str]:
         errors.append("min_rows must be at least one")
     first = expectations["first_date"]
     last = expectations["last_date"]
+    sessions_list = expectations["sessions"]
+    if isinstance(sessions_list, list) and sessions_list:
+        if first != sessions_list[0] or last != sessions_list[-1]:
+            errors.append("first_date and last_date must bound sessions")
     if is_canonical_date(first) and is_canonical_date(last) and first > last:
         errors.append("first_date is after last_date")
     return errors
@@ -200,7 +286,7 @@ def validate_expectations(expectations: object) -> list[str]:
     if not isinstance(expectations, dict):
         return ["expectations must be an object"]
     unknown = sorted(set(expectations) - CONTRACT_FIELDS)
-    missing = sorted(CONTRACT_FIELDS - set(expectations))
+    missing = sorted((CONTRACT_FIELDS - {"csv_schema"}) - set(expectations))
     errors: list[str] = []
     if unknown:
         errors.append(f"unknown expectations fields: {','.join(unknown)}")
@@ -212,18 +298,33 @@ def validate_expectations(expectations: object) -> list[str]:
     errors.extend(_validate_lists(expectations))
     errors.extend(_validate_range(expectations))
     errors.extend(_validate_identities(expectations, expectations["symbols"]))
+    schema = expectations.get("csv_schema", "v2")
+    if schema not in VALID_CSV_SCHEMAS:
+        errors.append("csv_schema must be v2 or v3")
     return errors
 
 
 def read_expectations(directory: Path) -> tuple[dict | None, list[str]]:
     """Read and validate the frozen contract from a dataset directory."""
-    path = directory / CONTRACT_FILE
-    if not path.is_file():
-        return None, ["contract.json: snapshot contract absent"]
     try:
-        expectations = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        return None, [f"contract.json: invalid JSON: {exc}"]
+        root_fd = open_snapshot_root(directory)
+    except OSError as exc:
+        return None, [f"snapshot directory unavailable: {exc}"]
+    try:
+        try:
+            raw = read_object(root_fd, CONTRACT_FILE)
+        except (OSError, ValueError) as exc:
+            return None, [f"contract.json: {exc}"]
+        try:
+            expectations = strict_json_loads(raw.decode("utf-8"))
+        except (
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            ValueError,
+        ) as exc:
+            return None, [f"contract.json: invalid JSON: {exc}"]
+    finally:
+        os.close(root_fd)
     errors = validate_expectations(expectations)
     first = (
         expectations.get("first_date")
@@ -250,44 +351,62 @@ def read_expectations(directory: Path) -> tuple[dict | None, list[str]]:
 
 def write_contract(directory: Path, expectations: dict) -> list[str]:
     """Write a validated, deterministic contract.json."""
+    expectations.setdefault("csv_schema", "v2")
     errors = validate_expectations(expectations)
     if errors:
         return errors
+    expectations.setdefault("csv_schema", "v2")
     directory.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(expectations, indent=2, sort_keys=True) + "\n"
-    (directory / CONTRACT_FILE).write_text(payload, encoding="utf-8")
+    root_fd = open_snapshot_root(directory)
+    try:
+        write_object(root_fd, CONTRACT_FILE, payload.encode("utf-8"))
+    finally:
+        os.close(root_fd)
     return []
 
 
-def _read_csv(path: Path) -> tuple[list[dict], list[str]]:
-    """Parse one canonical OHLCV CSV with strict row and calendar checks."""
+def _read_csv_content(
+    content: bytes, name: str, csv_schema: str = "v2"
+) -> tuple[list[dict], list[str]]:
+    """Parse exact CSV bytes already read from a pinned snapshot object."""
     try:
-        with path.open("r", encoding="utf-8", newline="") as handle:
-            rows = list(csv.reader(handle))
-    except (OSError, UnicodeDecodeError, csv.Error) as exc:
-        return [], [f"{path.name}: unreadable CSV: {exc}"]
-    if not rows or tuple(rows[0]) != HEADER:
-        return [], [f"{path.name}: invalid canonical header"]
+        rows = list(csv.reader(content.decode("utf-8").splitlines()))
+    except (UnicodeDecodeError, csv.Error) as exc:
+        return [], [f"{name}: unreadable CSV: {exc}"]
+    expected_header = HEADER_V3 if csv_schema == "v3" else HEADER_V2
+    if not rows or tuple(rows[0]) != expected_header:
+        return [], [f"{name}: invalid canonical header for {csv_schema}"]
     errors: list[str] = []
     candles: list[dict] = []
     seen: set[str] = set()
     for number, fields in enumerate(rows[1:], start=2):
-        if len(fields) != len(HEADER):
-            errors.append(f"{path.name}:{number}: row width mismatch")
+        if len(fields) != len(expected_header):
+            errors.append(f"{name}:{number}: row width mismatch")
             continue
         session = fields[0]
         if not is_canonical_date(session) or session in seen:
-            errors.append(f"{path.name}:{number}: invalid or duplicate date")
+            errors.append(f"{name}:{number}: invalid or duplicate date")
             continue
         seen.add(session)
         try:
-            values = [float(value) for value in fields[1:]]
+            values = [float(value) for value in fields[1:6]]
         except ValueError:
-            errors.append(f"{path.name}:{number}: non-numeric value")
+            errors.append(f"{name}:{number}: non-numeric value")
             continue
         opening, high, low, close, volume = values
+        open_interest: int | None = None
+        if csv_schema == "v3":
+            try:
+                parsed_oi = int(fields[6])
+                if parsed_oi < -1 or float(fields[6]) != parsed_oi:
+                    raise ValueError
+                open_interest = parsed_oi
+            except ValueError:
+                errors.append(f"{name}:{number}: invalid open interest")
+                continue
         if not all(math.isfinite(value) for value in values):
-            errors.append(f"{path.name}:{number}: non-finite value")
+            errors.append(f"{name}:{number}: non-finite value")
         elif (
             low <= 0
             or close <= 0
@@ -295,7 +414,7 @@ def _read_csv(path: Path) -> tuple[list[dict], list[str]]:
             or max(opening, close) > high
             or volume < 0
         ):
-            errors.append(f"{path.name}:{number}: invalid OHLCV relationship")
+            errors.append(f"{name}:{number}: invalid OHLCV relationship")
         candles.append(
             {
                 "date": session,
@@ -304,10 +423,16 @@ def _read_csv(path: Path) -> tuple[list[dict], list[str]]:
                 "low": low,
                 "close": close,
                 "volume": volume,
+                "open_interest": open_interest,
             }
         )
     candles.sort(key=lambda row: row["date"])
     return candles, errors
+
+
+def _read_csv(path: Path) -> tuple[list[dict], list[str]]:
+    """Parse a CSV file outside the pinned snapshot boundary."""
+    return _read_csv_content(path.read_bytes(), path.name)
 
 
 def write_manifest(
@@ -321,13 +446,17 @@ def write_manifest(
         return errors
     raw = raw_digests or {}
     files: dict[str, dict] = {}
+    root_fd = open_snapshot_root(directory)
     for symbol in expectations["symbols"]:
-        path = directory / f"{symbol}.csv"
-        if not path.is_file():
-            errors.append(f"{symbol}: missing series")
+        name = f"{expectations['storage_keys'][symbol]}.csv"
+        try:
+            content = read_object(root_fd, name)
+        except (OSError, ValueError) as exc:
+            errors.append(f"{symbol}: {exc}")
             continue
-        content = path.read_bytes()
-        candles, parse_errors = _read_csv(path)
+        candles, parse_errors = _read_csv_content(
+            content, name, expectations.get("csv_schema", "v2")
+        )
         errors.extend(parse_errors)
         sessions = [row["date"] for row in candles]
         if sessions != expectations["sessions"]:
@@ -339,13 +468,17 @@ def write_manifest(
             "first_date": sessions[0] if sessions else "",
             "last_date": sessions[-1] if sessions else "",
             "instrument_id": expectations["instrument_ids"][symbol],
+            "storage_key": expectations["storage_keys"][symbol],
             "raw_digest": raw.get(symbol, ""),
         }
         if len(candles) < expectations["min_rows"]:
             errors.append(f"{symbol}: insufficient rows")
     if errors:
         return errors
-    contract_bytes = (directory / CONTRACT_FILE).read_bytes()
+    try:
+        contract_bytes = read_object(root_fd, CONTRACT_FILE)
+    finally:
+        os.close(root_fd)
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "digest_algorithm": DIGEST_ALGORITHM,
@@ -354,9 +487,17 @@ def write_manifest(
         "expectations": expectations,
         "files": files,
     }
-    (directory / MANIFEST_FILE).write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    root_fd = open_snapshot_root(directory)
+    try:
+        write_object(
+            root_fd,
+            MANIFEST_FILE,
+            (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode(
+                "utf-8"
+            ),
+        )
+    finally:
+        os.close(root_fd)
     return []
 
 
@@ -398,30 +539,40 @@ def verify_dataset(directory: Path) -> DatasetResult:
         result.status = "BLOCKED"
         result.errors.extend(errors)
         return result
-    manifest_path = directory / MANIFEST_FILE
-    if not manifest_path.is_file():
+    try:
+        root_fd = open_snapshot_root(directory)
+        raw_manifest_bytes = read_object(root_fd, MANIFEST_FILE)
+    except (OSError, ValueError) as exc:
         result.status = "BLOCKED"
-        result.errors.append("manifest.json: snapshot manifest absent")
+        result.errors.append(f"manifest.json: {exc}")
         return result
     try:
-        raw_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raw_manifest = strict_json_loads(raw_manifest_bytes.decode("utf-8"))
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        ValueError,
+    ) as exc:
         result.status = "BLOCKED"
         result.errors.append(f"manifest.json: invalid JSON: {exc}")
+        os.close(root_fd)
         return result
     manifest, errors = _verify_structure(raw_manifest)
     if errors:
         result.status = "BLOCKED"
         result.errors.extend(errors)
+        os.close(root_fd)
         return result
     assert manifest is not None
     result.contract_digest = contract_digest(expectations)
-    errors = _verify_manifest_binding(directory, manifest, expectations)
+    errors = _verify_manifest_binding(root_fd, manifest, expectations)
     if errors:
         result.status = "BLOCKED"
         result.errors.extend(errors)
+        os.close(root_fd)
         return result
-    _verify_files(directory, manifest, expectations, result)
+    _verify_files(root_fd, manifest, expectations, result)
+    os.close(root_fd)
     if not result.errors:
         result.status = "COMPLETE"
     elif result.file_digests:
@@ -432,7 +583,7 @@ def verify_dataset(directory: Path) -> DatasetResult:
 
 
 def _verify_manifest_binding(
-    directory: Path, manifest: dict, expectations: dict
+    root_fd: int, manifest: dict, expectations: dict
 ) -> list[str]:
     """Bind the manifest to the exact frozen contract bytes."""
     errors: list[str] = []
@@ -440,7 +591,7 @@ def _verify_manifest_binding(
         errors.append("manifest expectations differ from snapshot contract")
     if manifest["contract_digest"] != contract_digest(expectations):
         errors.append("contract digest mismatch")
-    contract_bytes = (directory / CONTRACT_FILE).read_bytes()
+    contract_bytes = read_object(root_fd, CONTRACT_FILE)
     if manifest["contract_sha256"] != sha256_hex(contract_bytes):
         errors.append("contract byte digest mismatch")
     files = manifest["files"]
@@ -451,7 +602,7 @@ def _verify_manifest_binding(
 
 
 def _verify_files(
-    directory: Path, manifest: dict, expectations: dict, result: DatasetResult
+    root_fd: int, manifest: dict, expectations: dict, result: DatasetResult
 ) -> None:
     """Verify every declared series and record structured errors."""
     for symbol in expectations["symbols"]:
@@ -460,21 +611,25 @@ def _verify_files(
             result.errors.append(f"{symbol}: malformed file identity")
             continue
         raw_digest = entry["raw_digest"]
-        if not isinstance(raw_digest, str) or not re.fullmatch(
-            r"[0-9a-f]{0,64}", raw_digest
-        ):
+        if not valid_raw_digest(raw_digest):
             result.errors.append(f"{symbol}: malformed raw digest")
             continue
-        path = directory / f"{symbol}.csv"
-        if not path.is_file():
-            result.errors.append(f"{symbol}: series absent")
+        if entry["storage_key"] != expectations["storage_keys"][symbol]:
+            result.errors.append(f"{symbol}: storage key mismatch")
             continue
-        content = path.read_bytes()
+        name = f"{expectations['storage_keys'][symbol]}.csv"
+        try:
+            content = read_object(root_fd, name)
+        except (OSError, ValueError) as exc:
+            result.errors.append(f"{symbol}: {exc}")
+            continue
         digest = sha256_hex(content)
         if digest != entry["digest"]:
             result.errors.append(f"{symbol}: dataset digest mismatch")
             continue
-        candles, parse_errors = _read_csv(path)
+        candles, parse_errors = _read_csv_content(
+            content, name, expectations.get("csv_schema", "v2")
+        )
         if parse_errors:
             result.errors.extend(parse_errors)
             continue

@@ -449,6 +449,7 @@ struct Candle {
   double low = 0.0;
   double close = 0.0;
   double volume = 0.0;
+  int64_t open_interest = -1;  // -1 means unavailable, 0 is a real zero.
   int64_t timestamp_ms = 0;
 };
 
@@ -1626,6 +1627,7 @@ struct DatasetVerification {
   std::string contract_digest;
   std::vector<std::string> errors;
   std::map<std::string, std::string> file_digests;
+  std::map<std::string, std::vector<Candle>> candles;
 };
 
 // Frozen snapshot expectations. The C++ and Python implementations both
@@ -1642,7 +1644,10 @@ struct DatasetExpectations {
   std::string last_date;
   int64_t min_rows = 1;
   std::map<std::string, std::string> instrument_ids;
+  std::map<std::string, std::string> storage_keys;
+  std::string csv_schema = "v2";
 };
+std::string DatasetStorageKey(const std::string& instrument_id);
 
 Json::Object DatasetExpectationsJson(const DatasetExpectations& expected);
 std::string CanonicalDatasetExpectations(const DatasetExpectations& expected);
@@ -1669,6 +1674,10 @@ DatasetVerification VerifyDataset(const std::string& history_dir,
                                   const DatasetExpectations* expected,
                                   std::string* error);
 
+bool ReadCsvText(const std::string& text,
+                 std::vector<Candle>* candles,
+                 std::string* error,
+                 const std::string& csv_schema = "v2");
 bool ReadCsvCandles(const std::string& path,
                     std::vector<Candle>* candles,
                     std::string* error);
