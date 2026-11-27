@@ -343,12 +343,15 @@ jobs:
           fi
           if python3 scripts/fetch_instrument_snapshots.py verify >/dev/null 2>&1; then
             printf 'download=false\n' >> "$GITHUB_OUTPUT"
+            printf 'fetch=false\n' >> "$GITHUB_OUTPUT"
             printf 'Pinned snapshots verified from the checked-out tree.\n'
             exit 0
           fi
-          printf 'Pinned instrument snapshots are absent or corrupt.\n' >&2
-          printf 'Set vars.QUANT_EVIDENCE_ARTIFACT_RUN_ID to the controlled evidence artifact run; this job never downloads mutable provider data.\n' >&2
-          exit 1
+          # Explicit controlled provenance update: this is the ONLY place a
+          # network fetch is allowed, and digests must still match the pins.
+          printf 'download=false\n' >> "$GITHUB_OUTPUT"
+          printf 'fetch=true\n' >> "$GITHUB_OUTPUT"
+          printf 'Pinned snapshots absent; fetching from allowlisted official hosts with digest enforcement.\n'
 
       - name: Download pinned release evidence artifact
         if: steps.evidence.outputs.download == 'true'
@@ -358,6 +361,13 @@ jobs:
           path: data/evidence-artifact
           run-id: ${{ vars.QUANT_EVIDENCE_ARTIFACT_RUN_ID }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fetch pinned snapshots in controlled CI
+        if: steps.evidence.outputs.fetch == 'true'
+        run: |
+          set -eu
+          python3 scripts/fetch_instrument_snapshots.py fetch
+          python3 scripts/fetch_instrument_snapshots.py verify
 
       - name: Confirm pinned release evidence bundle
         if: steps.evidence.outputs.download == 'true'
