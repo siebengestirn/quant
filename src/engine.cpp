@@ -5132,13 +5132,17 @@ std::string WriteTextFile(const std::string& path, const std::string& content) {
 
 bool ReadCsvText(const std::string& text,
                  std::vector<Candle>* candles,
-                 std::string* error) {
+                 std::string* error,
+                 const std::string& csv_schema) {
   candles->clear();
   std::istringstream input(text);
   std::string line;
-  if (!std::getline(input, line) || line != "date,open,high,low,close,volume") {
+  const std::string expected_header =
+      csv_schema == "v3" ? "date,open,high,low,close,volume,open_interest"
+                         : "date,open,high,low,close,volume";
+  if (!std::getline(input, line) || line != expected_header) {
     if (error)
-      *error = "invalid candle header";
+      *error = "invalid candle header for " + csv_schema;
     return false;
   }
   std::set<std::string> dates;
@@ -5150,7 +5154,8 @@ bool ReadCsvText(const std::string& text,
     std::string field;
     while (std::getline(ss, field, ','))
       fields.push_back(field);
-    if (fields.size() != 6) {
+    const size_t expected_width = csv_schema == "v3" ? 7 : 6;
+    if (fields.size() != expected_width) {
       if (error)
         *error =
             "candle row width mismatch at line " + std::to_string(line_number);
@@ -5189,6 +5194,20 @@ bool ReadCsvText(const std::string& text,
         *error =
             "invalid OHLCV relationship at line " + std::to_string(line_number);
       return false;
+    }
+    if (csv_schema == "v3") {
+      int64_t open_interest = 0;
+      const auto result = std::from_chars(
+          fields[6].data(), fields[6].data() + fields[6].size(), open_interest);
+      if (result.ec != std::errc() ||
+          result.ptr != fields[6].data() + fields[6].size() ||
+          open_interest < 0) {
+        if (error)
+          *error =
+              "invalid open interest at line " + std::to_string(line_number);
+        return false;
+      }
+      candle.open_interest = open_interest;
     }
     candles->push_back(candle);
   }

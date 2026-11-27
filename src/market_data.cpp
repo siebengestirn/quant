@@ -499,7 +499,11 @@ int64_t ParseIsoTimestampMs(const std::string& text) {
   const int hour = digits(11, 2);
   const int minute = digits(14, 2);
   const int second = digits(17, 2);
-  if (year < 1970 || month < 1 || month > 12 || day < 1 || day > 31 ||
+  static constexpr int kDaysInMonth[] = {
+      31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  const bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+  const int max_day = kDaysInMonth[month - 1] + (month == 2 && leap ? 1 : 0);
+  if (year < 1970 || month < 1 || month > 12 || day < 1 || day > max_day ||
       hour > 23 || minute > 59 || second > 60)
     return -1;
   std::tm time{};
@@ -876,7 +880,7 @@ bool StrictNumber(const Json& value, double* out) {
 HistoryParseResult BuildHistoryCsv(const Json& candles,
                                    const std::string& symbol) {
   HistoryParseResult result;
-  result.csv = "date,open,high,low,close,volume\n";
+  result.csv = "date,open,high,low,close,volume,open_interest\n";
   std::set<std::string> dates;
   std::vector<std::pair<std::string, std::string>> ordered_rows;
   if (candles.type() != Json::Type::kArray || candles.array().empty()) {
@@ -905,12 +909,17 @@ HistoryParseResult BuildHistoryCsv(const Json& candles,
       result.errors.push_back(symbol + ": duplicate date " + date);
       return result;
     }
-    double values[5] = {};
-    for (size_t i = 0; i < 5; ++i) {
+    double values[6] = {};
+    for (size_t i = 0; i < 6; ++i) {
       if (!StrictNumber(row.array()[i + 1], &values[i])) {
         result.errors.push_back(symbol + ": non-numeric field");
         return result;
       }
+    }
+    const double open_interest = values[5];
+    if (open_interest < 0.0 || open_interest != std::floor(open_interest)) {
+      result.errors.push_back(symbol + ": invalid open interest");
+      return result;
     }
     const double open = values[0];
     const double high = values[1];
@@ -926,7 +935,7 @@ HistoryParseResult BuildHistoryCsv(const Json& candles,
     line.imbue(std::locale::classic());
     line << std::setprecision(std::numeric_limits<double>::max_digits10);
     line << date << ',' << open << ',' << high << ',' << low << ',' << close
-         << ',' << volume << '\n';
+         << ',' << volume << ',' << static_cast<int64_t>(open_interest) << '\n';
     ordered_rows.emplace_back(date, line.str());
     ++result.accepted;
   }
@@ -1013,6 +1022,7 @@ HistorySyncResult MarketDataService::SyncHistory(
           std::chrono::system_clock::now().time_since_epoch())
           .count();
   contract.provenance = "UPSTOX_BOD_DAILY";
+  contract.csv_schema = "v3";
   contract.min_rows = 1;
   auto safe_identity = [](std::string value) {
     for (char& c : value) {

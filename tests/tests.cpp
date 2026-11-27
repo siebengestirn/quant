@@ -808,7 +808,8 @@ Json ValidCandleRow(const std::string& date) {
                       Json::Number(103.0),
                       Json::Number(99.0),
                       Json::Number(102.0),
-                      Json::Number(1000.0)});
+                      Json::Number(1000.0),
+                      Json::Number(7.0)});
 }
 
 void TestUpstoxQuoteTimestampNormalization() {
@@ -845,6 +846,73 @@ void TestUpstoxQuoteTimestampNormalization() {
   Check(invalid.quality == "invalid_timestamp" &&
             invalid.provider_timestamp_ms == 0,
         "future timestamp quarantined with unknown freshness");
+
+  auto normalized = [&](const Json& value) {
+    return NormalizeUpstoxQuote(value, "AAA", "UPSTOX:AAA");
+  };
+  const int64_t wall_now =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count();
+  Json::Object missing_update = item;
+  missing_update.erase("timestamp");
+  Check(normalized(Json::ObjectValue(missing_update)).quality ==
+            "invalid_timestamp",
+        "missing provider timestamp is explicit");
+  Json::Object missing_trade = item;
+  missing_trade.erase("last_trade_time");
+  Check(normalized(Json::ObjectValue(missing_trade)).quality ==
+            "invalid_timestamp",
+        "missing trade timestamp is explicit under fail-closed policy");
+  Json::Object null_update = item;
+  null_update["timestamp"] = Json::Null();
+  Check(
+      normalized(Json::ObjectValue(null_update)).quality == "invalid_timestamp",
+      "null timestamp is rejected");
+  Json::Object empty_update = item;
+  empty_update["timestamp"] = Json::String("");
+  Check(normalized(Json::ObjectValue(empty_update)).quality ==
+            "invalid_timestamp",
+        "empty timestamp is rejected");
+  Json::Object numeric_update = item;
+  numeric_update["timestamp"] = Json::Integer(wall_now - 1000);
+  Check(normalized(Json::ObjectValue(numeric_update)).quality == "ok",
+        "numeric millisecond timestamp accepted");
+  Json::Object zulu = item;
+  zulu["timestamp"] = Json::String("2026-11-27T04:45:30.123Z");
+  Check(normalized(Json::ObjectValue(zulu)).quality == "ok",
+        "ISO Z timestamp accepted");
+  Json::Object positive_offset = item;
+  positive_offset["timestamp"] = Json::String("2026-11-27T10:15:30.123+05:30");
+  Check(normalized(Json::ObjectValue(positive_offset)).quality == "ok",
+        "positive timezone offset accepted");
+  Json::Object negative_offset = item;
+  negative_offset["timestamp"] = Json::String("2026-11-26T23:15:30.123-05:00");
+  Check(normalized(Json::ObjectValue(negative_offset)).quality == "ok",
+        "negative timezone offset accepted");
+  Json::Object invalid_day = item;
+  invalid_day["timestamp"] = Json::String("2026-02-31T10:15:30Z");
+  Check(
+      normalized(Json::ObjectValue(invalid_day)).quality == "invalid_timestamp",
+      "invalid calendar date rejected");
+  Json::Object invalid_offset = item;
+  invalid_offset["timestamp"] = Json::String("2026-11-27T10:15:30+99:99");
+  Check(normalized(Json::ObjectValue(invalid_offset)).quality ==
+            "invalid_timestamp",
+        "invalid timezone offset rejected");
+  Json::Object excess_fraction = item;
+  excess_fraction["timestamp"] =
+      Json::String("2026-11-27T10:15:30.123456789+05:30");
+  Check(normalized(Json::ObjectValue(excess_fraction)).quality == "ok",
+        "excess fractional precision truncated to milliseconds");
+  Json::Object slight_future = item;
+  slight_future["timestamp"] = Json::Integer(wall_now + 60000);
+  Check(normalized(Json::ObjectValue(slight_future)).quality == "ok",
+        "slightly future timestamp inside tolerance accepted");
+  Json::Object outside = item;
+  outside["timestamp"] = Json::Integer(wall_now + 600000);
+  Check(normalized(Json::ObjectValue(outside)).quality == "invalid_timestamp",
+        "timestamp outside future tolerance rejected");
 }
 
 void TestProviderHistoryValidation() {
@@ -864,10 +932,35 @@ void TestProviderHistoryValidation() {
                                                 Json::Number(99.0),
                                                 Json::Number(102.0),
                                                 Json::Number(1000.0),
-                                                Json::Number(7.0)})}),
+                                                Json::Number(7.0),
+                                                Json::Number(8.0)})}),
                       "AAA");
-  Check(width.errors.empty() && width.accepted == 1,
-        "V3 open-interest column accepted");
+  Check(!width.errors.empty() && width.accepted == 0,
+        "unexpected eighth field rejected");
+
+  Check(
+      result.csv.find("2026-01-01,100,103,99,102,1000,7") != std::string::npos,
+      "open interest is preserved in canonical output");
+  const HistoryParseResult negative_oi =
+      BuildHistoryCsv(Json::Array({Json::Array({Json::String("2026-01-01"),
+                                                Json::Number(100.0),
+                                                Json::Number(103.0),
+                                                Json::Number(99.0),
+                                                Json::Number(102.0),
+                                                Json::Number(1000.0),
+                                                Json::Number(-1.0)})}),
+                      "AAA");
+  Check(!negative_oi.errors.empty(), "negative open interest rejected");
+  const HistoryParseResult string_oi =
+      BuildHistoryCsv(Json::Array({Json::Array({Json::String("2026-01-01"),
+                                                Json::Number(100.0),
+                                                Json::Number(103.0),
+                                                Json::Number(99.0),
+                                                Json::Number(102.0),
+                                                Json::Number(1000.0),
+                                                Json::String("7")})}),
+                      "AAA");
+  Check(!string_oi.errors.empty(), "non-numeric open interest rejected");
 
   HistoryParseResult reversed = BuildHistoryCsv(
       Json::Array({ValidCandleRow("2026-01-02"), ValidCandleRow("2026-01-01")}),

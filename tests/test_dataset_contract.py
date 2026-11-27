@@ -144,3 +144,30 @@ def test_zero_rows_and_missing_sessions_fail_closed(tmp_path: Path):
     assert contract.verify_dataset(directory).status == "BLOCKED"
     code, _ = _cpp("verify", str(directory))
     assert code != 0
+
+
+def test_csv_schema_v3_preserves_open_interest(tmp_path: Path):
+    """Versioned CSV schema v3 retains validated open interest."""
+    directory = tmp_path / "v3"
+    directory.mkdir()
+    key = contract.storage_key("ID-AAA")
+    (directory / f"{key}.csv").write_text(
+        "date,open,high,low,close,volume,open_interest\n"
+        "2026-01-02,102,105,101,104,1200,7\n"
+        "2026-01-01,100,103,99,102,1000,5\n"
+    )
+    expected = _spec(["AAA"], ["2026-01-01", "2026-01-02"])
+    expected["csv_schema"] = "v3"
+    assert contract.write_contract(directory, expected) == []
+    assert contract.write_manifest(directory, expected) == []
+    verified = contract.verify_dataset(directory)
+    assert verified.status == "COMPLETE"
+    assert any(row[-1] == "5" for row in result_rows(directory, key)[1:])
+
+
+def result_rows(directory: Path, key: str) -> list[list[str]]:
+    """Return raw CSV rows for assertion helpers."""
+    return [
+        line.split(",")
+        for line in (directory / f"{key}.csv").read_text().splitlines()
+    ]

@@ -27,7 +27,9 @@ from pathlib import Path
 
 SCHEMA_VERSION = 2
 DIGEST_ALGORITHM = "sha256"
-HEADER = ("date", "open", "high", "low", "close", "volume")
+HEADER_V2 = ("date", "open", "high", "low", "close", "volume")
+HEADER_V3 = HEADER_V2 + ("open_interest",)
+VALID_CSV_SCHEMAS = ("v2", "v3")
 CONTRACT_FILE = "contract.json"
 MANIFEST_FILE = "manifest.json"
 CONTRACT_PREFIX = "QUANT-DATASET-CONTRACT-V2"
@@ -50,6 +52,7 @@ CONTRACT_FIELDS = {
     "min_rows",
     "instrument_ids",
     "storage_keys",
+    "csv_schema",
 }
 MANIFEST_FIELDS = {
     "schema_version",
@@ -141,6 +144,7 @@ def canonical_expectations(expectations: dict) -> str:
         f"first_date={expectations['first_date']}",
         f"last_date={expectations['last_date']}",
         f"min_rows={expectations['min_rows']}",
+        f"csv_schema={expectations.get('csv_schema', 'v2')}",
         f"instrument_ids={pairs}",
         "storage_keys="
         + ",".join(
@@ -282,7 +286,7 @@ def validate_expectations(expectations: object) -> list[str]:
     if not isinstance(expectations, dict):
         return ["expectations must be an object"]
     unknown = sorted(set(expectations) - CONTRACT_FIELDS)
-    missing = sorted(CONTRACT_FIELDS - set(expectations))
+    missing = sorted((CONTRACT_FIELDS - {"csv_schema"}) - set(expectations))
     errors: list[str] = []
     if unknown:
         errors.append(f"unknown expectations fields: {','.join(unknown)}")
@@ -294,6 +298,9 @@ def validate_expectations(expectations: object) -> list[str]:
     errors.extend(_validate_lists(expectations))
     errors.extend(_validate_range(expectations))
     errors.extend(_validate_identities(expectations, expectations["symbols"]))
+    schema = expectations.get("csv_schema", "v2")
+    if schema not in VALID_CSV_SCHEMAS:
+        errors.append("csv_schema must be v2 or v3")
     return errors
 
 
@@ -344,9 +351,11 @@ def read_expectations(directory: Path) -> tuple[dict | None, list[str]]:
 
 def write_contract(directory: Path, expectations: dict) -> list[str]:
     """Write a validated, deterministic contract.json."""
+    expectations.setdefault("csv_schema", "v2")
     errors = validate_expectations(expectations)
     if errors:
         return errors
+    expectations.setdefault("csv_schema", "v2")
     directory.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(expectations, indent=2, sort_keys=True) + "\n"
     root_fd = open_snapshot_root(directory)
@@ -358,20 +367,21 @@ def write_contract(directory: Path, expectations: dict) -> list[str]:
 
 
 def _read_csv_content(
-    content: bytes, name: str
+    content: bytes, name: str, csv_schema: str = "v2"
 ) -> tuple[list[dict], list[str]]:
     """Parse exact CSV bytes already read from a pinned snapshot object."""
     try:
         rows = list(csv.reader(content.decode("utf-8").splitlines()))
     except (UnicodeDecodeError, csv.Error) as exc:
         return [], [f"{name}: unreadable CSV: {exc}"]
-    if not rows or tuple(rows[0]) != HEADER:
-        return [], [f"{name}: invalid canonical header"]
+    expected_header = HEADER_V3 if csv_schema == "v3" else HEADER_V2
+    if not rows or tuple(rows[0]) != expected_header:
+        return [], [f"{name}: invalid canonical header for {csv_schema}"]
     errors: list[str] = []
     candles: list[dict] = []
     seen: set[str] = set()
     for number, fields in enumerate(rows[1:], start=2):
-        if len(fields) != len(HEADER):
+        if len(fields) != len(expected_header):
             errors.append(f"{name}:{number}: row width mismatch")
             continue
         session = fields[0]
@@ -380,11 +390,21 @@ def _read_csv_content(
             continue
         seen.add(session)
         try:
-            values = [float(value) for value in fields[1:]]
+            values = [float(value) for value in fields[1:6]]
         except ValueError:
             errors.append(f"{name}:{number}: non-numeric value")
             continue
         opening, high, low, close, volume = values
+        open_interest: int | None = None
+        if csv_schema == "v3":
+            try:
+                parsed_oi = int(fields[6])
+                if parsed_oi < 0 or float(fields[6]) != parsed_oi:
+                    raise ValueError
+                open_interest = parsed_oi
+            except ValueError:
+                errors.append(f"{name}:{number}: invalid open interest")
+                continue
         if not all(math.isfinite(value) for value in values):
             errors.append(f"{name}:{number}: non-finite value")
         elif (
@@ -403,6 +423,7 @@ def _read_csv_content(
                 "low": low,
                 "close": close,
                 "volume": volume,
+                "open_interest": open_interest,
             }
         )
     candles.sort(key=lambda row: row["date"])
@@ -433,7 +454,9 @@ def write_manifest(
         except (OSError, ValueError) as exc:
             errors.append(f"{symbol}: {exc}")
             continue
-        candles, parse_errors = _read_csv_content(content, name)
+        candles, parse_errors = _read_csv_content(
+            content, name, expectations.get("csv_schema", "v2")
+        )
         errors.extend(parse_errors)
         sessions = [row["date"] for row in candles]
         if sessions != expectations["sessions"]:
@@ -604,7 +627,9 @@ def _verify_files(
         if digest != entry["digest"]:
             result.errors.append(f"{symbol}: dataset digest mismatch")
             continue
-        candles, parse_errors = _read_csv_content(content, name)
+        candles, parse_errors = _read_csv_content(
+            content, name, expectations.get("csv_schema", "v2")
+        )
         if parse_errors:
             result.errors.extend(parse_errors)
             continue

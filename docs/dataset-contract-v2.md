@@ -127,3 +127,19 @@ This contract proves snapshot identity and completeness relative to its frozen
 expectations. It does **not** prove exchange-calendar correctness, permanent
 instrument identity across symbol changes, provider streaming correctness, or
 physical power-loss durability. Those remain separate, unclaimed gates.
+
+## CSV schema version
+
+The expectations object carries `csv_schema`:
+
+- `v2`: `date,open,high,low,close,volume` (legacy, open interest unavailable).
+- `v3`: `date,open,high,low,close,volume,open_interest`.
+
+An absent field means `v2` for backward compatibility; new provider snapshots
+must declare `v3`. The canonical contract digest includes `csv_schema`.
+
+Open interest is a non-negative integer. In the in-memory candle model, `-1`
+means unavailable and `0` is a genuine zero. A missing open-interest column in
+`v2` is not equivalent to zero in `v3`. The provider adapter validates the
+seventh field and preserves it in canonical output; malformed, negative or
+fractional values are rejected.

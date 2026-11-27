@@ -324,6 +324,7 @@ Json::Object ExpectationsJson(const DatasetExpectations& expected) {
   result["last_date"] = Json::String(expected.last_date);
   result["min_rows"] = Json::UInteger(static_cast<uint64_t>(expected.min_rows));
   result["instrument_ids"] = Json::ObjectValue(ids);
+  result["csv_schema"] = Json::String(expected.csv_schema);
   Json::Object keys;
   for (const auto& [symbol, key] : expected.storage_keys)
     keys[symbol] = Json::String(key);
@@ -345,7 +346,8 @@ bool ParseExpectations(const Json& value,
                                                "last_date",
                                                "min_rows",
                                                "instrument_ids",
-                                               "storage_keys"};
+                                               "storage_keys",
+                                               "csv_schema"};
   if (value.type() != Json::Type::kObject) {
     if (error)
       *error = "expectations must be an object";
@@ -471,6 +473,16 @@ bool ParseExpectations(const Json& value,
     }
     parsed.storage_keys[symbol] = key->as_string();
   }
+  const Json* csv_schema = value.Find("csv_schema");
+  parsed.csv_schema =
+      csv_schema == nullptr || csv_schema->type() != Json::Type::kString
+          ? "v2"
+          : csv_schema->as_string();
+  if (parsed.csv_schema != "v2" && parsed.csv_schema != "v3") {
+    if (error)
+      *error = "csv_schema must be v2 or v3";
+    return false;
+  }
   if (!ValidateDatasetExpectations(parsed, error))
     return false;
   *expected = parsed;
@@ -519,6 +531,7 @@ std::string CanonicalDatasetExpectations(const DatasetExpectations& expected) {
   AppendLine(&out, "first_date=" + expected.first_date);
   AppendLine(&out, "last_date=" + expected.last_date);
   AppendLine(&out, "min_rows=" + std::to_string(expected.min_rows));
+  AppendLine(&out, "csv_schema=" + expected.csv_schema);
   std::string identities;
   for (size_t i = 0; i < expected.symbols.size(); ++i) {
     if (i > 0)
@@ -572,6 +585,11 @@ bool ValidateDatasetExpectations(const DatasetExpectations& expected,
       copy.last_date != copy.sessions.back()) {
     if (error)
       *error = "invalid snapshot identity, provenance, range or history";
+    return false;
+  }
+  if (copy.csv_schema != "v2" && copy.csv_schema != "v3") {
+    if (error)
+      *error = "csv_schema must be v2 or v3";
     return false;
   }
   for (const std::string& symbol : copy.symbols) {
@@ -847,7 +865,8 @@ DatasetVerification VerifyDataset(const std::string& history_dir,
       manifest_expectations.last_date != contract.last_date ||
       manifest_expectations.min_rows != contract.min_rows ||
       manifest_expectations.instrument_ids != contract.instrument_ids ||
-      manifest_expectations.storage_keys != contract.storage_keys) {
+      manifest_expectations.storage_keys != contract.storage_keys ||
+      manifest_expectations.csv_schema != contract.csv_schema) {
     close(root_fd);
     return block("manifest expectations differ from snapshot contract");
   }
@@ -926,7 +945,7 @@ DatasetVerification VerifyDataset(const std::string& history_dir,
       continue;
     }
     std::vector<Candle> candles;
-    if (!ReadCsvText(bytes, &candles, &parse_error)) {
+    if (!ReadCsvText(bytes, &candles, &parse_error, contract.csv_schema)) {
       result.errors.push_back(parse_error + ": " + symbol);
       continue;
     }
