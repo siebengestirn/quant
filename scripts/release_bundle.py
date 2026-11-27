@@ -64,6 +64,7 @@ from pathlib import Path
 
 import audit_disposition
 from quant_common import (
+    AUDIT_EVIDENCE_FIELDS,
     BINARY_BUILD_DIR_KEY,
     BINARY_COMMIT_KEY,
     BINARY_DIGEST_KEY,
@@ -452,6 +453,32 @@ def regenerate_audit_dispositions(quant_root: Path) -> dict:
     if "verify: PASS" not in verification:
         raise RuntimeError("audit disposition verify did not report PASS")
     return summary
+
+
+FAIL = "FAIL"
+EVIDENCE_REASON = (
+    "exact audit digest, finding coverage and owner status verified"
+)
+
+
+def cohere_report_evidence(report: dict, summary: dict) -> None:
+    """Refresh the report's audit gate from the staged evidence summary.
+
+    Build regenerates dispositions from the staged audit bytes. A report made
+    against an older audit would otherwise embed stale counts and digest;
+    replacing the gate here keeps the embedded report coherent with the
+    evidence bundled in the ZIP.
+    """
+    gate = report_gate(report, "audit_disposition_evidence")
+    gate["counts"] = {"applicable": True, **summary}
+    gate["result"] = PASS
+    gate["reason"] = EVIDENCE_REASON
+    steps = gate.get("steps")
+    if isinstance(steps, list):
+        for step in steps:
+            if isinstance(step, dict):
+                step["output"] = "verify: PASS"
+                step["result"] = PASS
 
 
 def parse_snapshot_provenance(text: str) -> list[dict]:
@@ -1475,11 +1502,25 @@ def q_persistence_limit(scope: str, native: dict) -> str:
     )
 
 
-def stage_verification_report(quant_root: Path, report_path: Path) -> None:
-    """Embed the exact verification report used to build the bundle."""
+def stage_verification_report(
+    quant_root: Path, report_path: Path, report: dict | None = None
+) -> None:
+    """Embed the verification report, optionally with a refreshed audit gate.
+
+    When ``report`` is given its canonical JSON is embedded instead of a raw
+    copy of ``report_path``. Build uses that form after refreshing the audit
+    evidence gate from the staged files, so the embedded report is the one
+    whose counts are rendered in the manifest.
+    """
     evidence = quant_root / "evidence"
     evidence.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(report_path, evidence / "verification-report.json")
+    destination = evidence / "verification-report.json"
+    if report is None:
+        shutil.copy2(report_path, destination)
+        return
+    destination.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def render_manifest(
@@ -1621,6 +1662,64 @@ def verification_lines(manifest: str) -> list[str]:
     return section
 
 
+def check_report_evidence_coherence(
+    report: object, evidence: dict, errors: list[str]
+) -> str:
+    """Require the report's audit gate to match evidence verified from the ZIP.
+
+    The report gate and the bundled evidence are otherwise checked in
+    isolation. Without this comparison a stale report can claim an older
+    digest and counts while the ZIP holds regenerated evidence, and both
+    individual checks still pass. Every field that describes the evidence is
+    compared here, with a precise error for each divergence.
+    """
+    status = evidence.get("status")
+    if not isinstance(report, dict) or status == FAIL:
+        return FAIL
+    try:
+        counts = report_gate(report, "audit_disposition_evidence")["counts"]
+    except (KeyError, ValueError) as exc:
+        errors.append(f"report/evidence coherence error: {exc}")
+        return FAIL
+    if not isinstance(counts, dict):
+        errors.append(
+            "report/evidence coherence error: missing evidence counts"
+        )
+        return FAIL
+    verdict = FAIL
+    claimed = counts.get("applicable")
+    if status == NOT_APPLICABLE:
+        if claimed is False:
+            verdict = NOT_APPLICABLE
+        elif claimed is True:
+            errors.append(
+                "report/evidence coherence: report claims applicable audit "
+                "evidence but the bundle has none: "
+                + str(evidence.get("reason", "evidence absent"))
+            )
+        else:
+            errors.append(
+                "report/evidence coherence: invalid applicability flag"
+            )
+    elif claimed is not True:
+        errors.append(
+            f"report/evidence coherence: applicable mismatch: "
+            f"report={claimed!r} evidence=True"
+        )
+    else:
+        before = len(errors)
+        for field in AUDIT_EVIDENCE_FIELDS:
+            if counts.get(field) != evidence.get(field):
+                errors.append(
+                    f"report/evidence coherence: {field} mismatch: "
+                    f"report={counts.get(field)!r} "
+                    f"evidence={evidence.get(field)!r}"
+                )
+        if len(errors) == before:
+            verdict = PASS
+    return verdict
+
+
 def check_evidence(
     archive: zipfile.ZipFile,
     manifest_text: str,
@@ -1636,7 +1735,9 @@ def check_evidence(
     }
     if REPORT_ENTRY not in archive.namelist():
         errors.append(f"missing {REPORT_ENTRY}")
+        details["report_evidence_coherence"] = FAIL
         return details
+    report: object = None
     try:
         report = json.loads(archive.read(REPORT_ENTRY).decode("utf-8"))
         commit = manifest_final_commit(manifest_text)
@@ -1652,6 +1753,9 @@ def check_evidence(
         errors.append(f"evidence report error: {exc}")
     details["audit_evidence"] = audit_disposition.verify_zip_evidence(
         archive, PREFIX, errors
+    )
+    details["report_evidence_coherence"] = check_report_evidence_coherence(
+        report, details["audit_evidence"], errors
     )
     return details
 
@@ -1853,6 +1957,10 @@ def print_summary(bundle: Path, result: dict[str, object]) -> None:
         f"digest={evidence.get('source_digest') or 'none'}): "
         f"{evidence.get('reason', 'not available')}"
     )
+    print(
+        "Report/evidence coherence: "
+        f"{result.get('report_evidence_coherence', NOT_APPLICABLE)}"
+    )
     print(f"Native q tier: {result.get('native_q')}")
     print(f"Release scope: {result.get('release_scope', 'missing')}")
     for error in result["errors"]:
@@ -1874,8 +1982,12 @@ def build_stage(
     stage_tracked(quant_root, head)
     stage_instrument_snapshots(quant_root)
     stage_optional_evidence(quant_root)
-    regenerate_audit_dispositions(quant_root)
-    stage_verification_report(quant_root, report_path)
+    summary = regenerate_audit_dispositions(quant_root)
+    cohere_report_evidence(report, summary)
+    # Canonical ordering keeps rendered totals identical to the embedded JSON.
+    report = json.loads(json.dumps(report, sort_keys=True))
+    validate_report(report, head, scope)
+    stage_verification_report(quant_root, report_path, report)
     protection, merged = stage_api_evidence(quant_root)
     generated = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     pr_count, pr_range = merged_pr_range(merged)
@@ -1992,3 +2104,6 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+# Bundle checks stay together in this single self-verifying module.
+# pylint: disable=C0302

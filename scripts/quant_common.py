@@ -19,6 +19,13 @@ BINARY_PATH_KEY = "binary_path"
 BINARY_DIGEST_KEY = "binary_sha256"
 BINARY_BUILD_DIR_KEY = "build_dir"
 BINARY_COMMIT_KEY = "binary_commit"
+AUDIT_EVIDENCE_FIELDS = (
+    "source_digest",
+    "finding_count",
+    "disposition_count",
+    "counts_by_class",
+    "owner_status",
+)
 
 HISTORICAL_MARKERS = (
     "historical",

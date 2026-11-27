@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from quant_common import Finding, run_cli
+from quant_common import AUDIT_EVIDENCE_FIELDS, Finding, run_cli
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_INPUT = ROOT / "data" / "assurance" / "english-audit.json"
@@ -708,14 +708,7 @@ def validate_evidence_counts(counts: object) -> None:
     """Validate the digest, coverage, class counts and owner status."""
     if not isinstance(counts, dict):
         raise ValueError("evidence counts must be an object")
-    for key in (
-        "applicable",
-        "source_digest",
-        "finding_count",
-        "disposition_count",
-        "counts_by_class",
-        "owner_status",
-    ):
+    for key in ("applicable",) + AUDIT_EVIDENCE_FIELDS:
         if key not in counts:
             raise ValueError(f"invalid evidence count: {key}")
     if not isinstance(counts["applicable"], bool):
