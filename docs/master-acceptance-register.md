@@ -11,7 +11,7 @@ Statuses: `NOT IMPLEMENTED`, `IMPLEMENTED`, `UNIT-TESTED`,
 
 ## Release state reconciliation
 
-The earlier `docs/release-status-2026-11-26.md` describes the state at PR #46
+The earlier `docs/release-status.md` describes the state at PR #46
 (merged PRs #1–#46, no open PRs on `main`). The current governance state is
 seven open PRs #47–#53 on `main` at `953dac24…`, all with successful
 exact-head hosted CI and no independent approval recorded. The earlier file

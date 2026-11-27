@@ -2,7 +2,7 @@
 """QUANT dataset snapshot contract v2 (language-neutral implementation).
 
 This module and the C++ implementation in src/dataset.cpp follow the single
-specification in docs/dataset-contract-v2.md. SHA-256 is the only digest
+specification in docs/dataset-contract.md. SHA-256 is the only digest
 algorithm, so manifests are interchangeable across the two languages.
 
 Usage:
