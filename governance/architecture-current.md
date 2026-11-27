@@ -1,16 +1,18 @@
-# Current architecture — R8 target at PR #62 / R8.4 (2026-11-27)
+# Current architecture — R8 target at PR #63 / R8.4.1 (2026-11-27)
 
 This document maps the target logical architecture of the R8 directive onto
-the code at the PR #62 merge (release history, R8.4 COMPLETE), including
-the earlier R8.1 corrections for exact-integer open interest and volume,
-the wall-clock journal replay field and the R8.3 / W1 A/B/C work. The PR #58
-main SHA `1a91da2fb08995c9f6ee20e373d004ad28e58a72`, the PR #61 merge SHA
-`201f5ba602f68fc1370579cefa50b8b599af05d5` and the PR #62 merge SHA
-`66f037cc1d508244a821fef22dd35023d996e2ab` are HISTORICAL values; the
+the code at the PR #63 merge (release history, R8.4.1 COMPLETE and the
+CURRENT RELEASE until PR #64 merges), including the earlier R8.1 corrections
+for exact-integer open interest and volume, the wall-clock journal replay
+field and the R8.3 / W1 A/B/C work. The PR #58 main SHA
+`1a91da2fb08995c9f6ee20e373d004ad28e58a72`, the PR #61 merge SHA
+`201f5ba602f68fc1370579cefa50b8b599af05d5`, the PR #62 merge SHA
+`66f037cc1d508244a821fef22dd35023d996e2ab` and the PR #63 merge SHA
+`399652ca6803d65b1c460f0c57419f619c6a950d` are HISTORICAL values; the
 authoritative current main SHA, CI runs and bundle digest are recorded in
-the final release bundle `MANIFEST.md` (external artifact). Statuses describe
-implementation evidence only: they do not mean qualified, certified or
-accepted.
+the current final release bundle `MANIFEST.md` (external artifact,
+regenerated after R8.4.2). Statuses describe implementation evidence only:
+they do not mean qualified, certified or accepted.
 
 Legend: `IMPLEMENTED` means code exists for the stated scope; `PARTIAL` means
 a bounded model or prototype exists but not the full target contract;
@@ -23,10 +25,10 @@ not run. `PENDING` and `NOT PROVEN` describe missing evidence, not closure.
 |---|---|---|---|
 | Control plane | Configuration, CLI orchestration, mode gate | PARTIAL | `src/main.cpp:1331` (doctor), `src/main.cpp:1340` (data sync), `src/main.cpp:1352` (research), `src/main.cpp:1360` (paper start); `include/quant.hpp:277`, `src/engine.cpp:484`. Commands exist; paper lifecycle is not operational. |
 | Market data | Provider ingestion and normalisation | PARTIAL | `src/market_data.cpp:23` (Upstox V2 base), `src/market_data.cpp:26` (FYERS base), `src/market_data.cpp:686` (ISO parser), `src/market_data.cpp:805` (quote normalisation), `src/market_data.cpp:1043` (universe sync), `src/market_data.cpp:1429` (quotes). Read-only V2 REST only; no V3 endpoint call; no streaming; FYERS is a profile probe. R8.3 added explicit `volume_validity` and fail-closed legacy replay as `UNKNOWN`. |
-| Canonical instrument master | Effective-dated identity across venues and classes | PARTIAL | `include/quant.hpp:334` (AssetClass), `include/quant.hpp:343` (InstrumentSpec), `include/quant.hpp:366` (ReferenceInstrument), `include/quant.hpp:392` (InstrumentClass), `include/quant.hpp:403` (Instrument); `src/engine.cpp:994`, `src/engine.cpp:1043`; `q/quant.q:45`. W1-A/B/C add an offline crosswalk (14 tests, four bundled snapshots, 9,926 VERIFIED / 174 UNMAPPED) from pinned public Upstox and FYERS masters in `governance/instrument-master-snapshots.json`; effective dating (W1-D) and per-class conformance are PENDING; no full W1 exit. |
+| Canonical instrument master | Effective-dated identity across venues and classes | PARTIAL | `include/quant.hpp:334` (AssetClass), `include/quant.hpp:343` (InstrumentSpec), `include/quant.hpp:366` (ReferenceInstrument), `include/quant.hpp:392` (InstrumentClass), `include/quant.hpp:403` (Instrument); `src/engine.cpp:994`, `src/engine.cpp:1043`; `q/quant.q:45`. W1-A/B/C add an offline crosswalk (28 tests, four bundled snapshots, 9,926 VERIFIED / 174 UNMAPPED) from pinned public Upstox and FYERS masters in `governance/instrument-master-snapshots.json`; effective dating (W1-D) and per-class conformance are PENDING; no full W1 exit. |
 | Validation | Fail-closed contracts at every boundary | PARTIAL | `src/engine.cpp:484` (config), `src/engine.cpp:1107` (bar), `src/engine.cpp:1372` (fill), `src/engine.cpp:4495` (event); `src/dataset.cpp:301`, `src/dataset.cpp:566`; `python/dataset_contract.py:409`; `src/market_data.cpp:686`. R8.3 enforces one decimal count grammar and an explicit volume-validity state in both canonical readers; cross-language boundary fixtures and real-provider qualification are still PENDING. |
 | Durable journal | Append-only, checksummed recovery and audit source | PARTIAL | `include/quant.hpp:1058` (Journal), `include/quant.hpp:1069` (health), `src/engine.cpp:4529` (Open validates via Replay), `src/engine.cpp:4649` (Append with fsync), `src/engine.cpp:4739` (Replay), `src/engine.cpp:1146` (pipeline writes journal). Power-loss durability NOT PROVEN; process/crash evidence only. |
-| q storage | High-volume time-series analytics and generated replay state | PARTIAL | `q/quant.q:427` (persist), `q/quant.q:517` (load), `q/quant.q:532` (recover), `q/quant.q:29` (quotes); `src/kdbx.cpp:205`, `src/kdbx.cpp:259`, `src/kdbx.cpp:351`; `include/quant.hpp:1531`. R8.3 makes `KdbxClient` reject unverified volume before q publication. Local C API not compiled (libe.so missing); hosted native-q job GATED / NOT RUN (skipped/GATED_NOT_RUN at PR #62, HISTORICAL); R8.4 mapped the skipped conclusion, never reporting a pass; runner provisioning remains OPEN under TD-015; q is not the durability authority. |
+| q storage | High-volume time-series analytics and generated replay state | PARTIAL | `q/quant.q:427` (persist), `q/quant.q:517` (load), `q/quant.q:532` (recover), `q/quant.q:29` (quotes); `src/kdbx.cpp:205`, `src/kdbx.cpp:259`, `src/kdbx.cpp:351`; `include/quant.hpp:1531`. R8.3 makes `KdbxClient` reject unverified volume before q publication. Local C API not compiled (libe.so missing); hosted native-q job GATED / NOT RUN (skipped/GATED_NOT_RUN at PR #62 and PR #63, both HISTORICAL); R8.4 and R8.4.1 mapped the skipped conclusion, never reporting a pass; runner provisioning remains OPEN under TD-015; q is not the durability authority. |
 | Research | Statistics, multiple-testing diagnostics, sealed holdout | PARTIAL | `python/research.py:4` (research-only scope), `python/research.py:1048` (holdout split), `python/research.py:1086` (purged walk-forward), `python/research.py:1307` (nested validation), `python/research.py:1517` (delegation to C++), `python/research.py:1893`. Results INCONCLUSIVE/negative; holdout SEALED_NOT_EVALUATED. |
 | Strategy | Signal definition and simulated portfolio construction | PARTIAL | `include/quant.hpp:471` (Signal), `include/quant.hpp:959` (metrics), `src/engine.cpp:4063` (RunBacktest), `src/engine.cpp:4032` (conservative fill), `python/research.py:500`, `python/research.py:511`, `python/research.py:516`. Daily simulated backtest only; no accepted strategy; decision NO TRADE. |
 | Independent risk | Authorisation capability isolated from order clients | PARTIAL | `include/quant.hpp:768` (RiskAuthorization), `include/quant.hpp:915` (RiskEngine), `src/engine.cpp:3576`, `src/engine.cpp:3767` (Verify), `src/engine.cpp:3798` (market-data binding), `src/engine.cpp:2708` (state recovery). In-process capability only; not an independent human reviewer; persistence across restart NOT IMPLEMENTED (QG-003). |
@@ -55,7 +57,8 @@ verification report, fails closed on a missing provenance report and uses a
 portable state-freshness self-test. At PR #61 hosted CI succeeded with
 native q skipped/GATED_NOT_RUN; the merge SHA, CI run and bundle digest are
 HISTORICAL values at PR #61 and current identifiers live in `MANIFEST.md`.
-At PR #61 (HISTORICAL), R8.4 was IN PROGRESS; it is COMPLETE at PR #62.
+At PR #61 (HISTORICAL), R8.4 was IN PROGRESS; it is COMPLETE at PR #62 and
+R8.4.1 is COMPLETE at PR #63 (release records below).
 
 ### R8.4 at PR #62 (COMPLETE, release history)
 
@@ -76,9 +79,33 @@ tests, 16 release-bundle passes, 106 verify-report passes, style 8/8 PASS
 and zero binding audit findings. The release scope was PORTABLE_RESEARCH
 and native q remained GATED_NOT_RUN. W1-D live consistency and effective
 dating remain PENDING; no full W1 exit or independent acceptance is claimed.
-Native-q runner provisioning stays OPEN under TD-015. R8.4.1 (PR #63) is
-IN PROGRESS: bundle validator PASS support, complete report schema,
+Native-q runner provisioning stays OPEN under TD-015. At PR #62 (HISTORICAL),
+R8.4.1 (PR #63) was IN PROGRESS: bundle validator PASS support, complete
+report schema, native-q self-provisioning CI, offline W1 fixture and
+hardened retrieval; it is COMPLETE at PR #63 (release record below).
+
+### R8.4.1 at PR #63 (COMPLETE, release history; current release)
+
+R8.4.1 was MERGED at PR #63 with merge SHA
+`399652ca6803d65b1c460f0c57419f619c6a950d`. HISTORICAL at PR #63: hosted
+CI run `46023401318` succeeded with three passing jobs and one skipped
+native-q job, the then-final bundle had 117 entries and digest
+`f67054a7586e26219c21e3b25682bb79ea70fa3dd9b2159d212dd97813b7c795`.
+Current main SHA, CI runs and bundle digest are in the current bundle
+`MANIFEST.md` (external artifact, generated after R8.4.2). R8.4.1 is
+COMPLETE and is the CURRENT RELEASE until PR #64 merges.
+
+R8.4.1 closed the bundle validator PASS path, complete report schema,
 native-q self-provisioning CI, offline W1 fixture and hardened retrieval.
+Local verification recorded 28 W1 offline tests on captured bytes; W1 is
+PARTIAL (9,926 VERIFIED / 174 UNMAPPED crosswalk identities, four bundled
+pinned snapshots) with W1-D live consistency and effective dating PENDING
+and no full W1 exit. The release scope was PORTABLE_RESEARCH and native q
+was GATED_NOT_RUN; the skipped hosted job was reported as GATED_NOT_RUN,
+never as passed. Independent acceptance is NOT RECORDED and native-q runner
+provisioning remains OPEN under TD-015. R8.4.2 / PR #64 is IN PROGRESS
+(runner isolation, native_q_checker gate, skip enforcement, explicit W1
+evidence and hosted release assurance) with no exit claim.
 
 ## 2. C++ / Python / q authority separation as implemented
 
@@ -150,7 +177,7 @@ downstream q step. A q IPC response is not a zero-loss guarantee.
 | W4 before W10 operational paper trading | W10 is NOT IMPLEMENTED; the paper OMS has a model and replay but no operational lifecycle. |
 | W5 and W6 before W7 strategy acceptance | W5 is PARTIAL and W6 is NOT IMPLEMENTED; W7 is INCONCLUSIVE/BLOCKED and the holdout is SEALED_NOT_EVALUATED. |
 | W4 plus a fault rig before W12 durability qualification | W12 is NOT PROVEN; power-loss testing is outstanding. |
-| W11 hosted native q before persistence releases | GATED / NOT RUN on a governed licensed runner; local native q cannot run on this Mac. R8.4 mapped the skipped conclusion as GATED_NOT_RUN, never passed; runner provisioning remains OPEN under TD-015. |
+| W11 hosted native q before persistence releases | GATED / NOT RUN on a governed licensed runner; local native q cannot run on this Mac. R8.4 and R8.4.1 mapped the skipped conclusion as GATED_NOT_RUN, never passed; runner provisioning remains OPEN under TD-015. |
 | W7, W10, W12, W16 and compliance before W17 live route | W17 remains DISABLED; live execution must not be enabled by this baseline. |
 | All relevant gates before W16 independent acceptance | PENDING / NOT RECORDED; no independent external acceptance exists. |
 | This W0 documentation baseline before any later workstream | Documentation-only deliverables; they unblock no implementation, qualification or release gate. |
@@ -161,15 +188,20 @@ Consistent with `docs/master-acceptance-register.md` and
 `docs/release-status.md`: research INCONCLUSIVE/negative; holdout
 SEALED_NOT_EVALUATED; Upstox read-only V2 REST with no V3 endpoint call;
 V3 limited to CSV fixture-schema normalisation; FYERS profile probe only;
-no streaming; W1-A/B/C offline public-master evidence (14 tests, four
+no streaming; W1-A/B/C offline public-master evidence (28 tests, four
 bundled snapshots, 9,926 VERIFIED / 174 UNMAPPED) with W1-D effective
 dating PENDING and no full W1 exit; paper OMS not operational; power-loss
 durability NOT PROVEN; intraday/HFT UNSUPPORTED; multi-asset NOT
 ESTABLISHED; live execution DISABLED; decision NO TRADE. The R7 remediations,
-R8.1 corrections, R8.3/W1 A/B/C work, R8.4 and the reorganized governance
-records are included. At PR #58 (HISTORICAL) hosted CI runs `45969369813`
-and `45969624206` passed; at PR #61 (HISTORICAL) hosted CI run `46007348694`
+R8.1 corrections, R8.3/W1 A/B/C work, R8.4, R8.4.1 and the reorganized
+governance records are included. R8.4.1 (PR #63) is COMPLETE and is the
+CURRENT RELEASE until PR #64 merges; R8.4.2 / PR #64 is IN PROGRESS with no
+exit claim. At PR #58 (HISTORICAL) hosted CI runs `45969369813` and
+`45969624206` passed; at PR #61 (HISTORICAL) hosted CI run `46007348694`
 passed with native-q skipped/GATED_NOT_RUN; at PR #62 (HISTORICAL) hosted CI
-run `46015103880` passed with native-q skipped/GATED_NOT_RUN and release
-scope PORTABLE_RESEARCH. Current main SHA, CI runs and bundle digest are
-recorded in the final release bundle `MANIFEST.md` (external artifact).
+run `46015103880` passed with native-q skipped/GATED_NOT_RUN; at PR #63
+(HISTORICAL) hosted CI run `46023401318` passed with native-q
+skipped/GATED_NOT_RUN. Release scope at PR #62 and PR #63 was
+PORTABLE_RESEARCH. Current main SHA, CI runs and bundle digest are recorded
+in the current final release bundle `MANIFEST.md` (external artifact,
+regenerated after R8.4.2).

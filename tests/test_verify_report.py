@@ -33,6 +33,9 @@ REQUIRED_NAMES = (
 )
 ALLOWED_STATUSES = {PASS, FAIL, GATED, NOT_APPLICABLE}
 COMMIT = "abc123def456"
+SKIP_ID = "tests/test_native_q_ci.py::test_skipped_case"
+OTHER_SKIP_ID = "tests/test_native_q_ci.py::test_other_case"
+APPROVED_REASON = "governed fixture unavailable"
 RUN_ID = 12345
 RUN_URL = "https://github.com/siebengestirn/quant/actions/runs/12345"
 OMIT = object()
@@ -528,6 +531,11 @@ def test_report_has_versioned_schema_and_all_gates(
             "verify_report_tests",
             "tests/test_verify_report.py",
         ),
+        (
+            VERIFY_REPORT.run_native_q_checker_tests,
+            "native_q_checker_tests",
+            "tests/test_native_q_ci.py",
+        ),
     ],
 )
 def test_new_pytest_gates_reset_addopts(
@@ -615,3 +623,236 @@ def test_show_report_renders_recorded_native_reason(
     output = capsys.readouterr().out
     assert "Native q tier: PASS (recorded explanation)" in output
     assert "GATED / NOT RUN" not in output
+
+
+def fake_pytest_step(monkeypatch: pytest.MonkeyPatch, output: str) -> None:
+    """Capture pytest steps while returning a fixed synthetic output."""
+
+    def step(name: str, argv: list[str], env=None) -> dict:
+        del env
+        return {
+            "name": name,
+            "command": VERIFY_REPORT.command_text(argv),
+            "exit_code": 0,
+            "counts": {},
+            "result": PASS,
+            "output": output,
+        }
+
+    monkeypatch.setattr(VERIFY_REPORT, "step_result", step)
+
+
+def test_parse_pytest_records_every_outcome() -> None:
+    """All five counts are parsed, with singular errors normalized."""
+    output = (
+        f"SKIPPED [1] {SKIP_ID}:42: {APPROVED_REASON}\n"
+        "3 passed, 1 failed, 2 errors, 1 skipped in 0.1s"
+    )
+    assert VERIFY_REPORT.parse_pytest(output) == {
+        "passed": 3,
+        "failed": 1,
+        "errors": 2,
+        "skipped": 1,
+        "total": 7,
+    }
+    assert VERIFY_REPORT.parse_pytest("2 passed, 1 error in 0.1s") == {
+        "passed": 2,
+        "failed": 0,
+        "errors": 1,
+        "skipped": 0,
+        "total": 3,
+    }
+
+
+def test_native_q_checker_gate_is_required_and_command_is_exact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The checker suite is mandatory and runs the exact pinned command."""
+    calls: list[list[str]] = []
+    fake_pytest_step(monkeypatch, "8 passed in 0.1s")
+    original = VERIFY_REPORT.step_result
+
+    def recording_step(name: str, argv: list[str], env=None) -> dict:
+        calls.append(list(argv))
+        return original(name, argv, env)
+
+    monkeypatch.setattr(VERIFY_REPORT, "step_result", recording_step)
+    gate = VERIFY_REPORT.run_native_q_checker_tests()
+    assert "native_q_checker_tests" in REQUIRED_GATES
+    assert gate["name"] == "native_q_checker_tests"
+    assert gate["result"] == PASS
+    assert calls[0] == [
+        "python3",
+        "-m",
+        "pytest",
+        "tests/test_native_q_ci.py",
+        "-o",
+        "addopts=",
+        "-q",
+    ]
+    assert gate["command"] == (
+        "python3 -m pytest tests/test_native_q_ci.py -o addopts='' -q"
+    )
+    assert gate["counts"] == {
+        "passed": 8,
+        "failed": 0,
+        "errors": 0,
+        "skipped": 0,
+        "total": 8,
+    }
+
+
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        ("8 passed in 0.1s", PASS),
+        ("7 passed, 1 skipped in 0.1s", FAIL),
+        ("7 passed, 1 failed in 0.1s", FAIL),
+        ("7 passed, 1 error in 0.1s", FAIL),
+        ("no tests ran in 0.05s", FAIL),
+    ],
+    ids=["clean", "hidden-skip", "failure", "error", "zero-tests"],
+)
+def test_python_gate_policy_requires_clean_executed_tests(
+    monkeypatch: pytest.MonkeyPatch, output: str, expected: str
+) -> None:
+    """A Python gate passes only on executed, clean, unskipped tests."""
+    fake_pytest_step(monkeypatch, output)
+    gate = VERIFY_REPORT.run_native_q_checker_tests()
+    assert gate["result"] == expected
+    assert set(VERIFY_REPORT.PYTEST_COUNT_KEYS) <= gate["counts"].keys()
+
+
+def test_allowlisted_skip_is_accepted_with_test_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A documented skip with a matching test ID does not fail the gate."""
+    allowed = [{"test_id": SKIP_ID, "reason": APPROVED_REASON}]
+    output = (
+        f"SKIPPED [1] {SKIP_ID}:42: {APPROVED_REASON}\n"
+        "7 passed, 1 skipped in 0.1s"
+    )
+    fake_pytest_step(monkeypatch, output)
+    gate = VERIFY_REPORT.run_native_q_checker_tests(allowed)
+    assert gate["result"] == PASS
+    assert gate["counts"]["skipped"] == 1
+    assert gate["allowed_skips"] == allowed
+
+
+def test_unapproved_hidden_skip_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A skip whose ID is absent from the allowlist fails the gate."""
+    allowed = [{"test_id": SKIP_ID, "reason": APPROVED_REASON}]
+    output = (
+        f"SKIPPED [1] {OTHER_SKIP_ID}:42: {APPROVED_REASON}\n"
+        "7 passed, 1 skipped in 0.1s"
+    )
+    fake_pytest_step(monkeypatch, output)
+    gate = VERIFY_REPORT.run_native_q_checker_tests(allowed)
+    assert gate["result"] == FAIL
+    assert gate["counts"]["skipped"] == 1
+
+
+def test_hidden_skip_outside_suite_is_not_approved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An allowlist entry for another suite cannot approve a hidden skip."""
+    allowed = [
+        {"test_id": "tests/test_research.py::test_other", "reason": "other"}
+    ]
+    fake_pytest_step(monkeypatch, "7 passed, 1 skipped in 0.1s")
+    gate = VERIFY_REPORT.run_native_q_checker_tests(allowed)
+    assert gate["result"] == FAIL
+
+
+def test_skip_environment_requests_ids_without_changing_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skip IDs are captured via the environment, not the pinned argv."""
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-p no:cacheprovider")
+    env = VERIFY_REPORT.pytest_environment()
+    assert "-rs" in env["PYTEST_ADDOPTS"]
+    assert "-p no:cacheprovider" in env["PYTEST_ADDOPTS"]
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"test_id": SKIP_ID},
+        {"reason": APPROVED_REASON},
+        {"test_id": SKIP_ID, "reason": 7},
+        {"test_id": SKIP_ID, "reason": ""},
+        {"test_id": SKIP_ID, "reason": APPROVED_REASON, "extra": 1},
+        "not-a-record",
+    ],
+)
+def test_malformed_allowlist_records_are_rejected(entry: object) -> None:
+    """Allowlist entries must carry a test ID and a non-empty reason."""
+    with pytest.raises(ValueError):
+        VERIFY_REPORT.allowed_skip_entries([entry])
+
+
+def test_duplicate_allowlist_entries_are_rejected() -> None:
+    """The same skip cannot be approved twice."""
+    entry = {"test_id": SKIP_ID, "reason": APPROVED_REASON}
+    with pytest.raises(ValueError, match="duplicate"):
+        VERIFY_REPORT.allowed_skip_entries([entry, dict(entry)])
+
+
+def test_report_config_is_embedded_and_passed_to_gates(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A JSON config is validated, embedded and shared with every gate."""
+    allowed = [{"test_id": SKIP_ID, "reason": APPROVED_REASON}]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps({"allowed_skips": allowed}), encoding="utf-8"
+    )
+    seen: dict = {}
+
+    def fake_gates(commit: str, scope: str, config: dict) -> list:
+        del commit, scope
+        seen["config"] = config
+        return []
+
+    monkeypatch.setattr(VERIFY_REPORT, "run_gates", fake_gates)
+    monkeypatch.setattr(VERIFY_REPORT, "git_commit", lambda: COMMIT)
+    monkeypatch.setattr(VERIFY_REPORT, "toolchain", lambda: {"python": "3"})
+    output = tmp_path / "report.json"
+    assert VERIFY_REPORT.run_report(output, config=config_path) == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["config"] == {"allowed_skips": allowed}
+    assert seen["config"] == report["config"]
+
+
+def test_run_gates_includes_every_required_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The report always contains the native-q checker gate."""
+    mapping = {
+        "run_portable": "portable_cpp",
+        "run_sanitizer": "sanitizer",
+        "run_pytest": "portable_pytest",
+        "run_w1_tests": "w1",
+        "run_release_bundle_tests": "release_bundle_tests",
+        "run_verify_report_tests": "verify_report_tests",
+        "run_native_q_checker_tests": "native_q_checker_tests",
+        "run_style": "style",
+        "run_freshness": "state_freshness",
+        "run_audit": "terminology_audit",
+        "hosted_gate": "hosted_ci",
+    }
+
+    def make_fake(name: str):
+        def fake(*args, **kwargs) -> dict:
+            del args, kwargs
+            return {"name": name, "result": PASS, "counts": {}}
+
+        return fake
+
+    for runner, gate_name in mapping.items():
+        monkeypatch.setattr(VERIFY_REPORT, runner, make_fake(gate_name))
+    gates = VERIFY_REPORT.run_gates(COMMIT)
+    assert {gate["name"] for gate in gates} == set(REQUIRED_GATES)
+    assert len(gates) == 11

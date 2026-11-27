@@ -33,6 +33,13 @@ REQUIRED_GATES = RELEASE_BUNDLE.REQUIRED_GATES
 ORIGINAL_BYTES = b"pinned original snapshot bytes\n"
 DECODED_BYTES = b"pinned decoded snapshot bytes\n"
 GATED_REASON = "native-q feature is not enabled; hosted job skipped"
+GATE_TEST_FILES = {
+    "portable_pytest": "tests/test_dataset_contract.py",
+    "w1": "tests/test_instrument_master.py",
+    "release_bundle_tests": "tests/test_release_bundle.py",
+    "verify_report_tests": "tests/test_verify_report.py",
+    "native_q_checker_tests": "tests/test_native_q_ci.py",
+}
 PASS_REASON = (
     "native-q integration tests executed: 8 passed, 0 skipped, 0 failed"
 )
@@ -241,6 +248,19 @@ def test_commit_chain_requires_matching_attestations() -> None:
         RELEASE_BUNDLE.validate_commit_chain(report, COMMIT)
 
 
+def pytest_counts(
+    passed: int, *, failed: int = 0, errors: int = 0, skipped: int = 0
+) -> dict:
+    """Return a complete five-count record for one Python gate."""
+    return {
+        "passed": passed,
+        "failed": failed,
+        "errors": errors,
+        "skipped": skipped,
+        "total": passed + failed + errors + skipped,
+    }
+
+
 def make_gate(name: str, counts: dict, result: str = "PASS") -> dict:
     """Build a gate with command, execution metadata and typed counts."""
     return {
@@ -323,10 +343,11 @@ def sample_report(commit: str, *, native: dict | None = None) -> dict:
             "sanitizer_ctest_percent": 100,
             "sanitizer_ctest_total": 3,
         },
-        "portable_pytest": {"passed": 51},
-        "w1": {"passed": 11},
-        "release_bundle_tests": {"passed": 44},
-        "verify_report_tests": {"passed": 120},
+        "portable_pytest": pytest_counts(51),
+        "w1": pytest_counts(14),
+        "release_bundle_tests": pytest_counts(74),
+        "verify_report_tests": pytest_counts(122),
+        "native_q_checker_tests": pytest_counts(8),
         "style": {"pass_checks": 8, "checks_total": 8},
         "state_freshness": {"self_test": "PASS", "findings": 0},
         "terminology_audit": {"findings": 0, "binding": 0, "advisory": 0},
@@ -351,6 +372,9 @@ def sample_report(commit: str, *, native: dict | None = None) -> dict:
     gates = [
         make_gate(name, gate_counts) for name, gate_counts in counts.items()
     ]
+    for name, test_file in GATE_TEST_FILES.items():
+        gate = next(item for item in gates if item["name"] == name)
+        gate["command"] = f"python3 -m pytest {test_file} -o addopts='' -q"
     hosted = host_gate({"gates": gates})
     hosted["native_q"] = native if native is not None else gated_native()
     return {
@@ -363,6 +387,7 @@ def sample_report(commit: str, *, native: dict | None = None) -> dict:
         "completed_at": "2026-11-27T00:01:00Z",
         "toolchain": {"python": "Python 3.12"},
         "presets": ["portable-ci", "sanitizers"],
+        "config": {"allowed_skips": []},
         "overall": "PASS",
         "gates": gates,
     }
@@ -785,3 +810,262 @@ def write_test_bundle(
     output = workspace / "bundle.zip"
     RELEASE_BUNDLE.create_zip(quant_root, output)
     return output
+
+
+ALLOWED_SKIP_ID = "tests/test_dataset_contract.py::test_skipped_case"
+OTHER_SKIP_ID = "tests/test_dataset_contract.py::test_other_case"
+SKIP_REASON = "governed fixture unavailable"
+
+
+def named_gate(report: dict, name: str) -> dict:
+    """Return one gate from a report by name."""
+    return next(gate for gate in report["gates"] if gate["name"] == name)
+
+
+def manifest_for(report: dict) -> str:
+    """Render a manifest from a sample report for offline assertions."""
+    return RELEASE_BUNDLE.render_manifest(
+        "2026-11-27T00:00:00Z",
+        COMMIT,
+        1,
+        (1, 1),
+        0,
+        "main only (local and remote)",
+        "PR required.",
+        report=report,
+        rows=[],
+    )
+
+
+def add_skip(
+    report: dict, test_id: str | None = None, name: str = "portable_pytest"
+) -> None:
+    """Record one skipped test in a gate's counts and step output."""
+    gate = named_gate(report, name)
+    gate["counts"] = pytest_counts(51, skipped=1)
+    if test_id is not None:
+        gate["steps"][0]["output"] = (
+            f"SKIPPED [1] {test_id}:42: {SKIP_REASON}\n"
+            "51 passed, 1 skipped in 0.1s"
+        )
+
+
+def test_native_q_checker_gate_is_versioned() -> None:
+    """The new checker gate cannot be omitted, duplicated or renamed."""
+    report = sample_report(COMMIT)
+    report["gates"] = [
+        gate
+        for gate in report["gates"]
+        if gate["name"] != "native_q_checker_tests"
+    ]
+    with pytest.raises(ValueError, match="missing required gates"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+    report = sample_report(COMMIT)
+    report["gates"].append(dict(named_gate(report, "native_q_checker_tests")))
+    with pytest.raises(ValueError, match="duplicate gate names"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+    report = sample_report(COMMIT)
+    named_gate(report, "native_q_checker_tests")["name"] = "unlisted"
+    with pytest.raises(ValueError, match="unknown gate names"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+@pytest.mark.parametrize("name", RELEASE_BUNDLE.PYTHON_GATES)
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    [
+        ("zero", "no tests passed"),
+        ("failed", "failed or errored"),
+        ("errors", "failed or errored"),
+        ("skipped", "unapproved skip"),
+        ("total", "inconsistent test totals"),
+    ],
+)
+def test_python_gate_counts_must_be_clean(
+    name: str, mutate: str, match: str
+) -> None:
+    """Every Python gate needs executed, clean, untallied counts."""
+    report = sample_report(COMMIT)
+    counts = named_gate(report, name)["counts"]
+    baseline = dict(counts)
+    if mutate == "zero":
+        counts.update(pytest_counts(0))
+    elif mutate == "failed":
+        counts.update(pytest_counts(baseline["passed"], failed=1))
+    elif mutate == "errors":
+        counts.update(pytest_counts(baseline["passed"], errors=1))
+    elif mutate == "skipped":
+        counts.update(pytest_counts(baseline["passed"], skipped=1))
+    else:
+        counts["total"] += 1
+    with pytest.raises(ValueError, match=match):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+def test_allowlisted_skip_passes_and_is_rendered() -> None:
+    """An approved skip passes and appears with counts in the manifest."""
+    report = sample_report(COMMIT)
+    add_skip(report, ALLOWED_SKIP_ID)
+    report["config"]["allowed_skips"] = [
+        {"test_id": ALLOWED_SKIP_ID, "reason": SKIP_REASON}
+    ]
+    assert RELEASE_BUNDLE.validate_report(report, COMMIT) is report
+    manifest = manifest_for(report)
+    assert "51/0/0/1/52" in manifest
+    assert "1 allowlisted skip(s)" in manifest
+    assert ALLOWED_SKIP_ID in manifest
+    assert SKIP_REASON in manifest
+
+
+@pytest.mark.parametrize("test_id", [None, OTHER_SKIP_ID])
+def test_unapproved_skip_fails(test_id: str | None) -> None:
+    """A skip without an authored allowlist fails, even when hidden."""
+    report = sample_report(COMMIT)
+    add_skip(report, test_id)
+    with pytest.raises(ValueError, match="unapproved skip"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+def test_hidden_skip_outside_gate_suite_fails() -> None:
+    """An allowlist for another test file cannot approve a hidden skip."""
+    report = sample_report(COMMIT)
+    add_skip(report)
+    report["config"]["allowed_skips"] = [
+        {"test_id": "tests/test_research.py::test_other", "reason": "other"}
+    ]
+    with pytest.raises(ValueError, match="unapproved skip"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+def test_hidden_skip_id_mismatch_fails() -> None:
+    """An allowlist for another test cannot approve a hidden skip."""
+    report = sample_report(COMMIT)
+    add_skip(report, OTHER_SKIP_ID)
+    report["config"]["allowed_skips"] = [
+        {"test_id": ALLOWED_SKIP_ID, "reason": SKIP_REASON}
+    ]
+    with pytest.raises(ValueError, match="unapproved skip"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {},
+        {"allowed_skips": 7},
+        {"allowed_skips": [{"test_id": ALLOWED_SKIP_ID}]},
+        {"allowed_skips": [{"test_id": ALLOWED_SKIP_ID, "reason": ""}]},
+        {"allowed_skips": [{"test_id": ALLOWED_SKIP_ID, "reason": "x"}] * 2},
+        {"allowed_skips": [], "extra": 1},
+    ],
+    ids=[
+        "missing-field",
+        "wrong-type",
+        "missing-reason",
+        "blank-reason",
+        "duplicate",
+        "unknown-field",
+    ],
+)
+def test_malformed_report_config_fails(config: dict) -> None:
+    """Only the documented allowlist shape can approve a skip."""
+    report = sample_report(COMMIT)
+    report["config"] = config
+    with pytest.raises(ValueError, match="config|allowed_skips"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+def test_missing_report_config_fails() -> None:
+    """The report config is mandatory evidence, even without skips."""
+    report = sample_report(COMMIT)
+    del report["config"]
+    with pytest.raises(ValueError, match="missing report config"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+def test_manifest_reports_new_gate_and_skip_counts() -> None:
+    """Verification text records all five counts for the new gate."""
+    manifest = manifest_for(sample_report(COMMIT))
+    assert (
+        "Native-q checker suite (offline): 8/0/0/0/8 "
+        "(passed/failed/errors/skipped/total)."
+    ) in manifest
+    assert (
+        "Python gate skip policy: 0 allowlisted skip(s): none; "
+        "unapproved skips FAIL."
+    ) in manifest
+    for name in (
+        "Portable pytest",
+        "Pinned instrument-master (W1)",
+        "Release bundle suite",
+        "Verification report suite",
+    ):
+        assert name in manifest
+
+
+@pytest.mark.parametrize(
+    "mutate", ["manifest-counts", "manifest-skips", "embedded-report"]
+)
+def test_report_manifest_mismatch_fails(
+    snapshots: SnapshotFixture,
+    workspace: Path,
+    mutate: str,
+) -> None:
+    """verify rejects a manifest or report that contradicts its evidence."""
+    bundle = write_test_bundle(workspace, snapshots, corrupt=False)
+    with zipfile.ZipFile(bundle) as archive:
+        payloads = {name: archive.read(name) for name in archive.namelist()}
+    if mutate == "embedded-report":
+        report = json.loads(payloads[RELEASE_BUNDLE.REPORT_ENTRY])
+        named_gate(report, "native_q_checker_tests")["counts"]["skipped"] = 1
+        payloads[RELEASE_BUNDLE.REPORT_ENTRY] = json.dumps(
+            report, sort_keys=True
+        ).encode("utf-8")
+    else:
+        text = payloads["quant/MANIFEST.md"].decode("utf-8")
+        if mutate == "manifest-counts":
+            text = text.replace(
+                "Native-q checker suite (offline): 8/0/0/0/8",
+                "Native-q checker suite (offline): 9/0/0/0/9",
+            )
+        else:
+            text = text.replace(
+                "Python gate skip policy: 0 allowlisted skip(s)",
+                "Python gate skip policy: 1 allowlisted skip(s)",
+            )
+        payloads["quant/MANIFEST.md"] = text.encode("utf-8")
+    with zipfile.ZipFile(bundle, "w") as archive:
+        for name, payload in payloads.items():
+            archive.writestr(name, payload)
+    result = RELEASE_BUNDLE.verify_bundle(bundle)
+    assert not result["ok"]
+    assert any(
+        "verification totals" in error or "report error" in error
+        for error in result["errors"]
+    ), result["errors"]
+
+
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    [
+        ("result", "native q result contradicts"),
+        ("conclusion", "native q conclusion contradicts"),
+        ("tests_executed", "native q count mismatch"),
+        ("invalid-count", "native q invalid count"),
+    ],
+)
+def test_native_q_invalid_job_state_fails(mutate: str, match: str) -> None:
+    """Contradictory native-q records cannot support a release."""
+    report = sample_report(COMMIT)
+    native = host_gate(report)["native_q"]
+    counts = host_gate(report)["counts"]
+    if mutate == "result":
+        host_gate(report)["native_q"] = passed_native()
+    elif mutate == "conclusion":
+        counts["native_q_conclusion"] = "success"
+    elif mutate == "tests_executed":
+        counts["native_q_tests_executed"] = 8
+    else:
+        native["tests_skipped"] = "0"
+    with pytest.raises(ValueError, match=match):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)

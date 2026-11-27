@@ -39,6 +39,8 @@ REAL_DOWNLOAD = fetcher.download
 
 PROVENANCE = ROOT / "governance" / "instrument-master-snapshots.json"
 DATA = ROOT / "data" / "instrument-master"
+EVIDENCE = ROOT / fetcher.BUNDLE_SNAPSHOT_DIR
+BUNDLE_ENV = fetcher.BUNDLE_ENV
 METAS = im.load_provenance(PROVENANCE)
 MARUTI_ISIN = "INE585B01010"
 MARUTI_KEY = f"NSE_EQ|{MARUTI_ISIN}"
@@ -67,33 +69,37 @@ def _block_network() -> None:
         yield
 
 
+def _prepare_snapshots(
+    data_root: Path, evidence_root: Path, bundle_path: str
+) -> Path:
+    """Resolve offline bytes or fail with the exact recovery command."""
+    try:
+        source = fetcher.resolve_evidence(
+            data_root, evidence_root, PROVENANCE, bundle_path
+        )
+    except fetcher.EvidenceUnavailable as exc:
+        pytest.fail(str(exc))
+    return source.root
+
+
 @pytest.fixture(scope="session", autouse=True)
 def pinned_snapshots() -> None:
-    """Use local bytes or extract a bundle; never download on the test path."""
-    if _local_available():
-        return
-    bundle_path = os.environ.get("QUANT_RELEASE_BUNDLE", "")
-    if not bundle_path:
-        pytest.fail(
-            "Pinned instrument snapshots are absent or corrupt. Set "
-            "QUANT_RELEASE_BUNDLE to a release ZIP containing the pinned "
-            "snapshots, or explicitly run "
-            "'python3 scripts/fetch_instrument_snapshots.py fetch'. "
-            "Tests never download snapshots."
-        )
-    fetcher.extract_from_bundle(Path(bundle_path), DATA, PROVENANCE)
-    assert _local_available()
+    """Prefer local bytes, then extracted evidence, then an offline ZIP."""
+    global DATA
+    DATA = _prepare_snapshots(DATA, EVIDENCE, os.environ.get(BUNDLE_ENV, ""))
 
 
 @pytest.fixture(scope="session", name="upstox_data")
-def _upstox_fixture():
+def _upstox_fixture(pinned_snapshots):
     """Return the parsed pinned Upstox snapshot."""
+    del pinned_snapshots
     return _parse("upstox")
 
 
 @pytest.fixture(scope="session", name="fyers_data")
-def _fyers_fixture():
+def _fyers_fixture(pinned_snapshots):
     """Return the parsed pinned FYERS snapshot."""
+    del pinned_snapshots
     return _parse("fyers")
 
 
@@ -804,3 +810,224 @@ def test_real_bundle_extraction_restores_all_four_snapshots(tmp_path):
     )
     assert result == 0
     assert all(fetcher.verify_local(meta, output) for meta in metas)
+
+
+def test_evidence_resolution_prefers_verified_local_bytes(tmp_path):
+    """Valid local bytes win over an evidence directory or a bundle."""
+    source = fetcher.resolve_evidence(
+        DATA, tmp_path / "evidence", PROVENANCE, ""
+    )
+    assert source.root == DATA
+    assert source.source == fetcher.SOURCE_DATA
+    assert source.extraction_command == ""
+
+
+def test_extracted_evidence_needs_no_env_var_and_no_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A clean checkout with extracted bundle evidence resolves offline."""
+    evidence = tmp_path / "evidence" / "instrument-master"
+    _copy_pinned_bytes(evidence)
+    monkeypatch.delenv(BUNDLE_ENV, raising=False)
+
+    def forbidden(*args, **kwargs) -> None:
+        raise AssertionError("extraction must not run with valid evidence")
+
+    monkeypatch.setattr(fetcher, "main", forbidden)
+    assert _prepare_snapshots(tmp_path / "empty-data", evidence, "") == evidence
+    source = fetcher.resolve_evidence(
+        tmp_path / "empty-data", evidence, PROVENANCE, ""
+    )
+    assert source.root == evidence
+    assert source.source == fetcher.SOURCE_EVIDENCE
+    assert source.extraction_command == ""
+    assert all(
+        fetcher.verify_local(meta, evidence)
+        for meta in fetcher.load_pins(PROVENANCE)
+    )
+
+
+def test_bundle_env_var_is_extracted_offline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A release ZIP named by the env var is extracted by the CLI command."""
+    provenance, bundle = _mini_bundle(tmp_path)
+    data = tmp_path / "env-data"
+    real_main = fetcher.main
+    calls: list[list[str]] = []
+
+    def recording_main(argv: list[str]) -> int:
+        calls.append(list(argv))
+        assert argv[0] == "extract"
+        return real_main(argv)
+
+    monkeypatch.setattr(fetcher, "main", recording_main)
+    monkeypatch.setenv(BUNDLE_ENV, str(bundle))
+    source = fetcher.resolve_evidence(
+        data, tmp_path / "no-evidence", provenance, None
+    )
+    assert source.root == data
+    assert source.source == fetcher.SOURCE_BUNDLE
+    assert "extract --from-bundle" in source.extraction_command
+    assert calls == [fetcher.extract_argv(bundle, data, provenance)]
+    assert all(
+        fetcher.verify_local(meta, data)
+        for meta in fetcher.load_pins(provenance)
+    )
+
+
+def test_missing_evidence_fails_with_precise_recovery_commands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No usable evidence fails with the exact restore-and-verify commands."""
+    monkeypatch.delenv(BUNDLE_ENV, raising=False)
+    with pytest.raises(fetcher.EvidenceUnavailable) as exc:
+        fetcher.resolve_evidence(
+            tmp_path / "data", tmp_path / "evidence", PROVENANCE, ""
+        )
+    message = str(exc.value)
+    for token in ("extract --from-bundle", "verify", "pytest", "network"):
+        assert token in message
+    with pytest.raises(pytest.fail.Exception) as failed:
+        _prepare_snapshots(tmp_path / "data", tmp_path / "evidence", "")
+    assert BUNDLE_ENV in str(failed.value)
+
+
+def test_tampered_snapshot_fails_resolution_and_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A modified snapshot is neither resolved nor reported as verified."""
+    monkeypatch.delenv(BUNDLE_ENV, raising=False)
+    data = tmp_path / "data"
+    _copy_pinned_bytes(data)
+    meta = fetcher.load_pins(PROVENANCE)[0]
+    target = fetcher.paths(meta, data)[1]
+    payload = target.read_bytes()
+    target.write_bytes(payload[:-1] + bytes([payload[-1] ^ 0x01]))
+    assert not fetcher.verify_local(meta, data)
+    with pytest.raises(fetcher.EvidenceUnavailable):
+        fetcher.resolve_evidence(data, tmp_path / "no-evidence", PROVENANCE, "")
+    output = tmp_path / "tampered.json"
+    assert (
+        fetcher.main(
+            [
+                "evidence-report",
+                "--output-report",
+                str(output),
+                "--data-root",
+                str(data),
+                "--evidence-root",
+                str(tmp_path / "no-evidence"),
+                "--provenance",
+                str(PROVENANCE),
+            ]
+        )
+        == 1
+    )
+    # A report forced over the known root must still expose the failure.
+    monkeypatch.setattr(
+        fetcher,
+        "resolve_evidence",
+        lambda *args, **kwargs: fetcher.EvidenceSource(
+            data, fetcher.SOURCE_DATA, ""
+        ),
+    )
+    report, code = fetcher.evidence_report(
+        output, data, tmp_path / "no-evidence", PROVENANCE, ""
+    )
+    assert code == 1
+    assert report["verification_status"] == fetcher.FAIL
+    entry = next(
+        item
+        for item in report["snapshots"]
+        if item["provider"] == meta.provider
+    )
+    assert entry["verification_status"] == fetcher.FAIL
+    assert entry["decoded"]["verification"] == fetcher.FAIL
+    assert entry["decoded"]["bytes"] == meta.decoded_bytes
+
+
+def test_evidence_report_contents_match_pinned_digests(tmp_path: Path) -> None:
+    """The JSON report records exact paths, byte counts and digests."""
+    output = tmp_path / "assurance" / "instrument-evidence.json"
+    report, code = fetcher.evidence_report(
+        output, DATA, tmp_path / "evidence", PROVENANCE, ""
+    )
+    assert code == 0
+    text = output.read_text(encoding="utf-8")
+    assert text == json.dumps(report, indent=2, sort_keys=True) + "\n"
+    assert report["schema_version"] == fetcher.REPORT_SCHEMA_VERSION
+    assert report["verification_status"] == fetcher.PASS
+    assert report["provenance_source"] == fetcher.SOURCE_DATA
+    assert report["extraction_command"] == ""
+    assert report["snapshot_count"] == 2
+    assert {item["provider"] for item in report["snapshots"]} == {
+        "upstox",
+        "fyers",
+    }
+    for meta in fetcher.load_pins(PROVENANCE):
+        entry = next(
+            item
+            for item in report["snapshots"]
+            if item["provider"] == meta.provider
+        )
+        assert entry["market_date"] == meta.market_date
+        assert entry["provenance_source"] == fetcher.SOURCE_DATA
+        original, decoded = fetcher.paths(meta, DATA)
+        for kind, path, size, digest in (
+            (
+                "original",
+                original,
+                meta.original_bytes,
+                meta.original_sha256,
+            ),
+            ("decoded", decoded, meta.decoded_bytes, meta.decoded_sha256),
+        ):
+            record = entry[kind]
+            assert Path(record["path"]) == path.resolve()
+            assert (
+                record["relative_path"]
+                == path.resolve().relative_to(ROOT).as_posix()
+            )
+            assert record["bytes"] == size
+            assert record["sha256"] == digest
+            assert record["expected_bytes"] == size
+            assert record["expected_sha256"] == digest
+            assert record["verification"] == fetcher.PASS
+
+
+def test_evidence_report_cli_uses_bundle_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The evidence-report CLI works through the env-var bundle path."""
+    provenance, bundle = _mini_bundle(tmp_path)
+    monkeypatch.setenv(BUNDLE_ENV, str(bundle))
+    output = tmp_path / "assurance" / "instrument-evidence.json"
+    code = fetcher.main(
+        [
+            "evidence-report",
+            "--output-report",
+            str(output),
+            "--data-root",
+            str(tmp_path / "cli-data"),
+            "--evidence-root",
+            str(tmp_path / "no-evidence"),
+            "--provenance",
+            str(provenance),
+        ]
+    )
+    assert code == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["verification_status"] == fetcher.PASS
+    assert report["provenance_source"] == fetcher.SOURCE_BUNDLE
+    assert "extract --from-bundle" in report["extraction_command"]
+
+
+def test_evidence_report_command_is_registered() -> None:
+    """The report command has an explicit, overridable output path."""
+    args = fetcher.parse_args(
+        ["evidence-report", "--output-report", "/tmp/report.json"]
+    )
+    assert args.command == "evidence-report"
+    assert args.output_report == Path("/tmp/report.json")
+    assert args.bundle is None

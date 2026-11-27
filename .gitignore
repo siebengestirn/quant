@@ -4,6 +4,7 @@ build-san/
 build-kdbx/
 build-*/
 data/
+evidence/
 *.o
 *.a
 quant

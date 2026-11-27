@@ -3,6 +3,7 @@
 
 Usage:
   python3 scripts/verify_report.py run [--output PATH] [--scope SCOPE]
+      [--config PATH]
   python3 scripts/verify_report.py show [--path PATH]
 
 Every gate is executed from the repository root. The report records the
@@ -12,6 +13,14 @@ release scope permits that status. A native-q PASS requires a successful
 job with executed integration tests and zero skipped tests; every other
 conclusion or evidence state is FAIL. Skipped jobs never add to successful
 test counts. The report is written even when a gate fails.
+
+The embedded ``config`` object is the only place that may approve a skipped
+Python test. Its ``allowed_skips`` field is a list of records with a
+``test_id`` and a non-empty ``reason``; any other skip fails its gate and
+the release bundle validator. The mandated pytest commands remain unchanged;
+pytest receives ``-rs`` through the environment so that skip IDs and reasons
+are captured for the allowlist check. The same config and counts are carried
+into the release bundle manifest so verify can compare them exactly.
 """
 
 from __future__ import annotations
@@ -59,11 +68,12 @@ REQUIRED_GATES = frozenset(
         "sanitizer",
         "portable_pytest",
         "w1",
-        "release_bundle_tests",
-        "verify_report_tests",
         "style",
         "state_freshness",
         "terminology_audit",
+        "release_bundle_tests",
+        "verify_report_tests",
+        "native_q_checker_tests",
         "hosted_ci",
     }
 )
@@ -75,10 +85,18 @@ PYTEST_FILES = (
 W1_TEST_FILES = ("tests/test_instrument_master.py",)
 RELEASE_BUNDLE_TEST_FILES = ("tests/test_release_bundle.py",)
 VERIFY_REPORT_TEST_FILES = ("tests/test_verify_report.py",)
+NATIVE_Q_CHECKER_TEST_FILES = ("tests/test_native_q_ci.py",)
 PYTEST_RESET = "addopts="
+PYTEST_SKIP_FLAGS = "-rs"
+PYTEST_COUNT_KEYS = ("passed", "failed", "errors", "skipped", "total")
+ALLOWED_SKIPS_KEY = "allowed_skips"
+REPORT_CONFIG_KEYS = (ALLOWED_SKIPS_KEY,)
+SKIP_FIELDS = frozenset({"test_id", "reason"})
+ALLOWED_SKIPS: tuple[dict[str, str], ...] = ()
 CHECKS_RE = re.compile(r"checks=(\d+)\s+failures=(\d+)")
 CTEST_RE = re.compile(r"(\d+)%\s+tests passed[^\n]*?\bout of\s+(\d+)")
 PYTEST_TOKENS_RE = re.compile(r"(\d+)\s+(passed|failed|errors?|skipped)")
+SKIPPED_LINE_RE = re.compile(r"SKIPPED \[\d+\]\s+(\S+):\d+:\s*(.*)")
 STYLE_PASS_RE = re.compile(r"^\S+:\s*PASS\s*$", re.MULTILINE)
 STYLE_LINE_RE = re.compile(r"^\S+:\s*(?:PASS|FAIL)\s*$", re.MULTILINE)
 SELF_TEST_RE = re.compile(r"self-test:\s*(PASS|FAIL)")
@@ -189,14 +207,138 @@ def parse_ctest(output: str) -> dict:
 
 
 def parse_pytest(output: str) -> dict:
-    """Parse pytest counts, including its double-quiet progress form."""
-    counts = {
+    """Parse all five pytest outcome counts, including the quiet form."""
+    raw = {
         word: int(number) for number, word in PYTEST_TOKENS_RE.findall(output)
     }
     for line in output.splitlines():
         if "[100%]" in line:
-            counts.setdefault("passed", line.count("."))
+            raw.setdefault("passed", line.count("."))
+    counts = {
+        "passed": raw.get("passed", 0),
+        "failed": raw.get("failed", 0),
+        "errors": raw.get("error", 0) + raw.get("errors", 0),
+        "skipped": raw.get("skipped", 0),
+    }
+    counts["total"] = sum(counts.values())
     return counts
+
+
+def nonempty_text(value: object) -> bool:
+    """Return True for a non-blank string value."""
+    return isinstance(value, str) and bool(value.strip())
+
+
+def allowed_skip_entries(entries: object) -> tuple[dict[str, str], ...]:
+    """Validate the documented allowlist of skipped Python tests."""
+    if entries is None:
+        return ()
+    if isinstance(entries, dict):
+        entries = [
+            {"test_id": key, "reason": value} for key, value in entries.items()
+        ]
+    if not isinstance(entries, (list, tuple)):
+        raise ValueError(f"{ALLOWED_SKIPS_KEY} must be a list of records")
+    result: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError(f"invalid {ALLOWED_SKIPS_KEY} record: {entry!r}")
+        if set(entry) != SKIP_FIELDS:
+            raise ValueError(
+                f"{ALLOWED_SKIPS_KEY} requires test_id and reason: {entry!r}"
+            )
+        if not nonempty_text(entry["test_id"]) or not nonempty_text(
+            entry["reason"]
+        ):
+            raise ValueError(
+                f"incomplete {ALLOWED_SKIPS_KEY} record: {entry!r}"
+            )
+        test_id = entry["test_id"].strip()
+        if test_id in seen:
+            raise ValueError(f"duplicate {ALLOWED_SKIPS_KEY} entry: {test_id}")
+        seen.add(test_id)
+        result.append({"test_id": test_id, "reason": entry["reason"].strip()})
+    return tuple(result)
+
+
+def report_config(config: dict | None = None) -> dict:
+    """Return a validated, JSON-serializable report config object."""
+    source = ALLOWED_SKIPS if config is None else config
+    if isinstance(source, dict):
+        unknown = set(source) - set(REPORT_CONFIG_KEYS)
+        if unknown:
+            raise ValueError(
+                f"unknown report config fields: {', '.join(sorted(unknown))}"
+            )
+        source = source.get(ALLOWED_SKIPS_KEY, ())
+    entries = allowed_skip_entries(source)
+    return {ALLOWED_SKIPS_KEY: [dict(entry) for entry in entries]}
+
+
+def load_report_config(path: Path | None) -> dict:
+    """Load a JSON report config, defaulting to no approved skips."""
+    if path is None:
+        return report_config()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"unreadable report config {path}: {exc}") from exc
+    return report_config(payload)
+
+
+def parse_skipped_tests(output: str) -> list[dict[str, str]]:
+    """Parse pytest's short skip summary into test IDs and reasons."""
+    return [
+        {"test_id": match.group(1), "reason": match.group(2).strip()}
+        for match in SKIPPED_LINE_RE.finditer(output)
+    ]
+
+
+def skip_id_allowed(test_id: str, allowed: tuple[dict[str, str], ...]) -> bool:
+    """Match a skip ID against an allowlisted path, path:line or node ID."""
+    for entry in allowed:
+        candidate = entry["test_id"]
+        if (
+            test_id == candidate
+            or test_id.startswith(candidate + "::")
+            or test_id.startswith(candidate + ":")
+        ):
+            return True
+    return False
+
+
+def pytest_skips_ok(
+    output: str,
+    counts: dict,
+    allowed: tuple[dict[str, str], ...],
+    files: tuple[str, ...] = (),
+) -> bool:
+    """Require every skipped test to be individually allowlisted."""
+    skipped = counts.get("skipped", 0)
+    if skipped == 0:
+        return True
+    observed = parse_skipped_tests(output)
+    if observed:
+        return len(observed) == skipped and all(
+            skip_id_allowed(item["test_id"], allowed) for item in observed
+        )
+    if files:
+        scoped = [
+            entry
+            for entry in allowed
+            if any(entry["test_id"].startswith(path) for path in files)
+        ]
+    else:
+        scoped = list(allowed)
+    return skipped <= len(scoped)
+
+
+def pytest_environment() -> dict[str, str]:
+    """Keep the mandated command while requesting skip IDs from pytest."""
+    current = os.environ.get("PYTEST_ADDOPTS", "").strip()
+    flags = f"{current} {PYTEST_SKIP_FLAGS}".strip()
+    return {**os.environ, "PYTEST_ADDOPTS": flags}
 
 
 def parse_style(output: str) -> dict:
@@ -306,8 +448,13 @@ def run_sanitizer() -> dict:
     return make_gate("sanitizer", [configure, build, binary, ctest], counts, ok)
 
 
-def pytest_gate(name: str, files: tuple[str, ...], step_name: str) -> dict:
-    """Run one pytest suite with repository addopts disabled."""
+def pytest_gate(
+    name: str,
+    files: tuple[str, ...],
+    step_name: str,
+    allowed_skips: object = None,
+) -> dict:
+    """Run one pytest suite with the strict five-count pass policy."""
     argv = [
         "python3",
         "-m",
@@ -317,40 +464,63 @@ def pytest_gate(name: str, files: tuple[str, ...], step_name: str) -> dict:
         PYTEST_RESET,
         "-q",
     ]
-    test = step_result(step_name, argv)
+    test = step_result(step_name, argv, pytest_environment())
     counts = parse_pytest(test["output"])
-    ok = counts.get("passed", 0) > 0 and not any(
-        counts.get(key) for key in ("failed", "error", "errors")
+    source = ALLOWED_SKIPS if allowed_skips is None else allowed_skips
+    allowed = allowed_skip_entries(source)
+    ok = (
+        counts["passed"] > 0
+        and counts["failed"] == 0
+        and counts["errors"] == 0
+        and pytest_skips_ok(test["output"], counts, allowed, files)
     )
     test = finalize(test, ok)
-    return make_gate(name, [test], counts, ok)
+    gate = make_gate(name, [test], counts, ok)
+    gate["allowed_skips"] = [dict(entry) for entry in allowed]
+    return gate
 
 
-def run_pytest() -> dict:
+def run_pytest(allowed_skips: object = None) -> dict:
     """Run the portable Python test subset."""
-    return pytest_gate("portable_pytest", PYTEST_FILES, "portable pytest")
+    return pytest_gate(
+        "portable_pytest", PYTEST_FILES, "portable pytest", allowed_skips
+    )
 
 
-def run_w1_tests() -> dict:
+def run_w1_tests(allowed_skips: object = None) -> dict:
     """Run the pinned instrument-master crosswalk suite."""
-    return pytest_gate("w1", W1_TEST_FILES, "W1 instrument master tests")
+    return pytest_gate(
+        "w1", W1_TEST_FILES, "W1 instrument master tests", allowed_skips
+    )
 
 
-def run_release_bundle_tests() -> dict:
+def run_release_bundle_tests(allowed_skips: object = None) -> dict:
     """Run the offline release bundle suite."""
     return pytest_gate(
         "release_bundle_tests",
         RELEASE_BUNDLE_TEST_FILES,
         "release bundle tests",
+        allowed_skips,
     )
 
 
-def run_verify_report_tests() -> dict:
+def run_verify_report_tests(allowed_skips: object = None) -> dict:
     """Run the offline verification report suite without recursion."""
     return pytest_gate(
         "verify_report_tests",
         VERIFY_REPORT_TEST_FILES,
         "verification report tests",
+        allowed_skips,
+    )
+
+
+def run_native_q_checker_tests(allowed_skips: object = None) -> dict:
+    """Run the native-q result checker's offline test suite."""
+    return pytest_gate(
+        "native_q_checker_tests",
+        NATIVE_Q_CHECKER_TEST_FILES,
+        "native q checker tests",
+        allowed_skips,
     )
 
 
@@ -801,15 +971,19 @@ def hosted_gate(
     return gate
 
 
-def run_gates(commit: str, scope: str = RELEASE_SCOPE) -> list[dict]:
+def run_gates(
+    commit: str, scope: str = RELEASE_SCOPE, config: dict | None = None
+) -> list[dict]:
     """Execute every portable, assurance and hosted verification gate."""
+    allowed = (config or {}).get(ALLOWED_SKIPS_KEY)
     return [
         run_portable(),
         run_sanitizer(),
-        run_pytest(),
-        run_w1_tests(),
-        run_release_bundle_tests(),
-        run_verify_report_tests(),
+        run_pytest(allowed),
+        run_w1_tests(allowed),
+        run_release_bundle_tests(allowed),
+        run_verify_report_tests(allowed),
+        run_native_q_checker_tests(allowed),
         run_style(),
         run_freshness(),
         run_audit(),
@@ -834,11 +1008,19 @@ def write_report(report: dict, path: Path) -> None:
     )
 
 
-def run_report(output: Path, scope: str = RELEASE_SCOPE) -> int:
+def run_report(
+    output: Path,
+    scope: str = RELEASE_SCOPE,
+    config: dict | Path | None = None,
+) -> int:
     """Execute all gates, write a report and return a process exit code."""
     started = utc_now()
     commit = git_commit()
-    gates = run_gates(commit, scope)
+    resolved = load_report_config(config)
+    if config is None:
+        gates = run_gates(commit, scope)
+    else:
+        gates = run_gates(commit, scope, resolved)
     completed = utc_now()
     overall = PASS if all(gate["result"] == PASS for gate in gates) else FAIL
     report = {
@@ -851,6 +1033,7 @@ def run_report(output: Path, scope: str = RELEASE_SCOPE) -> int:
         "completed_at": completed,
         "toolchain": toolchain(),
         "presets": ["portable-ci", "sanitizers"],
+        "config": resolved,
         "overall": overall,
         "gates": gates,
     }
@@ -874,6 +1057,9 @@ def show_report(path: Path) -> int:
     print(f"Completed: {report.get('completed_at', '')}")
     print(f"Toolchain: {report.get('toolchain', {})}")
     print(f"Presets: {', '.join(report.get('presets', []))}")
+    config = report.get("config") or {}
+    skips = config.get(ALLOWED_SKIPS_KEY) or []
+    print(f"Allowed skips: {len(skips)}")
     for gate in report.get("gates", []):
         print(f"- {gate['name']}: {gate['result']} {gate.get('counts', {})}")
     hosted = gate_named(report, "hosted_ci") or {}
@@ -902,6 +1088,11 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=RELEASE_SCOPE,
         help="release scope for native-q qualification",
     )
+    run_parser.add_argument(
+        "--config",
+        type=Path,
+        help="JSON report config with documented allowed_skips records",
+    )
     show_parser = subparsers.add_parser("show", help="summarize a report")
     show_parser.add_argument(
         "--path", type=Path, default=DEFAULT_OUTPUT, help="report JSON path"
@@ -914,7 +1105,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         if args.command == "run":
-            return run_report(args.output, args.scope)
+            return run_report(args.output, args.scope, args.config)
         return show_report(args.path)
     except (OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
