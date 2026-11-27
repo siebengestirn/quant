@@ -38,8 +38,12 @@ def policy_consistency_violations() -> list[str]:
         out.append("required approving reviews must be zero or one")
     if required == 1 and not review.get("independent_reviewer_required", True):
         out.append("independent reviewer must be required with one approval")
-    if required == 0 and not review.get("self_review_checklist_required", False):
-        out.append("self-review checklist must be required without GitHub approvals")
+    if required == 0 and not review.get(
+        "self_review_checklist_required", False
+    ):
+        out.append(
+            "self-review checklist must be required without GitHub approvals"
+        )
     if not review.get("ci_evidence_required", False):
         out.append("CI evidence must be required for every PR")
     workflow = (ROOT / "docs" / "git-workflow.md").read_text()
