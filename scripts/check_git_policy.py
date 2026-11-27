@@ -50,7 +50,8 @@ def policy_consistency_violations() -> list[str]:
     expected = (
         "requires one independent approving review"
         if required == 1
-        else "uses self-review plus independent CI with zero required GitHub approvals"
+        else "uses self-review plus independent CI with zero required "
+        "GitHub approvals"
     )
     if expected not in " ".join(workflow.split()):
         out.append("git-workflow.md does not state the required review policy")
