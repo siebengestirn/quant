@@ -68,7 +68,10 @@ not authorize provider contact, live execution or a merge.
 Audit with the GitHub CLI. Required settings are in `git-policy.json`. Branch
 protection must restrict direct pushes, require a PR and status checks, reject
 force pushes and deletion, allow only merge commits, and require conversation
-resolution. This single-developer repository uses self-review plus independent CI with zero required GitHub approvals; a self-review checklist and exact-head CI evidence are mandatory for every PR. This replaces the earlier unsatisfiable non-author reviewer rule; no exception or bypass exists.
+resolution. This single-developer repository uses self-review plus independent
+CI with zero required GitHub approvals; a self-review checklist and exact-head
+CI evidence are mandatory for every PR. This replaces the earlier
+unsatisfiable non-author reviewer rule; no exception or bypass exists.
 
 ## Never
 

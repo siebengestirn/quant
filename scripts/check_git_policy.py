@@ -48,7 +48,7 @@ def policy_consistency_violations() -> list[str]:
         if required == 1
         else "uses self-review plus independent CI with zero required GitHub approvals"
     )
-    if expected not in workflow:
+    if expected not in " ".join(workflow.split()):
         out.append("git-workflow.md does not state the required review policy")
     if not POLICY["pr_review"].get("ci_evidence_per_pr_head", False):
         out.append("CI evidence must be recorded per exact PR head")
