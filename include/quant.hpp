@@ -1421,6 +1421,7 @@ enum class PublicationFailurePoint {
   kNone,
   kAfterAuditBeforeRename,
   kAfterRenameBeforeCommit,
+  kAfterRecoveryVerificationBeforeRename,
 };
 
 bool WriteAndSyncFile(const std::string& path,
@@ -1455,10 +1456,12 @@ bool LoadUniverseTransactions(Journal* journal,
                               std::map<std::string, UniverseTransaction>* out,
                               std::string* error);
 
-bool RecoverUniversePublication(const std::string& path,
-                                Journal* journal,
-                                UniverseRecoveryReport* report,
-                                std::string* error);
+bool RecoverUniversePublication(
+    const std::string& path,
+    Journal* journal,
+    UniverseRecoveryReport* report,
+    std::string* error,
+    PublicationFailurePoint inject = PublicationFailurePoint::kNone);
 
 struct HistoryParseResult {
   std::string csv;
