@@ -34,6 +34,7 @@ The expectations object has exactly these fields:
 | `last_date` | string | canonical date, `>= first_date` |
 | `min_rows` | unsigned integer | `>= 1` |
 | `instrument_ids` | object | exactly the `symbols` keys; values non-empty `[A-Za-z0-9._:-]+` |
+| `storage_keys` | object | exactly the `symbols` keys; values `s[0-9a-f]{31}` derived from permanent identity |
 
 The canonical byte string for hashing is built in this exact order, with a
 single trailing newline after every line and no spaces around `=` or `,`:
@@ -52,11 +53,24 @@ first_date=<first_date>
 last_date=<last_date>
 min_rows=<min_rows>
 instrument_ids=<symbol>:<id>,... sorted by symbol
+storage_keys=<symbol>:<key>,... sorted by symbol
 ```
 
 `contract_digest` is the lowercase hex SHA-256 of those exact bytes. SHA-256
 is the only accepted digest algorithm; `digest_algorithm` in `manifest.json`
 must equal the literal string `sha256`, and an unknown value is a hard failure.
+
+The storage key is the sole physical filename. It is derived from the permanent
+instrument identity, never from the provider symbol:
+
+```text
+key = "s" + first 31 hex characters of SHA256(
+        "QUANT-DATASET-STORAGE-V1\n" + instrument_id)
+```
+
+Symbols and provider identifiers are logical aliases only. No external
+identifier may appear in a filesystem path. Both languages reject any contract
+whose `storage_keys` do not match this derivation exactly.
 
 ## 3. Manifest
 
@@ -96,7 +110,10 @@ Each entry in `files` has exactly:
 7. `rows >= min_rows` and `rows > 0` (a header-only file is never COMPLETE).
 8. The CSV session dates are exactly the declared `sessions`; missing or extra
    sessions indicate a stale or mixed generation.
-9. `first_date`/`last_date` and `instrument_id` match the manifest/contract.
+9. `first_date == sessions[0]` and `last_date == sessions[-1]`, and both match
+   the manifest file identity.
+10. All JSON objects are free of duplicate keys; arrays are already sorted and
+    unique; `manifest.expectations` equals `contract.json` field for field.
 
 `PARTIAL` means at least one file verified and at least one symbol failed.
 `FAILED` means no file verified. `BLOCKED` means the contract itself could not
@@ -110,3 +127,19 @@ This contract proves snapshot identity and completeness relative to its frozen
 expectations. It does **not** prove exchange-calendar correctness, permanent
 instrument identity across symbol changes, provider streaming correctness, or
 physical power-loss durability. Those remain separate, unclaimed gates.
+
+## CSV schema version
+
+The expectations object carries `csv_schema`:
+
+- `v2`: `date,open,high,low,close,volume` (legacy, open interest unavailable).
+- `v3`: `date,open,high,low,close,volume,open_interest`.
+
+An absent field means `v2` for backward compatibility; new provider snapshots
+must declare `v3`. The canonical contract digest includes `csv_schema`.
+
+Open interest is a non-negative integer. In the in-memory candle model, `-1`
+means unavailable and `0` is a genuine zero. A missing open-interest column in
+`v2` is not equivalent to zero in `v3`. The provider adapter validates the
+seventh field and preserves it in canonical output; malformed, negative or
+fractional values are rejected.
