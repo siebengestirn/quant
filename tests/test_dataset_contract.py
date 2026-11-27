@@ -43,13 +43,17 @@ def _spec(symbols: list[str], sessions: list[str]) -> dict:
         "last_date": sessions[-1],
         "min_rows": 1,
         "instrument_ids": {symbol: f"ID-{symbol}" for symbol in symbols},
+        "storage_keys": {
+            symbol: contract.storage_key(f"ID-{symbol}") for symbol in symbols
+        },
     }
 
 
 def _fixture(tmp_path: Path, symbols: list[str]) -> Path:
-    """Write canonical CSV series for the requested symbols."""
+    """Write canonical CSV series under opaque storage keys."""
     for symbol in symbols:
-        (tmp_path / f"{symbol}.csv").write_text(CSV, encoding="utf-8")
+        key = contract.storage_key(f"ID-{symbol}")
+        (tmp_path / f"{key}.csv").write_text(CSV, encoding="utf-8")
     return tmp_path
 
 
@@ -113,8 +117,11 @@ def test_corruption_fails_in_both_languages(tmp_path: Path):
     spec_path = directory / "spec.json"
     spec_path.write_text(json.dumps(expected), encoding="utf-8")
     assert _cpp("write", str(directory), str(spec_path))[0] == 0
-    (directory / "AAA.csv").write_bytes(
-        (directory / "AAA.csv").read_bytes().replace(b"102,1000", b"999,1000")
+    _key = contract.storage_key("ID-AAA")
+    (directory / f"{_key}.csv").write_bytes(
+        (directory / f"{_key}.csv")
+        .read_bytes()
+        .replace(b"102,1000", b"999,1000")
     )
     assert contract.verify_dataset(directory).status == "FAILED"
     code, result = _cpp("verify", str(directory))
@@ -129,10 +136,38 @@ def test_zero_rows_and_missing_sessions_fail_closed(tmp_path: Path):
     assert contract.write_contract(directory, expected) == []
     assert contract.write_manifest(directory, expected)
     assert contract.verify_dataset(directory).status != "COMPLETE"
-    (directory / "AAA.csv").write_text(
+    _key = contract.storage_key("ID-AAA")
+    (directory / f"{_key}.csv").write_text(
         "date,open,high,low,close,volume\n", encoding="utf-8"
     )
     (directory / "manifest.json").write_text("{}", encoding="utf-8")
     assert contract.verify_dataset(directory).status == "BLOCKED"
     code, _ = _cpp("verify", str(directory))
     assert code != 0
+
+
+def test_csv_schema_v3_preserves_open_interest(tmp_path: Path):
+    """Versioned CSV schema v3 retains validated open interest."""
+    directory = tmp_path / "v3"
+    directory.mkdir()
+    key = contract.storage_key("ID-AAA")
+    (directory / f"{key}.csv").write_text(
+        "date,open,high,low,close,volume,open_interest\n"
+        "2026-01-02,102,105,101,104,1200,7\n"
+        "2026-01-01,100,103,99,102,1000,5\n"
+    )
+    expected = _spec(["AAA"], ["2026-01-01", "2026-01-02"])
+    expected["csv_schema"] = "v3"
+    assert contract.write_contract(directory, expected) == []
+    assert contract.write_manifest(directory, expected) == []
+    verified = contract.verify_dataset(directory)
+    assert verified.status == "COMPLETE"
+    assert any(row[-1] == "5" for row in result_rows(directory, key)[1:])
+
+
+def result_rows(directory: Path, key: str) -> list[list[str]]:
+    """Return raw CSV rows for assertion helpers."""
+    return [
+        line.split(",")
+        for line in (directory / f"{key}.csv").read_text().splitlines()
+    ]
