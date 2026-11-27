@@ -174,12 +174,62 @@ def test_csv_schema_v3_open_interest_bounds():
             header.encode() + payload, "x.csv", "v3"
         )
         assert errors and not rows
-    for value in ("-1", "0", "7", "9223372036854774784"):
+    for value in (
+        "-1",
+        "0",
+        "7",
+        "9007199254740991",
+        "9007199254740992",
+        "9007199254740993",
+        "9007199254740994",
+        "9223372036854774784",
+        "9223372036854775807",
+    ):
         payload = f"2026-01-01,100,103,99,102,1000,{value}\n".encode()
         rows, errors = contract._read_csv_content(
             header.encode() + payload, "x.csv", "v3"
         )
         assert not errors and rows[0]["open_interest"] == int(value)
+
+
+def test_cross_language_exact_integer_open_interest(tmp_path: Path):
+    """Exact integers above 2^53 survive both canonical verifiers."""
+    directory = tmp_path / "exact-oi"
+    directory.mkdir()
+    key = contract.storage_key("ID-AAA")
+    (directory / f"{key}.csv").write_text(
+        "date,open,high,low,close,volume,open_interest\n"
+        "2026-01-01,100,103,99,102,1000,9007199254740993\n",
+        encoding="utf-8",
+    )
+    expected = _spec(["AAA"], ["2026-01-01"])
+    expected["csv_schema"] = "v3"
+    (directory / "spec.json").write_text(json.dumps(expected), encoding="utf-8")
+    assert contract.write_contract(directory, expected) == []
+    assert contract.write_manifest(directory, expected) == []
+    code, result = _cpp("verify", str(directory))
+    assert code == 0
+    assert result["status"] == "COMPLETE"
+    assert contract.verify_dataset(directory).status == "COMPLETE"
+
+
+def test_cross_language_volume_is_integral(tmp_path: Path):
+    """Fractional volume is rejected identically by both verifiers."""
+    directory = tmp_path / "fractional-volume"
+    directory.mkdir()
+    key = contract.storage_key("ID-AAA")
+    (directory / f"{key}.csv").write_text(
+        "date,open,high,low,close,volume\n"
+        "2026-01-01,100,103,99,102,1000.5\n",
+        encoding="utf-8",
+    )
+    expected = _spec(["AAA"], ["2026-01-01"])
+    (directory / "spec.json").write_text(json.dumps(expected), encoding="utf-8")
+    assert contract.write_contract(directory, expected) == []
+    assert contract.write_manifest(directory, expected)
+    assert contract.verify_dataset(directory).status == "BLOCKED"
+    code, _ = _cpp("verify", str(directory))
+    assert code != 0
 
 
 def result_rows(directory: Path, key: str) -> list[list[str]]:

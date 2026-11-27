@@ -5395,13 +5395,16 @@ bool ReadCsvText(const std::string& text,
         *error = "malformed candle row at line " + std::to_string(line_number);
       return false;
     }
+    // Volume is a non-negative integral count. Doubles above 2^53 cannot
+    // represent every integer, so larger counts are rejected, not rounded.
     if (!std::isfinite(candle.open) || !std::isfinite(candle.high) ||
         !std::isfinite(candle.low) || !std::isfinite(candle.close) ||
         !std::isfinite(candle.volume) || candle.low <= 0.0 ||
         candle.close <= 0.0 ||
         candle.low > std::min(candle.open, candle.close) ||
         std::max(candle.open, candle.close) > candle.high ||
-        candle.volume < 0.0) {
+        candle.volume < 0.0 || candle.volume > 9007199254740992.0 ||
+        candle.volume != std::floor(candle.volume)) {
       if (error)
         *error =
             "invalid OHLCV relationship at line " + std::to_string(line_number);

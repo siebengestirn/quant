@@ -1039,6 +1039,45 @@ void TestIsoTimestampFailClosed() {
         "monotonic receipt distinct from wall-clock receipt");
 }
 
+void TestExactIntegerOpenInterest() {
+  auto row = [](const Json& oi) {
+    return Json::Array({Json::String("2026-01-01"),
+                        Json::Number(100.0),
+                        Json::Number(103.0),
+                        Json::Number(99.0),
+                        Json::Number(102.0),
+                        Json::Number(1000.0),
+                        oi});
+  };
+  auto converted = [&](const Json& oi) {
+    return BuildHistoryCsv(Json::Array({row(oi)}), "AAA");
+  };
+  const std::pair<uint64_t, const char*> exact[] = {
+      {9007199254740991ULL, "9007199254740991"},
+      {9007199254740992ULL, "9007199254740992"},
+      {9007199254740993ULL, "9007199254740993"},
+      {9007199254740994ULL, "9007199254740994"},
+      {static_cast<uint64_t>(std::numeric_limits<int64_t>::max()),
+       "9223372036854775807"},
+  };
+  for (const auto& item : exact) {
+    const HistoryParseResult result = converted(Json::UInteger(item.first));
+    Check(result.errors.empty(),
+          std::string("exact integer accepted: ") + item.second);
+    Check(result.csv.find(std::string("1000,") + item.second + "\n") !=
+              std::string::npos,
+          std::string("exact integer preserved: ") + item.second);
+  }
+  const HistoryParseResult overflow =
+      converted(Json::UInteger(9223372036854775808ULL));
+  Check(!overflow.errors.empty(),
+        "unsigned open interest above INT64_MAX rejected");
+  const HistoryParseResult sentinel = converted(Json::Integer(-1));
+  Check(sentinel.errors.empty() &&
+            sentinel.csv.find("1000,-1\n") != std::string::npos,
+        "signed unavailable sentinel preserved");
+}
+
 void TestProviderHistoryValidation() {
   std::string error;
   Json valid =
@@ -1113,8 +1152,15 @@ void TestProviderHistoryValidation() {
       BuildHistoryCsv(with_oi(9223372036854775808.0), "AAA");
   Check(!boundary_oi.errors.empty(),
         "open interest at 2^63 rejected before integer conversion");
+  Json near_max_row = Json::Array({Json::String("2026-01-01"),
+                                   Json::Number(100.0),
+                                   Json::Number(103.0),
+                                   Json::Number(99.0),
+                                   Json::Number(102.0),
+                                   Json::Number(1000.0),
+                                   Json::UInteger(9223372036854774784ULL)});
   const HistoryParseResult near_max_oi =
-      BuildHistoryCsv(with_oi(9223372036854774784.0), "AAA");
+      BuildHistoryCsv(Json::Array({near_max_row}), "AAA");
   Check(near_max_oi.errors.empty() &&
             near_max_oi.csv.find("9223372036854774784") != std::string::npos,
         "largest exactly representable int64 open interest preserved");
@@ -1125,6 +1171,30 @@ void TestProviderHistoryValidation() {
                      &error,
                      "v3"),
         "canonical v3 reader rejects out-of-range open interest");
+  auto with_volume = [](const Json& volume) {
+    return Json::Array({Json::Array({Json::String("2026-01-01"),
+                                     Json::Number(100.0),
+                                     Json::Number(103.0),
+                                     Json::Number(99.0),
+                                     Json::Number(102.0),
+                                     volume,
+                                     Json::Number(7.0)})});
+  };
+  Check(
+      !BuildHistoryCsv(Json::Array({with_volume(Json::Number(1000.5))}), "AAA")
+           .errors.empty(),
+      "fractional volume rejected");
+  Check(!BuildHistoryCsv(
+             Json::Array({with_volume(Json::UInteger(9007199254740993ULL))}),
+             "AAA")
+             .errors.empty(),
+        "volume above exact double integer range rejected");
+  Check(!ReadCsvText("date,open,high,low,close,volume\n"
+                     "2026-01-01,100,103,99,102,1000.5\n",
+                     &bounded_candles,
+                     &error,
+                     "v2"),
+        "canonical v2 reader rejects fractional volume");
 
   HistoryParseResult reversed = BuildHistoryCsv(
       Json::Array({ValidCandleRow("2026-01-02"), ValidCandleRow("2026-01-01")}),
@@ -2969,6 +3039,8 @@ class RecordingPublisher : public MarketDataPublisher {
     last_sequence = sequence;
     last_event_id = event_id;
     last_symbol = quote.symbol;
+    last_quote = quote;
+    saw_quote = true;
     return true;
   }
   bool PublishBar(const Candle& candle,
@@ -2991,6 +3063,8 @@ class RecordingPublisher : public MarketDataPublisher {
   std::string last_event_id;
   std::string last_symbol;
   double last_close = 0.0;
+  Quote last_quote;
+  bool saw_quote = false;
 };
 
 void TestMarketDataPipeline() {
@@ -3070,6 +3144,84 @@ void TestMarketDataPipeline() {
   Check(std::string(PipelineStatusName(PipelineStatus::kFailed)) == "FAILED",
         "pipeline status names are stable");
   journal.Close();
+}
+
+void TestWallClockJournalReplay() {
+  const std::string path = TempPath("wall_clock_replay.jnl");
+  std::remove(path.c_str());
+  std::string error;
+  Journal journal;
+  Check(journal.Open(path, &error), "wall clock journal opens");
+  MarketDataPipeline pipeline(&journal);
+  Quote quote = GoodQuote(100.0);
+  quote.symbol = "AAA";
+  quote.provider_key = "UPSTOX:AAA";
+  quote.exchange_timestamp_ms = 1795754730000;
+  quote.provider_timestamp_ms = 1795754731000;
+  quote.last_trade_timestamp_ms = 1795754730000;
+  quote.receive_timestamp_ms = 4242;
+  quote.receive_wall_clock_ms = 1795754730123;
+  Check(pipeline.IngestQuote(quote, &error),
+        "quote with wall clock receipt journalled");
+  journal.Close();
+
+  Journal reopened;
+  Check(reopened.Open(path, &error), "journal reopened after close");
+  MarketDataPipeline replay(&reopened);
+  RecordingPublisher publisher;
+  const PipelineResult result =
+      replay.Publish(KdbxCheckpoint(), &publisher, &error);
+  Check(result.status == PipelineStatus::kComplete && publisher.saw_quote,
+        "quote replayed after journal reopen");
+  const Quote& restored = publisher.last_quote;
+  Check(restored.receive_wall_clock_ms == 1795754730123,
+        "wall clock receipt survives journal round trip");
+  Check(restored.provider_timestamp_ms == 1795754731000 &&
+            restored.exchange_timestamp_ms == 1795754730000 &&
+            restored.last_trade_timestamp_ms == 1795754730000,
+        "market event timestamps unchanged by replay");
+  Check(restored.receive_timestamp_ms == 4242 &&
+            restored.receive_timestamp_ms != restored.receive_wall_clock_ms,
+        "monotonic receipt preserved and not presented as UTC");
+  reopened.Close();
+
+  const std::string legacy_path = TempPath("wall_clock_legacy.jnl");
+  std::remove(legacy_path.c_str());
+  Journal legacy;
+  Check(legacy.Open(legacy_path, &error), "legacy journal opens");
+  Json::Object payload;
+  payload["symbol"] = Json::String("AAA");
+  payload["provider_key"] = Json::String("UPSTOX:AAA");
+  payload["source"] = Json::Number(static_cast<int>(Provider::kUpstox));
+  payload["last"] = Json::Number(100.0);
+  payload["bid"] = Json::Number(99.9);
+  payload["ask"] = Json::Number(100.1);
+  payload["bid_qty"] = Json::Integer(1000);
+  payload["ask_qty"] = Json::Integer(1000);
+  payload["volume"] = Json::Number(1000.0);
+  payload["exchange_timestamp_ms"] = Json::Integer(1795754730000);
+  payload["provider_timestamp_ms"] = Json::Integer(1795754731000);
+  payload["last_trade_timestamp_ms"] = Json::Integer(1795754730000);
+  payload["receive_timestamp_ms"] = Json::Integer(4242);
+  payload["quality"] = Json::String("ok");
+  Event legacy_event;
+  legacy_event.type = EventType::kQuote;
+  legacy_event.payload = Json::ObjectValue(payload).Dump();
+  Check(legacy.Append(&legacy_event, &error),
+        "legacy quote without wall clock appended");
+  legacy.Close();
+  Journal legacy_reopened;
+  Check(legacy_reopened.Open(legacy_path, &error), "legacy journal reopens");
+  MarketDataPipeline legacy_replay(&legacy_reopened);
+  RecordingPublisher legacy_publisher;
+  const PipelineResult legacy_result =
+      legacy_replay.Publish(KdbxCheckpoint(), &legacy_publisher, &error);
+  Check(legacy_result.status == PipelineStatus::kComplete &&
+            legacy_publisher.saw_quote,
+        "legacy quote still replays");
+  Check(legacy_publisher.last_quote.receive_wall_clock_ms == 0,
+        "legacy event restores unknown wall clock as zero");
+  legacy_reopened.Close();
 }
 
 void TestPaperPartialAndReplay() {
@@ -3804,6 +3956,7 @@ int main() {
   TestDatasetManifestContract();
   TestInstrumentReferenceModel();
   TestProviderHistoryValidation();
+  TestExactIntegerOpenInterest();
   TestUpstoxQuoteTimestampNormalization();
   TestIsoTimestampFailClosed();
   TestPaperOrderReducer();
@@ -3845,6 +3998,7 @@ int main() {
   TestPaperExecution();
   TestPaperPartialAndReplay();
   TestMarketDataPipeline();
+  TestWallClockJournalReplay();
   std::cout << "checks=" << g_checks << " failures=" << g_failures << "\n";
   return g_failures == 0 ? 0 : 1;
 }

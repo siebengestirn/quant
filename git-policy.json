@@ -9,7 +9,7 @@
   },
   "branch": {
     "active_topic_branches": [],
-    "active_topic_rationale": "Single-developer repository: remediation PRs #47-#53, final release record PR #54 and documentation inventory PR #55 are all merged; zero PRs are open and main is the sole integration branch. The active policy is zero required GitHub approvals with a mandatory self-review checklist and exact-head CI; independent external acceptance is not recorded.",
+    "active_topic_rationale": "Single-developer repository: remediation PRs #47-#53, final release record PR #54, documentation inventory PR #55 and R7 correction PR #56 are all merged; zero PRs are open and main is the sole integration branch. The R8.1 corrective work (exact-integer open interest, integral volume, wall-clock journal replay) is implemented locally, with exact-head CI and a new digest to be recorded in the regenerated final bundle MANIFEST.md. The active policy is zero required GitHub approvals with a mandatory self-review checklist and exact-head CI; independent external acceptance is not recorded.",
     "allowed_topic_prefixes": [
       "feat",
       "fix",
@@ -153,6 +153,12 @@
       "scope": "Closed: applied only to PRs #45 and #46. No further single-maintainer exception is available.",
       "status": "closed; superseded by single-developer policy with zero required GitHub approvals"
     }
+  },
+  "release_record": {
+    "current_main_sha_source": "MANIFEST.md in the final release bundle",
+    "final_main_sha_at_pr_56": "99bc70c015a3744a27ffbaca76b32f3025cb7c37",
+    "previous_bundle_sha256": "d94a625425bf3ed2090749f8eafa10d819e70d72dc3b58f47511d788afcf923e",
+    "r8_1_bundle_status": "regeneration pending"
   },
   "schema_version": 1,
   "working_tree": {

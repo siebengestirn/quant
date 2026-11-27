@@ -74,13 +74,16 @@ separate independent decision.
 - QG-003 persistence of daily risk state across restart: NOT IMPLEMENTED.
 - QG-004 research/execution universe separation: PARTIAL; execution eligibility
   still lacks price bands and full historical status data.
-- QG-007 cross-language boundary fixtures for 2^53 and large timestamps:
-  NOT IMPLEMENTED.
+- QG-007 cross-language boundary fixtures at 2^53: exact-integer open
+  interest and integral volume parity is IMPLEMENTED locally (C++/Python
+  parity above 2^53; 9 portable dataset-contract pytest passes).
+  Large-timestamp cross-language fixtures remain NOT IMPLEMENTED.
 - QG-008 process-kill and power-loss tests: NOT IMPLEMENTED; existing tests
   cover parsing, lock, sequence and checksum behaviour only.
 - Journal checksum identity changed to include the sequence. The pre-change
   generated journal was preserved as
   `data/journal/events.jnl.legacy-checksum-v1` and a new journal started.
 - QG-003 daily state persistence across process restart: NOT IMPLEMENTED.
-- QG-007 cross-language timestamp boundary fixtures: NOT IMPLEMENTED.
+- QG-007 exact-integer OI/volume boundary fixtures at 2^53: IMPLEMENTED
+  locally. Large-timestamp cross-language fixtures: NOT IMPLEMENTED.
 - QG-012..016: unchanged blockers.

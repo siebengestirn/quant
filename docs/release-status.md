@@ -154,8 +154,29 @@ operational paper trading NOT IMPLEMENTED; native q hosted tier GATED;
 power-loss durability NOT PROVEN; intraday/HFT UNSUPPORTED; multi-asset venue
 conformance NOT ESTABLISHED; live execution DISABLED; decision NO TRADE.
 
-A final evidence bundle containing an authenticated branch-protection export,
-timestamp, final commit SHA and checksum remains to be regenerated after the
-final commit. `git-policy.json` declares policy; only an authenticated API
-export proves the live GitHub configuration. The historical JSON exports do
-not establish the current zero-approval setting.
+### Active release-bundle policy (R8.1 corrective release)
+
+PR #56 is MERGED. Its head `7c4895c9299480d33915c50172085c0527c17f2b`
+passed hosted CI run `45962275474`; post-merge CI run `45962576571` passed
+on the final `main` SHA `99bc70c015a3744a27ffbaca76b32f3025cb7c37`. The
+previous final bundle is `/Users/tourist/Desktop/quant-final-20261127.zip`,
+SHA-256
+`d94a625425bf3ed2090749f8eafa10d819e70d72dc3b58f47511d788afcf923e`,
+with 97 manifest entries verified. That bundle is HISTORICAL: it does not
+cover the R8.1 corrective work. The R8.1 release regenerates the final
+bundle, and the new `MANIFEST.md` records the superseding digest, exact-head
+CI and final main SHA; do not treat the previous digest as current.
+
+Branch protection was captured from the authenticated endpoint
+`https://api.github.com/repos/siebengestirn/quant/branches/main/protection`
+at `2026-11-27T08:44:38Z` with HTTP 200, API version `2022-11-28` and response
+SHA-256
+`824414cccfa205a54326357edb182c4fb40e320b6755b323189eb1e1c5b7cc11`. The
+capture records main SHA `99bc70c015a3744a27ffbaca76b32f3025cb7c37`,
+`required_approvals` 0 and three required checks (`core build and tests`,
+`ASan/UBSan`, `Style contract (reference guides)`). The tracked record is the
+root file `branch-protection-capture.json`; the bundle copy is
+`evidence/branch-protection.json` in the regenerated final bundle.
+`git-policy.json` declares policy; only an authenticated API export proves the
+live GitHub configuration. The historical JSON exports do not establish the
+current zero-approval setting.

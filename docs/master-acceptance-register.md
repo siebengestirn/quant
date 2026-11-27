@@ -14,33 +14,36 @@ Statuses: `NOT IMPLEMENTED`, `IMPLEMENTED`, `UNIT-TESTED`,
 Machine-readable release, governance and trading state at the current head:
 
 ```yaml
-main_sha: 0b353f84f877764066eeb3dc0f70ac4ef645bf50
-remediation_prs: "47-53"
-remediation_prs_status: MERGED
-final_release_record_pr: 54
-final_release_record_pr_status: MERGED
-documentation_inventory_pr: 55
-documentation_inventory_pr_status: MERGED
-governance_model: SINGLE_DEVELOPER
-required_github_approvals: 0
-self_review_checklist: REQUIRED
-exact_head_ci: REQUIRED
-independent_external_acceptance: PENDING
-research: INCONCLUSIVE
-holdout: SEALED_NOT_EVALUATED
-live_execution: DISABLED
-decision: NO_TRADE
+release:
+  current_main_sha_source: MANIFEST.md in the final release bundle
+  baseline_snapshot_sha: 0b353f84f877764066eeb3dc0f70ac4ef645bf50
+  final_main_sha: 99bc70c015a3744a27ffbaca76b32f3025cb7c37
+  remediation_prs: MERGED
+  remediation_range: "47-53"
+  final_release_record_pr: 54
+  documentation_inventory_pr: 55
+  r7_correction_pr: 56
+  open_prs: 0
+governance: >-
+  model SINGLE_DEVELOPER, required_github_approvals 0,
+  self_review_checklist REQUIRED, exact_head_ci REQUIRED,
+  required_checks 3, independent_external_acceptance PENDING
+trading: >-
+  research INCONCLUSIVE, holdout SEALED_NOT_EVALUATED,
+  live_execution DISABLED, decision NO_TRADE
 ```
 
 ## Release state reconciliation
 
 The authoritative state is the CURRENT STATE block above and the ACTIVE POLICY
-record in `docs/release-status.md`. `main` is at
-`0b353f84f877764066eeb3dc0f70ac4ef645bf50`. Remediation PRs #47–#53, final
-release record PR #54 and documentation inventory PR #55 are all MERGED; zero
-PRs are open. Merges use the single-developer policy: zero required GitHub
-approvals, a self-review checklist and exact-head CI with three required
-checks. Independent external technical acceptance is PENDING / NOT RECORDED.
+record in `docs/release-status.md`. The current `main` commit is recorded in
+`MANIFEST.md` of the final release bundle; it was `99bc70c…` at PR #56
+(full SHA `99bc70c015a3744a27ffbaca76b32f3025cb7c37`). PRs #47–#56 are all
+MERGED; zero PRs are open. Merges use the single-developer policy: zero
+required GitHub approvals, a self-review checklist and exact-head CI with
+three required checks. Independent external technical acceptance is
+PENDING / NOT RECORDED. The older `0b353f84…` SHA is the baseline snapshot
+retained as historical evidence, not a current state claim.
 
 ### HISTORICAL / SUPERSEDED snapshot (retained as evidence, not current state)
 
@@ -111,11 +114,22 @@ contains requirement IDs from the same register.
 | W15 | Multi-asset conformance | NOT ESTABLISHED | W1, W6, W9 | Signed per-class conformance matrix | Yes per class |
 | W16 | Independent acceptance | NOT RECORDED (external) | all relevant gates | Required merge controls: zero GitHub approvals, self-review checklist and exact-head CI. External technical review is optional. Independent acceptance is mandatory only for defined high-risk release gates | No for routine merges; yes for defined high-risk gates |
 | W17 | Live execution authorisation | DISABLED | W7, W10, W12, W16, compliance | Written broker and compliance approval; separate release decision | Yes for any live route |
+| W18 | Independent release assurance and security remediation | PENDING; authoritative owner is the independent reviewer | W16 and all defined high-risk release gates | This row is the authoritative W18 definition. Exit evidence: disposition of each security finding by an independent reviewer and recorded external acceptance. Local checks and CI are not acceptance; acceptance NOT RECORDED | Yes for release acceptance |
 
 CI evidence is an automated gate, not a human independent review. Required
 merge controls are zero GitHub approvals, the self-review checklist and
 exact-head CI. External technical review is optional; independent acceptance
 is mandatory only for defined high-risk release gates, not every merge.
+
+### R8.1 corrective work (local implementation)
+
+The R8.1 corrective work — exact-integer OI parsing with C++/Python parity
+above 2^53, the integral-volume dataset contract and a wall-clock journal
+replay test — is IMPLEMENTED locally. After the changes, local verification
+recorded 14090 C++ checks with 0 failures and 9 portable dataset-contract
+pytest passes; the full suite is to be rerun. Exact-head CI for R8.1 will be
+recorded by the regenerated final bundle `MANIFEST.md`; the previous bundle
+does not cover R8.1. No independent acceptance is claimed.
 
 Provider scope (W2/W3): the live Upstox integration is read-only V2 REST
 (`https://api.upstox.com/v2` in `src/market_data.cpp`); there is no V3 HTTP

@@ -1102,9 +1102,41 @@ bool StrictNumber(const Json& value, double* out) {
   return true;
 }
 
-// 2^63 is not representable as a signed 64-bit integer. Comparing against the
-// rounded double of INT64_MAX would admit 2^63, so use the exact power of two.
-constexpr double kMaxOpenInterest = 9223372036854775808.0;
+// Above 2^53 a double cannot represent every integer. A floating-point token
+// is accepted as a count only inside the exactly representable range.
+constexpr double kMaxExactDoubleInteger = 9007199254740992.0;
+
+// Open interest is a signed count, not a price. Preserve the exact integer
+// token instead of routing it through a double: a JSON UInteger of
+// 9007199254740993 would otherwise be rounded to 9007199254740992.
+bool StrictOpenInterest(const Json& value, int64_t* out) {
+  if (out == nullptr)
+    return false;
+  if (value.type() == Json::Type::kInteger) {
+    const int64_t parsed = value.as_int(0);
+    if (parsed < -1)
+      return false;
+    *out = parsed;
+    return true;
+  }
+  if (value.type() == Json::Type::kUInteger) {
+    uint64_t parsed = 0;
+    if (!value.as_uinteger(&parsed) ||
+        parsed > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+      return false;
+    *out = static_cast<int64_t>(parsed);
+    return true;
+  }
+  if (value.type() == Json::Type::kNumber) {
+    const double number = value.as_double(0.0);
+    if (!std::isfinite(number) || number < -1.0 ||
+        number >= kMaxExactDoubleInteger || number != std::floor(number))
+      return false;
+    *out = static_cast<int64_t>(number);
+    return true;
+  }
+  return false;
+}
 
 }  // namespace
 
@@ -1140,17 +1172,16 @@ HistoryParseResult BuildHistoryCsv(const Json& candles,
       result.errors.push_back(symbol + ": duplicate date " + date);
       return result;
     }
-    double values[6] = {};
-    const size_t value_count = row.array().size() == 7 ? 6 : 5;
-    for (size_t i = 0; i < value_count; ++i) {
+    double values[5] = {};
+    for (size_t i = 0; i < 5; ++i) {
       if (!StrictNumber(row.array()[i + 1], &values[i])) {
         result.errors.push_back(symbol + ": non-numeric field");
         return result;
       }
     }
-    const double open_interest = row.array().size() == 7 ? values[5] : -1.0;
-    if (open_interest < -1.0 || open_interest >= kMaxOpenInterest ||
-        open_interest != std::floor(open_interest)) {
+    int64_t open_interest = -1;
+    if (row.array().size() == 7 &&
+        !StrictOpenInterest(row.array()[6], &open_interest)) {
       result.errors.push_back(symbol + ": invalid open interest");
       return result;
     }
@@ -1160,7 +1191,8 @@ HistoryParseResult BuildHistoryCsv(const Json& candles,
     const double close = values[3];
     const double volume = values[4];
     if (low <= 0.0 || close <= 0.0 || low > std::min(open, close) ||
-        std::max(open, close) > high || volume < 0.0) {
+        std::max(open, close) > high || volume < 0.0 ||
+        volume > kMaxExactDoubleInteger || volume != std::floor(volume)) {
       result.errors.push_back(symbol + ": invalid OHLCV relationship");
       return result;
     }
@@ -1168,7 +1200,7 @@ HistoryParseResult BuildHistoryCsv(const Json& candles,
     line.imbue(std::locale::classic());
     line << std::setprecision(std::numeric_limits<double>::max_digits10);
     line << date << ',' << open << ',' << high << ',' << low << ',' << close
-         << ',' << volume << ',' << static_cast<int64_t>(open_interest) << '\n';
+         << ',' << volume << ',' << open_interest << '\n';
     ordered_rows.emplace_back(date, line.str());
     ++result.accepted;
   }
