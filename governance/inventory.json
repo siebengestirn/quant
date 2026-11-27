@@ -151,7 +151,7 @@
       "class": "evidence-record",
       "owner": "release coordinator",
       "path": "governance/branch-protection-capture.json",
-      "purpose": "Captured branch-protection settings",
+      "purpose": "HISTORICAL point-in-time captures of branch-protection settings, including the PR #70 refresh",
       "retention": "current"
     },
     {
@@ -179,7 +179,7 @@
       "class": "policy",
       "owner": "maintainer",
       "path": "governance/release-state.json",
-      "purpose": "Canonical machine-readable R8.4.3 release and governance state",
+      "purpose": "Canonical product release baseline R8.4.3 / PR #67, latest source revision PR #70 and governance evidence state",
       "retention": "current"
     },
     {

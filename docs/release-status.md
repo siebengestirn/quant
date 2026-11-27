@@ -1,15 +1,32 @@
-# QUANT release status — 28 November 2026 (record through PR #67)
+# QUANT release status — baseline PR #67 / source PR #70
+
+HISTORICAL records are retained below with explicit HISTORICAL labels.
 
 ## CURRENT RELEASE RECORD (authoritative)
 
 Canonical machine-readable state: `governance/release-state.json`, checked
-by `scripts/check_release_state.py`. R8.4.3 / PR #67 is COMPLETE; merged
-PRs 47-67; scope PORTABLE_RESEARCH; 4 required checks with zero GitHub
-approvals; native q GATED_NOT_RUN; trading DISABLED / NO TRADE; independent
-acceptance PENDING. W1 is PARTIAL with 46 offline tests and W1-D PENDING.
-The exact current main SHA, CI runs and bundle digest are in `MANIFEST.md`
-of the current final release bundle (external artifact), with captured pins
-in the canonical state file. R8.4.2 / PR #66 and PR #64 are HISTORICAL.
+by `scripts/check_release_state.py`. The authoritative product release
+baseline is R8.4.3 / PR #67, COMPLETE; merged PRs 47-67. The latest source
+revision is PR #70 at the captured `source_commit` in that state; source
+changes after the baseline do not redefine the released product. Scope
+PORTABLE_RESEARCH; 4 required checks with zero GitHub approvals; native q
+GATED_NOT_RUN, native q runner execution NOT_OBSERVED and runner attestation
+mechanism CHECKED. Trading DISABLED / NO TRADE; independent acceptance
+PENDING, with audit evidence verification PENDING until PR #71 merges. W1
+is PARTIAL with 46 offline tests and W1-D PENDING. The exact current main
+SHA, CI runs and bundle digest are in `MANIFEST.md` of the current final
+release bundle (external artifact), with captured pins in the canonical
+state file. R8.4.2 / PR #66 and PR #64 are HISTORICAL.
+
+## Latest source revision (captured at PR #70)
+
+The source tree advanced to PR #70 after the R8.4.3 / PR #67 product
+baseline. `latest_source_revision` PR #70 and `source_commit` in the
+canonical state are captured source coordinates, not a new product release.
+The hosted native-q tier remained GATED_NOT_RUN; its runner execution was
+NOT_OBSERVED and the post-job API attestation mechanism was CHECKED. Audit
+evidence verification remains PENDING until PR #71 merges. No new release,
+independent acceptance or q runtime result is claimed for this revision.
 
 ## Release history (HISTORICAL)
 
@@ -84,14 +101,18 @@ as evidence.
 | #62 | run `46015103880`, three jobs pass and native-q skipped | HISTORICAL at PR #62: R8.4 merge `66f037c…`; native-q GATED_NOT_RUN, never reported as passed |
 | #63 | run `46023401318`, three jobs pass and native-q skipped | HISTORICAL at PR #63: R8.4.1 merge `399652ca…`; native-q GATED_NOT_RUN, never reported as passed |
 | #66 | four required checks pass, native-q skipped | HISTORICAL at PR #66: R8.4.2 merge `83b6e435…`; native-q GATED_NOT_RUN, never reported as passed |
-| #67 | run `46049228842`, 4 required checks pass, native-q skipped | CURRENT at PR #67: R8.4.3 merge `8ab4b674…`; native-q GATED_NOT_RUN, never reported as passed |
+| #67 | run `46049228842`, 4 required checks pass, native-q skipped | CURRENT product baseline at PR #67: R8.4.3 merge `8ab4b674…`; native-q GATED_NOT_RUN, never reported as passed |
+| #70 | latest source revision; 4 required checks unchanged | Not a product release: native q GATED_NOT_RUN, runner execution NOT_OBSERVED and attestation mechanism CHECKED |
 
 It is therefore **not** true that every PR head was green: PR #34 was merged
 with a red style check and was repaired by PR #35. Hosted CI at PR #62 and
 PR #63 (both HISTORICAL) succeeded with native-q skipped/GATED_NOT_RUN;
 at PR #67 four required checks passed on hosted run `46049228842` with
-native q GATED_NOT_RUN. The current head is in `MANIFEST.md` of the current
-final release bundle (external artifact, regenerated after R8.4.3).
+native q GATED_NOT_RUN. The latest source revision PR #70 is not a product
+release: native q stayed GATED_NOT_RUN, runner execution was NOT_OBSERVED
+and the attestation mechanism was CHECKED. The current head is in
+`MANIFEST.md` of the current final release bundle (external artifact,
+regenerated after R8.4.3).
 
 ## Governance — SUPERSEDED historical policy before 2026-11-27
 
@@ -162,7 +183,10 @@ releases NOT RECORDED; live execution DISABLED; trading decision NO TRADE.
 The R8.4 and R8.4.1 release scopes were PORTABLE_RESEARCH (HISTORICAL).
 R8.4.1 is COMPLETE at PR #63 (HISTORICAL release record). R8.4.2 / PR #66
 is COMPLETE (HISTORICAL). R8.4.3 / PR #67 is COMPLETE with 4 required
-checks and native q GATED_NOT_RUN.
+checks and native q GATED_NOT_RUN. The product baseline remains PR #67;
+the latest source revision PR #70 records native q runner execution
+NOT_OBSERVED, attestation mechanism CHECKED and audit evidence verification
+PENDING until PR #71 merges.
 
 ## Governance evidence refresh (27 November 2026) — SUPERSEDED
 
@@ -212,6 +236,9 @@ R8.4.3 release scopes were PORTABLE_RESEARCH. R8.4.1 is COMPLETE at PR #63
 (HISTORICAL release record). R8.4.2 / PR #66 is COMPLETE (HISTORICAL).
 R8.4.3 / PR #67 is COMPLETE with 4 required checks, 46 W1 tests and native q
 GATED_NOT_RUN; the intermediate PR #64 runner work and PR #66 are HISTORICAL.
+The latest source revision PR #70 is a source coordinate only: native q
+runner execution NOT_OBSERVED, attestation mechanism CHECKED and audit
+evidence verification PENDING until PR #71 merges.
 
 ### Active release-bundle policy (R8.1 corrective release)
 
@@ -315,19 +342,22 @@ native-q runner provisioning stays OPEN under TD-015.
 
 Branch protection was captured from the authenticated endpoint
 `https://api.github.com/repos/siebengestirn/quant/branches/main/protection`
-at `2026-11-27T18:55:49Z` with HTTP 200 (HTTP/2.0), API version
+at `2026-11-27T20:07:24Z` with HTTP 200 (HTTP/2.0), API version
 `2022-11-28` and response SHA-256
 `de633dabfe3016d17f2885c1179282d68736f50692cacd51e9cbdb31acf02356`.
-The capture is a point-in-time snapshot at PR #67 and records `main` as
-`8ab4b6747fcd0daa79f9cdd54f2addd21b3b3e2e`, the current main SHA; later
-heads are in the bundle `MANIFEST.md`. It records `required_approvals` 0,
+This HISTORICAL point-in-time capture at PR #70 records `main` as
+`90f45f31e8f28070f0bbcb38c1e9189a020e6cdc`, the latest source commit;
+later heads are in the bundle `MANIFEST.md`. The response body is
+byte-identical to the previous capture, so the governed settings had not
+changed. It records `required_approvals` 0,
 `required_conversation_resolution` true, `required_linear_history` false,
 force pushes and branch deletion disabled, `enforce_admins` true and four
 strict required checks (`core build and tests`, `ASan/UBSan`,
 `Style contract (reference guides)`, `Release assurance (offline)`). The
-tracked record is `governance/branch-protection-capture.json`; the earlier
-PR #64 capture is retained under its `historical_captures` array. The
-bundle copy is `evidence/branch-protection.json` in the external final
-bundle. `git-policy.json` declares policy; only an authenticated API
-export proves the live GitHub configuration. The historical JSON exports
-do not establish the current zero-approval setting.
+tracked record is `governance/branch-protection-capture.json`; the prior
+PR #67 capture and the earlier PR #64 capture are retained under its
+`historical_captures` array. The bundle copy is
+`evidence/branch-protection.json` in the external final bundle.
+`git-policy.json` declares policy; only an authenticated API export proves
+the live GitHub configuration. The historical JSON exports do not establish
+the current zero-approval setting.

@@ -27,7 +27,17 @@ The portable pytest gate sets ``QUANT_CONTRACT_BIN`` to the freshly built
 that path, its SHA-256, its build directory and the report commit in the gate
 counts; a missing or non-executable binary fails the gate. This prevents a
 stale, ignored ``build/quant_contract`` from satisfying cross-language tests.
-The ``ci_security_tests`` gate is mandatory and enforces the same skip policy.
+The ``ci_security_tests``, ``audit_disposition_tests`` and
+``runner_attestation_tests`` gates are mandatory and enforce the same skip
+policy.
+
+The ``audit_disposition_evidence`` gate is deliberately distinct from the
+disposition *test* gate: it executes the offline audit evidence verification
+command on the generated JSON files. In a clean checkout those generated
+files are absent, so the gate is NOT_APPLICABLE with an explicit reason. It
+is never silently promoted to PASS or FAIL. The native-q tier likewise
+records runner execution separately: a skipped job is GATED_NOT_RUN with
+NOT_OBSERVED runner execution and a CHECKED attestation mechanism.
 """
 
 from __future__ import annotations
@@ -43,6 +53,7 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
+import audit_disposition
 from quant_common import (
     BINARY_BUILD_DIR_KEY,
     BINARY_COMMIT_KEY,
@@ -58,11 +69,24 @@ REPOSITORY = "siebengestirn/quant"
 BRANCH = "main"
 AUDIT_RELATIVE = "data/assurance/english-audit.json"
 AUDIT_PATH = ROOT / AUDIT_RELATIVE
+DISPOSITIONS_RELATIVE = "data/assurance/audit-dispositions.json"
+REVIEW_RELATIVE = "data/assurance/audit-disposition-review.json"
+AUDIT_EVIDENCE_FILES = (AUDIT_RELATIVE, DISPOSITIONS_RELATIVE, REVIEW_RELATIVE)
+AUDIT_EVIDENCE_COMMAND = (
+    "python3 scripts/audit_disposition.py verify "
+    f"--input {AUDIT_RELATIVE} --path {DISPOSITIONS_RELATIVE} "
+    f"--review {REVIEW_RELATIVE}"
+)
+AUDIT_DISPOSITION_SCRIPT = (
+    Path(__file__).resolve().with_name("audit_disposition.py")
+)
 BINDING_CATEGORIES = frozenset({"tautology", "audit_ignore"})
 PASS = "PASS"
 FAIL = "FAIL"
 GATED = "GATED_NOT_RUN"
 NOT_APPLICABLE = "NOT_APPLICABLE"
+RUNNER_NOT_OBSERVED = "NOT_OBSERVED"
+ATTESTATION_CHECKED = "CHECKED"
 SUCCESS = "success"
 SKIPPED = "skipped"
 NATIVE_LABEL = "native-q"
@@ -95,6 +119,8 @@ REQUIRED_GATES = frozenset(
         "native_q_checker_tests",
         "ci_security_tests",
         "audit_disposition_tests",
+        "audit_disposition_evidence",
+        "runner_attestation_tests",
         "hosted_ci",
     }
 )
@@ -105,6 +131,7 @@ PYTEST_FILES = (
 )
 CI_SECURITY_TEST_FILES = ("tests/test_ci_security.py",)
 AUDIT_DISPOSITION_TEST_FILES = ("tests/test_audit_disposition.py",)
+RUNNER_ATTESTATION_TEST_FILES = ("tests/test_runner_attestation.py",)
 W1_TEST_FILES = ("tests/test_instrument_master.py",)
 RELEASE_BUNDLE_TEST_FILES = ("tests/test_release_bundle.py",)
 VERIFY_REPORT_TEST_FILES = ("tests/test_verify_report.py",)
@@ -639,6 +666,102 @@ def run_audit_disposition_tests(allowed_skips: object = None) -> dict:
     )
 
 
+def run_runner_attestation_tests(allowed_skips: object = None) -> dict:
+    """Run the mandatory post-job runner attestation suite."""
+    return pytest_gate(
+        "runner_attestation_tests",
+        RUNNER_ATTESTATION_TEST_FILES,
+        "runner attestation tests",
+        allowed_skips,
+    )
+
+
+def absent_evidence_counts(missing: list[str]) -> dict:
+    """Return the explicit empty counts of a clean checkout."""
+    return {
+        "applicable": False,
+        **audit_disposition.empty_evidence_summary(),
+        "missing_files": missing,
+    }
+
+
+def run_audit_disposition_evidence() -> dict:
+    """Verify generated audit evidence, or report it as NOT_APPLICABLE."""
+    argv = [
+        "python3",
+        "scripts/audit_disposition.py",
+        "verify",
+        "--input",
+        AUDIT_RELATIVE,
+        "--path",
+        DISPOSITIONS_RELATIVE,
+        "--review",
+        REVIEW_RELATIVE,
+    ]
+    paths = [ROOT / relative for relative in AUDIT_EVIDENCE_FILES]
+    missing = [
+        relative
+        for relative, path in zip(AUDIT_EVIDENCE_FILES, paths, strict=True)
+        if not path.is_file()
+    ]
+    if missing:
+        reason = (
+            "generated audit evidence is absent from this clean checkout: "
+            + ", ".join(missing)
+        )
+        step = {
+            "name": "audit disposition evidence",
+            "command": command_text(argv),
+            "exit_code": 0,
+            "counts": {},
+            "result": NOT_APPLICABLE,
+            "output": reason,
+        }
+        return {
+            "name": "audit_disposition_evidence",
+            "command": command_text(argv),
+            "exit_code": 0,
+            "counts": absent_evidence_counts(missing),
+            "result": NOT_APPLICABLE,
+            "steps": [compact(step)],
+            "reason": reason,
+        }
+    run_argv = [
+        "python3",
+        str(AUDIT_DISPOSITION_SCRIPT),
+        "verify",
+        "--input",
+        str(paths[0]),
+        "--path",
+        str(paths[1]),
+        "--review",
+        str(paths[2]),
+    ]
+    step = step_result("audit disposition evidence", run_argv)
+    step["command"] = command_text(argv)
+    counts: dict = {"applicable": True}
+    problem = ""
+    try:
+        raw = paths[0].read_bytes()
+        report = json.loads(paths[1].read_text(encoding="utf-8"))
+        review = json.loads(paths[2].read_text(encoding="utf-8"))
+        counts = {
+            "applicable": True,
+            **audit_disposition.verify_payloads(raw, report, review),
+        }
+    except audit_disposition.EVIDENCE_ERRORS as exc:
+        problem = str(exc)
+    step = finalize(step, step["exit_code"] == 0 and not problem)
+    if problem:
+        step["output"] = f"{step['output']}\n{problem}".strip()
+    gate = make_gate("audit_disposition_evidence", [step], counts, not problem)
+    gate["reason"] = (
+        problem
+        or "exact audit digest, finding coverage and owner status verified"
+    )
+    return gate
+
+
 def run_style() -> dict:
     """Run the style contract and count passing checks."""
     test = step_result(
@@ -969,6 +1092,20 @@ def hosted_ok(
     )
 
 
+def runner_status_fields(native: dict) -> dict:
+    """Report runner observation separately from the gated native-q tier.
+
+    A skipped native-q job is GATED_NOT_RUN. The verification report only
+    checks the attestation mechanism; it never claims that a runner executed
+    or that the native-q tier passed on the basis of a skipped job.
+    """
+    return {
+        "native_q_runtime": native["result"],
+        "native_q_runner_execution": RUNNER_NOT_OBSERVED,
+        "runner_attestation_mechanism": ATTESTATION_CHECKED,
+    }
+
+
 def native_log_step(native: dict) -> dict | None:
     """Fetch the successful native job's log for pytest evidence."""
     database_id = native.get("database_id")
@@ -1062,6 +1199,7 @@ def hosted_gate(
         "native_q_tests_executed": native["tests_executed"],
         "native_q_tests_skipped": native["tests_skipped"],
         "native_q_tests_failed": native["tests_failed"],
+        **runner_status_fields(native),
         **job_counts(jobs),
     }
     if error:
@@ -1101,6 +1239,8 @@ def run_gates(
         run_native_q_checker_tests(allowed),
         run_ci_security_tests(allowed),
         run_audit_disposition_tests(allowed),
+        run_audit_disposition_evidence(),
+        run_runner_attestation_tests(allowed),
         run_style(),
         run_freshness(),
         run_audit(),
@@ -1139,7 +1279,11 @@ def run_report(
     else:
         gates = run_gates(commit, scope, resolved)
     completed = utc_now()
-    overall = PASS if all(gate["result"] == PASS for gate in gates) else FAIL
+    overall = (
+        PASS
+        if all(gate["result"] in (PASS, NOT_APPLICABLE) for gate in gates)
+        else FAIL
+    )
     report = {
         "schema_version": REPORT_SCHEMA_VERSION,
         "release_scope": scope,

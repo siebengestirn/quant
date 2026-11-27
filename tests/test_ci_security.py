@@ -34,7 +34,9 @@ ALL_ASSURANCE_MODULES = (
     "tests/test_clean_room.py",
     "tests/test_release_state.py",
     "tests/test_audit_disposition.py",
+    "tests/test_runner_attestation.py",
 )
+OFFLINE_PYTEST_MODULES = ALL_ASSURANCE_MODULES[1:]
 ASSURANCE = ROOT / "scripts" / "assurance.py"
 NATIVE_Q_SKIP_REASON = (
     "KDB-X disabled in portable build; native-q qualification is a "
@@ -263,6 +265,36 @@ def test_runner_attestation_job_records_observed_api_identity():
         and "runner-attestation.json" in str(step.get("with", ""))
     ]
     assert uploads
+
+
+def test_runner_attestation_tests_are_in_hosted_command():
+    """The hosted offline command includes runner-attestation tests exactly."""
+    text = commands(jobs(workflow())["release-assurance"])
+    marker = "-o addopts='' -q"
+    block = text[text.index("python3 -m pytest \\") :]
+    block = block[: block.index(marker) + len(marker)]
+    observed = " ".join(block.replace("\\\n", " ").split())
+    expected = (
+        "python3 -m pytest " + " ".join(OFFLINE_PYTEST_MODULES) + f" {marker}"
+    )
+    assert observed == expected
+
+
+def test_skipped_runner_attestation_records_no_q_execution():
+    """A skipped native-q job produces a stub, not an execution claim."""
+    job = jobs(workflow())["runner-attestation"]
+    text = commands(job)
+    assert "scripts/attest_runner.py skipped" in text
+    assert '--run-id "${{ github.run_id }}"' in text
+    assert "NOT_OBSERVED" in text
+    assert "no q runtime execution claimed" in text
+    uploads = [
+        step
+        for step in steps(job)
+        if "upload-artifact@" in str(step.get("uses", ""))
+        and "runner-attestation.json" in str(step.get("with", ""))
+    ]
+    assert any(str(step.get("if")) == "always()" for step in uploads)
 
 
 def test_portable_pytest_excludes_native_q_module():

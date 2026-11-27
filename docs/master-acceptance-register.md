@@ -3,12 +3,16 @@
 ## CURRENT RELEASE RECORD (authoritative)
 
 Canonical machine-readable state: `governance/release-state.json`, checked
-by `scripts/check_release_state.py`. Release R8.4.3 / PR #67 is COMPLETE;
-scope PORTABLE_RESEARCH; merged PRs 47-67; 4 required checks with zero
-GitHub approvals; native q GATED_NOT_RUN; trading DISABLED / NO TRADE.
-W1 is PARTIAL with 46 offline tests and W1-D PENDING; W9 NOT QUALIFIED;
-W13-W15 FUTURE; W16/W18 PENDING; W19/W20 PROPOSED. R8.4.2 / PR #66 and
-the intermediate PR #64 work are HISTORICAL, no longer the current release.
+by `scripts/check_release_state.py`. The authoritative product release
+baseline R8.4.3 / PR #67 is COMPLETE; scope PORTABLE_RESEARCH; merged PRs
+47-67; 4 required checks with zero GitHub approvals; native q GATED_NOT_RUN;
+trading DISABLED / NO TRADE. The latest source revision PR #70 is a source
+coordinate in that state, not a new product release: native q runner
+execution NOT_OBSERVED and attestation mechanism CHECKED, with audit
+evidence verification PENDING until PR #71 merges. W1 is PARTIAL with 46
+offline tests and W1-D PENDING; W9 NOT QUALIFIED; W13-W15 FUTURE;
+W16/W18 PENDING; W19/W20 PROPOSED. R8.4.2 / PR #66 and the intermediate
+PR #64 work are HISTORICAL, no longer the current product baseline.
 
 This is the authoritative definition of "complete" for the platform
 programme. A capability is complete only when requirement, implementation,
@@ -89,6 +93,13 @@ release:
   r8_4_3_status: COMPLETE
   r8_4_3_merged_pr_range: "47-67"
   r8_4_3_w1_offline_tests: 46
+  product_release_baseline: R8.4.3 / PR #67
+  latest_source_revision: PR #70 (source coordinates, not a release)
+  native_q_runner_execution: NOT_OBSERVED
+  runner_attestation_mechanism: CHECKED
+  audit_evidence_verification: PENDING until PR #71 merges
+  # captured at PR #70: branch-protection response digest
+  # de633dabfe3016d17f2885c1179282d68736f50692cacd51e9cbdb31acf02356
   # HISTORICAL at PR #66: R8.4.2 COMPLETE, range "47-66", 36 W1 tests;
   # original bundle digest (HISTORICAL at PR #66):
   # 0deebdd099912cfc4e2045d8a2c377ca4825f8382b50d600aa86f7dfa724adc3
@@ -151,6 +162,16 @@ checklist and exact-head CI with 4 required checks. Independent
 external technical acceptance is PENDING / NOT RECORDED. The older
 `0b353f84…` SHA is the baseline snapshot retained as historical evidence,
 not a current state claim.
+
+The product release baseline stays R8.4.3 / PR #67; the latest source
+revision PR #70 is recorded only as `latest_source_revision` and
+`source_commit` in `governance/release-state.json`. It does not change the
+release identity, gate set or acceptances. Native q remained GATED_NOT_RUN
+with runner execution NOT_OBSERVED and attestation mechanism CHECKED.
+Branch protection was recaptured at PR #70 (HISTORICAL point-in-time
+capture, response digest in the CURRENT STATE block above and in
+`governance/branch-protection-capture.json`). Audit evidence verification
+remains PENDING until PR #71 merges.
 
 ### HISTORICAL / SUPERSEDED snapshot (retained as evidence, not current state)
 
@@ -391,7 +412,10 @@ native q GATED_NOT_RUN; PR #64 was an intermediate HISTORICAL step with no
 exit claim. R8.4.3 / PR #67 is the CURRENT release: COMPLETE under
 PORTABLE_RESEARCH with 46 W1 tests, 141 release-bundle tests, 171
 verify-report tests, 14 CI security tests, 4 required checks and native q
-GATED_NOT_RUN. Independent acceptance remains PENDING.
+GATED_NOT_RUN. Independent acceptance remains PENDING. The later source
+revision PR #70 is not a product release: runner execution NOT_OBSERVED,
+attestation mechanism CHECKED and audit evidence verification PENDING until
+PR #71 merges.
 
 ## Data-only testing invariants
 

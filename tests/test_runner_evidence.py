@@ -40,21 +40,27 @@ def runner_env(**overrides: str) -> dict[str, str]:
 
 
 def run_capture(
-    tmp_path: Path, env: dict[str, str], *, head_sha: str = SHA
+    tmp_path: Path,
+    env: dict[str, str],
+    *,
+    head_sha: str = SHA,
+    q_version: str | None = "4.1.0",
+    extra_args: tuple[str, ...] = (),
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     """Invoke the capture script with an injected runner environment."""
     output = tmp_path / "runner-evidence.json"
+    command = [
+        sys.executable,
+        str(SCRIPT),
+        "--output",
+        str(output),
+        "--head-sha",
+        head_sha,
+    ]
+    if q_version is not None:
+        command.extend(["--q-version", q_version])
     result = subprocess.run(
-        [
-            sys.executable,
-            str(SCRIPT),
-            "--output",
-            str(output),
-            "--head-sha",
-            head_sha,
-            "--q-version",
-            "4.1.0",
-        ],
+        [*command, *extra_args],
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -91,6 +97,8 @@ def test_valid_evidence_is_captured_and_accepted(tmp_path: Path) -> None:
     )
     assert payload["qhome"] == "/opt/kx/q"
     assert payload["q_version"] == "4.1.0"
+    assert payload["native_q_runner_execution"] == "OBSERVED"
+    assert payload["runner_attestation_mechanism"] == "CHECKED"
     assert runner_evidence.validate(payload) == []
 
 
@@ -112,6 +120,43 @@ def test_evidence_records_runner_identity_and_scope() -> None:
     assert lifecycle["deregistration_verified"] is False
     assert lifecycle["deregistration_evidence"] == ""
     assert "external runner operator" in lifecycle["requirement"]
+
+
+def test_absent_q_version_records_not_observed(tmp_path: Path) -> None:
+    """No observed q version means no claim of q runtime execution."""
+    result, output = run_capture(tmp_path, runner_env(), q_version="")
+    assert result.returncode == 0, result.stderr
+    payload = read_payload(output)
+    assert payload["q_version"] == ""
+    assert payload["native_q_runner_execution"] == "NOT_OBSERVED"
+    assert runner_evidence.validate(payload) == []
+
+
+def test_explicit_not_observed_stub_is_accepted(tmp_path: Path) -> None:
+    """Offline evidence can carry the NOT_OBSERVED/CHECKED stub values."""
+    result, output = run_capture(
+        tmp_path,
+        runner_env(),
+        q_version="",
+        extra_args=(
+            "--native-q-runner-execution",
+            "NOT_OBSERVED",
+            "--runner-attestation-mechanism",
+            "CHECKED",
+        ),
+    )
+    assert result.returncode == 0, result.stderr
+    assert read_payload(output)["native_q_runner_execution"] == "NOT_OBSERVED"
+
+
+def test_observed_execution_requires_q_version_evidence() -> None:
+    """An OBSERVED claim without a q version is rejected."""
+    evidence = runner_evidence.capture(runner_env(), q_version="", head_sha=SHA)
+    evidence["native_q_runner_execution"] = "OBSERVED"
+    assert (
+        "q runtime execution claimed without q version"
+        in runner_evidence.validate(evidence)
+    )
 
 
 def test_missing_dedicated_label_fails_closed(tmp_path: Path) -> None:

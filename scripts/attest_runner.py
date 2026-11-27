@@ -10,6 +10,7 @@ lifecycle timestamps.
 Usage:
   python3 scripts/attest_runner.py attest \
       --run-id ID --job-id ID --expected-sha SHA --output PATH
+  python3 scripts/attest_runner.py skipped --run-id ID --output PATH
 """
 
 from __future__ import annotations
@@ -28,6 +29,14 @@ DEFAULT_OUTPUT = ROOT / "data" / "assurance" / "runner-attestation.json"
 REPOSITORY = "siebengestirn/quant"
 REQUIRED_GROUP = "quant-native-q"
 REQUIRED_LABEL = "quant-native-q"
+RUNNER_EXECUTION_OBSERVED = "OBSERVED"
+RUNNER_EXECUTION_NOT_OBSERVED = "NOT_OBSERVED"
+RUNNER_EXECUTION_VALUES = (
+    RUNNER_EXECUTION_OBSERVED,
+    RUNNER_EXECUTION_NOT_OBSERVED,
+)
+ATTESTATION_MECHANISM_CHECKED = "CHECKED"
+GATED_NOT_RUN = "GATED_NOT_RUN"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 IDENTITY_FIELDS = (
     "runner_id",
@@ -36,6 +45,8 @@ IDENTITY_FIELDS = (
     "runner_group_id",
     "runner_group_name",
 )
+RUNNER_ID_FIELDS = frozenset({"runner_id", "runner_group_id"})
+RUNNER_NAME_FIELDS = frozenset({"runner_name", "runner_group_name"})
 LIFECYCLE_FIELDS = ("started_at", "completed_at")
 DEACTIVATION_FIELDS = ("runner_deregistered_at", "runner_deactivated_at")
 DEREGISTRATION_REQUIREMENT = (
@@ -127,18 +138,24 @@ def fetch_job(
 
 
 def missing_identity_fields(job: Mapping[str, Any]) -> list[str]:
-    """List observed runner identity fields that are absent or empty."""
+    """List observed runner identity fields that are absent or invalid."""
     missing: list[str] = []
     for field in IDENTITY_FIELDS:
         value = job.get(field)
         if field == "runner_labels":
             if not observed_labels(job):
                 missing.append(field)
+        elif field in RUNNER_ID_FIELDS:
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value <= 0
+            ):
+                missing.append(field)
+        elif field in RUNNER_NAME_FIELDS:
+            if not isinstance(value, str) or not value.strip():
+                missing.append(field)
         elif value is None or isinstance(value, bool):
-            missing.append(field)
-        elif isinstance(value, str) and not value.strip():
-            missing.append(field)
-        elif isinstance(value, int) and value <= 0:
             missing.append(field)
     return missing
 
@@ -178,6 +195,11 @@ def validate_job(
         problems.append(f"runner labels lack required label {REQUIRED_LABEL}")
     if str(job.get("status", "")).strip() != "completed":
         problems.append("workflow job is not completed in the API response")
+    conclusion = str(job.get("conclusion", "")).strip().lower()
+    if conclusion == "skipped":
+        problems.append("skipped native-q job cannot attest runner execution")
+    elif conclusion != "success":
+        problems.append(f"unexpected job conclusion: {conclusion or 'missing'}")
     for field in LIFECYCLE_FIELDS:
         if not str(job.get(field, "")).strip():
             problems.append("missing lifecycle evidence: " + field)
@@ -185,7 +207,12 @@ def validate_job(
 
 
 def build_attestation(
-    job: Mapping[str, Any], run_id: str, job_id: str
+    job: Mapping[str, Any],
+    run_id: str,
+    job_id: str,
+    *,
+    native_q_runner_execution: str = RUNNER_EXECUTION_OBSERVED,
+    runner_attestation_mechanism: str = ATTESTATION_MECHANISM_CHECKED,
 ) -> dict[str, Any]:
     """Build the canonical attestation document from an API job object."""
     verified, evidence = deregistration_from_api(job)
@@ -217,10 +244,43 @@ def build_attestation(
             "deregistration_evidence": evidence,
             "requirement": DEREGISTRATION_REQUIREMENT,
         },
+        "evidence_status": {
+            "native_q_runner_execution": native_q_runner_execution,
+            "runner_attestation_mechanism": runner_attestation_mechanism,
+        },
         "api_endpoints": [
             f"repos/{REPOSITORY}/actions/runs/{run_id}/jobs",
             f"repos/{REPOSITORY}/actions/jobs/{job_id}",
         ],
+        "scope": "Q_PERSISTENCE",
+        "required_for_portable_research": False,
+    }
+
+
+def build_skipped_attestation(run_id: str) -> dict[str, Any]:
+    """Build a stub for a skipped native-q job without claiming execution."""
+    return {
+        "schema_version": 1,
+        "repository": REPOSITORY,
+        "run_id": run_id,
+        "job_id": "",
+        "job_name": "Native KDB-X recovery (gated tier)",
+        "observed": {},
+        "expected": {
+            "runner_group_name": REQUIRED_GROUP,
+            "runner_label": REQUIRED_LABEL,
+        },
+        "native_q_result": GATED_NOT_RUN,
+        "evidence_status": {
+            "native_q_runner_execution": RUNNER_EXECUTION_NOT_OBSERVED,
+            "runner_attestation_mechanism": ATTESTATION_MECHANISM_CHECKED,
+        },
+        "note": (
+            "The native-q job was skipped; no runner identity or q runtime "
+            "execution was observed. The post-job attestation mechanism was "
+            "checked, but no completed job evidence exists for this run."
+        ),
+        "api_endpoints": [],
         "scope": "Q_PERSISTENCE",
         "required_for_portable_research": False,
     }
@@ -242,6 +302,24 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     attest.add_argument("--job-id", required=True)
     attest.add_argument("--expected-sha", required=True)
     attest.add_argument(
+        "--native-q-runner-execution",
+        choices=RUNNER_EXECUTION_VALUES,
+        default=RUNNER_EXECUTION_OBSERVED,
+        help="runner execution status carried by the evidence",
+    )
+    attest.add_argument(
+        "--runner-attestation-mechanism",
+        default=ATTESTATION_MECHANISM_CHECKED,
+        help="attestation mechanism status carried by the evidence",
+    )
+    attest.add_argument(
+        "--output", type=Path, default=DEFAULT_OUTPUT, help="evidence path"
+    )
+    skipped = subparsers.add_parser(
+        "skipped", help="record that no native-q runner execution was observed"
+    )
+    skipped.add_argument("--run-id", required=True)
+    skipped.add_argument(
         "--output", type=Path, default=DEFAULT_OUTPUT, help="evidence path"
     )
     return parser.parse_args(argv)
@@ -250,8 +328,25 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     """Attest the observed runner identity and return an exit status."""
     args = parse_args(argv)
-    run_id, job_id = args.run_id.strip(), args.job_id.strip()
-    if not run_id.isdigit() or not job_id.isdigit():
+    run_id = args.run_id.strip()
+    if not run_id.isdigit():
+        print("FAIL: --run-id must be a positive integer", file=sys.stderr)
+        return 1
+    if args.command == "skipped":
+        output = args.output
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            canonical_json(build_skipped_attestation(run_id)),
+            encoding="utf-8",
+        )
+        print(f"runner attestation stub written: {output}")
+        print(
+            "native q runner execution NOT_OBSERVED; no q runtime "
+            "execution claimed"
+        )
+        return 0
+    job_id = args.job_id.strip()
+    if not job_id.isdigit():
         print(
             "FAIL: --run-id and --job-id must be positive integers",
             file=sys.stderr,
@@ -265,7 +360,17 @@ def main(argv: list[str] | None = None) -> int:
     output = args.output
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
-        canonical_json(build_attestation(job, run_id, job_id)),
+        canonical_json(
+            build_attestation(
+                job,
+                run_id,
+                job_id,
+                native_q_runner_execution=args.native_q_runner_execution,
+                runner_attestation_mechanism=(
+                    args.runner_attestation_mechanism
+                ),
+            )
+        ),
         encoding="utf-8",
     )
     print(f"runner attestation written: {output}")
@@ -279,7 +384,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     print(
-        "runner attestation passed: dedicated group, label, SHA and lifecycle"
+        "runner attestation passed: dedicated group, label, SHA and lifecycle; "
+        f"runner execution {args.native_q_runner_execution}"
     )
     return 0
 

@@ -40,6 +40,10 @@ NATIVE = "GATED_NOT_RUN"
 W1_TESTS = 47
 OLD_W1_TESTS = 14
 REQUIRED_CHECKS = 4
+LATEST_SOURCE_PR = PR + 1
+LATEST_SOURCE_REVISION = f"PR #{LATEST_SOURCE_PR}"
+RUNNER_EXECUTION = "NOT_OBSERVED"
+ATTESTATION_MECHANISM = "CHECKED"
 DOC_PATHS = CHECK.DOC_PATHS
 GATE_NAMES = (
     "ci_security_tests",
@@ -125,7 +129,9 @@ CSV_HEADERS = {
 CURRENT_RECORD = (
     f"{VERSION} / PR #{PR} is COMPLETE; {W1_TESTS} W1 tests; "
     f"{REQUIRED_CHECKS} required checks; {SCOPE}; "
-    f"native q {NATIVE}.\n"
+    f"native q {NATIVE}; runner execution {RUNNER_EXECUTION}; "
+    f"attestation mechanism {ATTESTATION_MECHANISM}; "
+    f"latest source revision {LATEST_SOURCE_REVISION}.\n"
 )
 HISTORICAL_RECORD = (
     "\n## HISTORICAL release history\n\n"
@@ -160,7 +166,10 @@ def write_csv(root: Path, relative: str, header: tuple[str, ...]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     row = [
         f"CURRENT {VERSION} PR #{PR} COMPLETE {W1_TESTS} W1 tests "
-        f"{REQUIRED_CHECKS} required checks {SCOPE} {NATIVE}"
+        f"{REQUIRED_CHECKS} required checks {SCOPE} {NATIVE} "
+        f"runner execution {RUNNER_EXECUTION} "
+        f"attestation {ATTESTATION_MECHANISM} "
+        f"latest source revision {LATEST_SOURCE_REVISION}"
     ] * len(header)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
@@ -215,11 +224,16 @@ def make_state(commit: str, digest: str) -> dict:
             }
         ],
         "independent_acceptance": "PENDING",
-        "main_captured_basis": f"captured fixture commit at PR #{PR}",
-        "main_commit": commit,
+        "latest_branch_protection_captured": True,
+        "latest_source_revision": LATEST_SOURCE_REVISION,
+        "main_captured_basis": (
+            f"captured product baseline commit at PR #{PR}"
+        ),
+        "main_commit": STALE_COMMIT,
         "manifest_basis": "captured fixture manifest",
         "manifest_sha256": "0" * 64,
         "merged_pull_requests": PR_RANGE,
+        "native_q_runner_execution": RUNNER_EXECUTION,
         "native_q_status": NATIVE,
         "release_id": RELEASE_ID,
         "release_scope": SCOPE,
@@ -227,6 +241,11 @@ def make_state(commit: str, digest: str) -> dict:
         "release_version": VERSION,
         "report_basis": "captured fixture report",
         "required_gate_set": list(GATE_NAMES),
+        "runner_attestation_mechanism": ATTESTATION_MECHANISM,
+        "source_commit": commit,
+        "source_commit_basis": (
+            f"captured fixture source commit at PR #{LATEST_SOURCE_PR}"
+        ),
         "test_inventory": {
             inventory_key: GATE_COUNTS[gate]["passed"]
             for gate, inventory_key in INVENTORY_KEYS.items()
@@ -244,15 +263,54 @@ def make_state(commit: str, digest: str) -> dict:
     }
 
 
+def write_branch_protection_capture(root: Path, head: str) -> None:
+    """Write a fresh, HISTORICAL-labelled branch-protection capture."""
+    write_json(
+        root,
+        CHECK.BRANCH_PROTECTION_CAPTURE_RELATIVE,
+        {
+            "allow_deletions": False,
+            "allow_force_pushes": False,
+            "api_version": "2022-11-28",
+            "branch": "main",
+            "captured_at": "2026-11-28T00:00:00Z",
+            "endpoint": (
+                "https://api.github.com/repos/fixture/quant/branches/main/"
+                "protection"
+            ),
+            "enforce_admins": True,
+            "historical_captures": [
+                {
+                    "captured_at": "2026-11-27T00:00:00Z",
+                    "main_sha": STALE_COMMIT,
+                    "note": (
+                        f"HISTORICAL point-in-time capture at PR #{PR - 1}"
+                    ),
+                    "response_sha256": "1" * 64,
+                }
+            ],
+            "http_protocol": "HTTP/2.0",
+            "http_status": 200,
+            "main_sha": head,
+            "note": (
+                "HISTORICAL point-in-time capture at " + LATEST_SOURCE_REVISION
+            ),
+            "required_approvals": 0,
+            "required_checks": list(CHECK.REQUIRED_CHECKS),
+            "required_conversation_resolution": True,
+            "response_sha256": "2" * 64,
+            "strict_checks": True,
+        },
+    )
+
+
 def write_state(root: Path) -> None:
     """Refresh the fixture state with the current HEAD and report digest."""
     report_bytes = (root / CHECK.REPORT_RELATIVE).read_bytes()
     digest = hashlib.sha256(report_bytes).hexdigest()
-    write_json(
-        root,
-        CHECK.STATE_RELATIVE,
-        make_state(git(root, "rev-parse", "HEAD"), digest),
-    )
+    head = git(root, "rev-parse", "HEAD")
+    write_branch_protection_capture(root, head)
+    write_json(root, CHECK.STATE_RELATIVE, make_state(head, digest))
 
 
 @pytest.fixture(name="sandbox")
@@ -318,6 +376,7 @@ def test_valid_state_passes(sandbox: Path) -> None:
 def test_identity_is_derived_not_hardcoded(sandbox: Path) -> None:
     """A fictional release identity passes, proving no pinned real release."""
     assert VERSION != "R8.4.2" and PR != 66
+    assert LATEST_SOURCE_PR != 70
     assert CHECK.check(sandbox) == []
 
 
@@ -328,11 +387,69 @@ def test_bound_identity_fails(sandbox: Path) -> None:
     assert any("release_id is not bound to version and PR" in e for e in errors)
 
 
-def test_stale_commit_fails(sandbox: Path) -> None:
-    """A commit that no longer matches git HEAD fails closed."""
-    update_state(sandbox, main_commit=STALE_COMMIT)
+def test_stale_source_commit_fails(sandbox: Path) -> None:
+    """A source commit that no longer matches git HEAD fails closed."""
+    update_state(sandbox, source_commit=STALE_COMMIT)
     errors = CHECK.check(sandbox)
-    assert any("main_commit does not match git HEAD" in e for e in errors)
+    assert any("source_commit does not match git HEAD" in e for e in errors)
+
+
+def test_baseline_commit_may_differ_from_latest_source(sandbox: Path) -> None:
+    """The captured product baseline pin is not the latest source commit."""
+    state = json.loads((sandbox / CHECK.STATE_RELATIVE).read_text())
+    assert state["main_commit"] != state["source_commit"]
+    assert CHECK.check(sandbox) == []
+
+
+def test_source_revision_must_follow_product_baseline(sandbox: Path) -> None:
+    """A source revision older than the product release baseline fails."""
+    update_state(sandbox, latest_source_revision=f"PR #{PR - 1}")
+    errors = CHECK.check(sandbox)
+    assert any("latest_source_revision predates" in e for e in errors)
+
+
+def test_source_revision_grammar_fails_closed(sandbox: Path) -> None:
+    """The source revision must be an explicit PR token."""
+    update_state(sandbox, latest_source_revision="v78")
+    errors = CHECK.check(sandbox)
+    assert any("latest_source_revision must be" in e for e in errors)
+
+
+def test_runner_execution_must_match_native_q_result(sandbox: Path) -> None:
+    """A skipped native-q result cannot claim observed runner execution."""
+    update_state(sandbox, native_q_runner_execution="OBSERVED")
+    errors = CHECK.check(sandbox)
+    assert any("native_q_runner_execution does not match" in e for e in errors)
+
+
+def test_attestation_mechanism_must_be_checked(sandbox: Path) -> None:
+    """An unverified attestation mechanism fails closed."""
+    update_state(sandbox, runner_attestation_mechanism="ASSUMED")
+    errors = CHECK.check(sandbox)
+    assert any(
+        "runner_attestation_mechanism is not CHECKED" in e for e in errors
+    )
+
+
+def test_branch_protection_capture_flag_is_required(sandbox: Path) -> None:
+    """The fresh branch-protection capture must be declared present."""
+    update_state(sandbox, latest_branch_protection_captured=False)
+    errors = CHECK.check(sandbox)
+    assert any(
+        "latest_branch_protection_captured is not true" in e for e in errors
+    )
+
+
+def test_branch_protection_capture_digest_must_be_sha256(
+    sandbox: Path,
+) -> None:
+    """A malformed response digest in the fresh capture fails closed."""
+    path = sandbox / CHECK.BRANCH_PROTECTION_CAPTURE_RELATIVE
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["response_sha256"] = "not-a-digest"
+    write_json(sandbox, CHECK.BRANCH_PROTECTION_CAPTURE_RELATIVE, payload)
+    errors = CHECK.check(sandbox)
+    assert any("response_sha256 is not a SHA-256 digest" in e for e in errors)
 
 
 def test_pr_range_binding_fails(sandbox: Path) -> None:
@@ -435,9 +552,28 @@ def test_noncanonical_json_fails(sandbox: Path) -> None:
     assert any("not canonical JSON" in e for e in errors)
 
 
-def test_show_reports_the_canonical_state(sandbox: Path) -> None:
-    """The show command prints the authoritative release identity."""
+def test_missing_source_commit_fails(sandbox: Path) -> None:
+    """A state without the latest source commit fails required-field checks."""
+    state = json.loads((sandbox / CHECK.STATE_RELATIVE).read_text())
+    del state["source_commit"]
+    write_json(sandbox, CHECK.STATE_RELATIVE, state)
+    errors = CHECK.check(sandbox)
+    assert any("missing required field source_commit" in e for e in errors)
+
+
+def test_show_reports_the_canonical_state(
+    sandbox: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The show command prints both release identities and evidence status."""
     assert CHECK.show(sandbox) == 0
+    printed = capsys.readouterr().out
+    for token in (
+        RELEASE_ID,
+        LATEST_SOURCE_REVISION,
+        RUNNER_EXECUTION,
+        ATTESTATION_MECHANISM,
+    ):
+        assert token in printed
 
 
 def mark_historical(sandbox: Path) -> dict:
@@ -465,6 +601,29 @@ def test_current_state_without_generated_report_fails(sandbox: Path) -> None:
         f"{CHECK.REPORT_RELATIVE}: missing or unreadable" in error
         for error in errors
     )
+
+
+def test_clean_checkout_still_validates_runner_fields(sandbox: Path) -> None:
+    """A missing generated report does not waive runner evidence fields."""
+    mark_historical(sandbox)
+    (sandbox / CHECK.REPORT_RELATIVE).unlink()
+    update_state(sandbox, runner_attestation_mechanism="ASSUMED")
+    errors = CHECK.check(sandbox)
+    assert any(
+        "runner_attestation_mechanism is not CHECKED" in e for e in errors
+    )
+
+
+def test_historical_capture_tolerates_unsynced_generated_gates(
+    sandbox: Path,
+) -> None:
+    """A point-in-time capture does not claim volatile generated gates."""
+    mark_historical(sandbox)
+    report_path = sandbox / CHECK.REPORT_RELATIVE
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["overall"] = "FAIL"
+    write_json(sandbox, CHECK.REPORT_RELATIVE, report)
+    assert CHECK.check(sandbox) == []
 
 
 def test_historical_state_with_invalid_report_fails(sandbox: Path) -> None:

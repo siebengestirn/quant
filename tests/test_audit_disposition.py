@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import json
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -492,3 +494,104 @@ def test_cli_verify_reports_failure_on_tampered_evidence(
         == 1
     )
     assert "counts disagree" in capsys.readouterr().err
+
+
+def test_verify_payloads_records_exact_counts(tmp_path: Path) -> None:
+    """In-memory verification records digest, coverage and owner status."""
+    _source, path, raw = write_evidence(tmp_path)
+    report = AUDIT_DISPOSITION.load_json(path, "disposition report")
+    review = AUDIT_DISPOSITION.build_review_report(raw, report)
+    summary = AUDIT_DISPOSITION.verify_payloads(raw, report, review)
+    assert summary == {
+        "source_digest": hashlib.sha256(raw).hexdigest(),
+        "finding_count": len(report["dispositions"]),
+        "disposition_count": len(report["dispositions"]),
+        "counts_by_class": report["counts"],
+        "owner_status": {
+            name: AUDIT_DISPOSITION.DISPOSITION_OWNERS[name][
+                "resolution_status"
+            ]
+            for name in DISPOSITIONS
+        },
+    }
+    without_review = AUDIT_DISPOSITION.verify_payloads(raw, report)
+    assert without_review["source_digest"] == summary["source_digest"]
+    assert without_review["disposition_count"] == summary["disposition_count"]
+
+
+@pytest.mark.parametrize("mutate", ["digest", "missing", "extra", "owner"])
+def test_verify_payloads_fails_closed(tmp_path: Path, mutate: str) -> None:
+    """Every inexact payload fails the in-memory evidence check."""
+    _source, path, raw = write_evidence(tmp_path)
+    report = AUDIT_DISPOSITION.load_json(path, "disposition report")
+    review = AUDIT_DISPOSITION.build_review_report(raw, report)
+    if mutate == "digest":
+        report["source_digest"] = "0" * 64
+    elif mutate == "missing":
+        report["dispositions"].pop()
+    elif mutate == "extra":
+        duplicate = dict(report["dispositions"][0])
+        duplicate["finding_id"] = "e" * 64
+        report["dispositions"].append(duplicate)
+    else:
+        review["categories"]["AMBIGUOUS_REQUIREMENT"][
+            "resolution_status"
+        ] = "resolved"
+    with pytest.raises(ValueError):
+        AUDIT_DISPOSITION.verify_payloads(raw, report, review)
+
+
+def test_evidence_counts_reject_invalid_record() -> None:
+    """A recorded summary must carry exact digest, counts and owners."""
+    counts = {
+        "applicable": True,
+        "source_digest": "a" * 64,
+        "finding_count": 1,
+        "disposition_count": 1,
+        "counts_by_class": {name: 0 for name in DISPOSITIONS},
+        "owner_status": {
+            name: AUDIT_DISPOSITION.DISPOSITION_OWNERS[name][
+                "resolution_status"
+            ]
+            for name in DISPOSITIONS
+        },
+    }
+    counts["counts_by_class"]["CORRECT_WORDING"] = 1
+    AUDIT_DISPOSITION.validate_evidence_counts(counts)
+    counts["owner_status"]["CORRECT_WORDING"] = "OPEN"
+    with pytest.raises(ValueError, match="owner status"):
+        AUDIT_DISPOSITION.validate_evidence_counts(counts)
+
+
+def test_verify_zip_evidence_is_offline_and_exact(tmp_path: Path) -> None:
+    """A bundled ZIP is checked from memory without regenerating files."""
+    _source, path, raw = write_evidence(tmp_path)
+    report = AUDIT_DISPOSITION.load_json(path, "disposition report")
+    review = AUDIT_DISPOSITION.build_review_report(raw, report)
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as bundled:
+        for relative, payload in zip(
+            AUDIT_DISPOSITION.BUNDLE_EVIDENCE_RELATIVE,
+            (
+                raw,
+                json.dumps(report).encode("utf-8"),
+                json.dumps(review).encode("utf-8"),
+            ),
+            strict=True,
+        ):
+            bundled.writestr(f"quant/{relative}", payload)
+    with zipfile.ZipFile(archive) as bundled:
+        errors: list[str] = []
+        summary = AUDIT_DISPOSITION.verify_zip_evidence(
+            bundled, "quant/", errors
+        )
+    assert not errors
+    assert summary["status"] == "PASS"
+    assert summary["source_digest"] == hashlib.sha256(raw).hexdigest()
+    with zipfile.ZipFile(archive) as bundled:
+        errors = []
+        summary = AUDIT_DISPOSITION.verify_zip_evidence(
+            bundled, "other/", errors
+        )
+    assert not errors
+    assert summary["status"] == "NOT_APPLICABLE"

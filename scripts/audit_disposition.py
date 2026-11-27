@@ -40,6 +40,13 @@ DEFAULT_REVIEW = ROOT / "data" / "assurance" / "audit-disposition-review.json"
 SCHEMA_VERSION = 1
 REVIEW_SCHEMA_VERSION = 1
 BINDING_CATEGORIES = frozenset({"tautology", "audit_ignore"})
+# Shared failure modes for callers validating evidence held in memory.
+EVIDENCE_ERRORS = (KeyError, OSError, TypeError, ValueError, UnicodeDecodeError)
+BUNDLE_EVIDENCE_RELATIVE = (
+    "evidence/assurance/english-audit.json",
+    "evidence/assurance/audit-dispositions.json",
+    "evidence/assurance/audit-disposition-review.json",
+)
 DISPOSITIONS = (
     "CORRECT_WORDING",
     "ACCEPTED_DOMAIN_TERMINOLOGY",
@@ -635,6 +642,163 @@ def verify_bundle(
         review = load_json(review_path, "review report")
         validate_review_report(review, report, raw)
     return report
+
+
+def verify_payloads(
+    raw: bytes, report: object, review: object | None = None
+) -> dict:
+    """Validate in-memory evidence against the exact audit bytes.
+
+    This is the same check as ``verify_bundle`` for callers that hold the
+    files in memory (for example an offline ZIP reader). It fails closed on
+    stale digests, altered findings, missing or extra dispositions and wrong
+    owner status, and returns the counts that other gates must record.
+    """
+    try:
+        findings = parse_findings(json.loads(raw))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"unreadable audit findings: {exc}") from exc
+    validate_report(raw, findings, report)
+    if review is not None:
+        validate_review_report(review, report, raw)
+    if not isinstance(report, dict):  # pragma: no cover - validated above
+        raise ValueError("disposition report must be a JSON object")
+    categories = (
+        review.get("categories", {}) if isinstance(review, dict) else {}
+    )
+    owner_status = {}
+    for name in DISPOSITIONS:
+        entry = categories.get(name) if isinstance(categories, dict) else None
+        owner_status[name] = (
+            entry.get("resolution_status")
+            if isinstance(entry, dict)
+            else "unknown"
+        )
+    return {
+        "source_digest": digest(raw),
+        "finding_count": report["advisory_findings"],
+        "disposition_count": len(report["dispositions"]),
+        "counts_by_class": dict(report["counts"]),
+        "owner_status": owner_status,
+    }
+
+
+def empty_evidence_summary() -> dict:
+    """Return the explicit zero-valued summary of absent evidence."""
+    return {
+        "source_digest": "",
+        "finding_count": 0,
+        "disposition_count": 0,
+        "counts_by_class": {},
+        "owner_status": {},
+    }
+
+
+EXPECTED_OWNER_STATUS = {
+    "CORRECT_WORDING": "resolved",
+    "ACCEPTED_DOMAIN_TERMINOLOGY": "resolved",
+    "HISTORICAL_STATEMENT": "resolved",
+    "AMBIGUOUS_REQUIREMENT": "OPEN",
+    "POTENTIALLY_MISLEADING_CLAIM": "OPEN",
+    "DOCUMENTATION_DEFECT": "OPEN",
+}
+
+
+def validate_evidence_counts(counts: object) -> None:
+    """Validate the digest, coverage, class counts and owner status."""
+    if not isinstance(counts, dict):
+        raise ValueError("evidence counts must be an object")
+    for key in (
+        "applicable",
+        "source_digest",
+        "finding_count",
+        "disposition_count",
+        "counts_by_class",
+        "owner_status",
+    ):
+        if key not in counts:
+            raise ValueError(f"invalid evidence count: {key}")
+    if not isinstance(counts["applicable"], bool):
+        raise ValueError("invalid applicability flag")
+    value = counts["source_digest"]
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or value != value.lower()
+        or not set(value) <= frozenset("0123456789abcdef")
+    ):
+        raise ValueError("invalid source digest")
+    for key in ("finding_count", "disposition_count"):
+        number = counts[key]
+        if (
+            not isinstance(number, int)
+            or isinstance(number, bool)
+            or number <= 0
+        ):
+            raise ValueError(f"invalid evidence count: {key}")
+    if counts["finding_count"] != counts["disposition_count"]:
+        raise ValueError("finding/disposition coverage mismatch")
+    classes = counts["counts_by_class"]
+    if (
+        not isinstance(classes, dict)
+        or set(classes) != set(DISPOSITIONS)
+        or any(
+            not isinstance(item, int) or isinstance(item, bool) or item < 0
+            for item in classes.values()
+        )
+        or sum(classes.values()) != counts["disposition_count"]
+    ):
+        raise ValueError("invalid counts by class")
+    if counts["owner_status"] != EXPECTED_OWNER_STATUS:
+        raise ValueError("invalid owner status")
+
+
+def verify_zip_evidence(archive, prefix: str, errors: list[str]) -> dict:
+    """Verify disposition evidence inside a ZIP, without writing files."""
+    names = set(archive.namelist())
+    entries = [f"{prefix}{name}" for name in BUNDLE_EVIDENCE_RELATIVE]
+    missing = [
+        name
+        for name, entry in zip(BUNDLE_EVIDENCE_RELATIVE, entries, strict=True)
+        if entry not in names
+    ]
+    base = empty_evidence_summary()
+    if missing:
+        return {
+            "status": "NOT_APPLICABLE",
+            "reason": "generated audit evidence is absent from this bundle: "
+            + ", ".join(missing),
+            **base,
+        }
+    try:
+        raw = archive.read(entries[0])
+        report = json.loads(archive.read(entries[1]).decode("utf-8"))
+        review = json.loads(archive.read(entries[2]).decode("utf-8"))
+        summary = verify_payloads(raw, report, review)
+    except EVIDENCE_ERRORS as exc:
+        errors.append(f"audit evidence error: {exc}")
+        return {"status": "FAIL", "reason": str(exc), **base}
+    return {
+        "status": "PASS",
+        "reason": "exact audit digest and finding coverage verified",
+        **summary,
+    }
+
+
+def regenerate_evidence(
+    input_path: Path, output_path: Path, review_path: Path
+) -> dict:
+    """Write dispositions from exact input bytes and verify them in memory."""
+    for path in (output_path, review_path):
+        if path.is_file():
+            path.unlink()
+    raw, findings = load_findings(input_path)
+    report = build_report(raw, findings, source=str(input_path))
+    write_report(report, output_path)
+    review = build_review_report(raw, report, source=str(input_path))
+    write_report(review, review_path)
+    verify_bundle(input_path, output_path, review_path)
+    return verify_payloads(raw, report, review)
 
 
 def summarize(report: dict) -> None:

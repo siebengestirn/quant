@@ -32,6 +32,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 STATE_RELATIVE = "governance/release-state.json"
 REPORT_RELATIVE = "data/assurance/verification-report.json"
 INVENTORY_RELATIVE = "governance/inventory.json"
+BRANCH_PROTECTION_CAPTURE_RELATIVE = "governance/branch-protection-capture.json"
 DOC_PATHS = (
     "docs/master-acceptance-register.md",
     "docs/release-status.md",
@@ -49,15 +50,20 @@ REQUIRED_FIELDS = (
     "gate_results",
     "historical_releases",
     "independent_acceptance",
+    "latest_branch_protection_captured",
+    "latest_source_revision",
     "main_commit",
     "manifest_sha256",
     "merged_pull_requests",
+    "native_q_runner_execution",
     "native_q_status",
     "release_id",
     "release_scope",
     "release_status",
     "release_version",
     "required_gate_set",
+    "runner_attestation_mechanism",
+    "source_commit",
     "test_inventory",
     "trading_authorization",
     "verification_report_sha256",
@@ -106,6 +112,7 @@ GATE_COUNT_KEYS = {
 SHA256_RE = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{64}(?![0-9a-fA-F])")
 COMMIT_RE = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{40}(?![0-9a-fA-F])")
 RANGE_RE = re.compile(r"^(\d+)-(\d+)$")
+SOURCE_PR_RE = re.compile(r"^PR #(\d+)$")
 VERSION_RE = re.compile(r"^R\d+(?:\.\d+)+$")
 LINE_MARKERS = (*HISTORICAL_MARKERS, "at pr #")
 SECTION_MARKERS = (
@@ -125,6 +132,12 @@ def pr_suffix(state: dict) -> str:
     """Return the final PR number in the merged pull request range."""
     value = str(state.get("merged_pull_requests", ""))
     return value.rsplit("-", maxsplit=1)[-1]
+
+
+def source_pr_number(state: dict) -> int | None:
+    """Return the latest source revision PR number from the state."""
+    match = SOURCE_PR_RE.fullmatch(str(state.get("latest_source_revision", "")))
+    return int(match.group(1)) if match else None
 
 
 def is_historical(state: dict) -> bool:
@@ -410,6 +423,9 @@ def token_errors(label: str, current_text: str, state: dict) -> list[str]:
     checks = required_check_count(state)
     native = str(state.get("native_q_status", ""))
     scope = str(state.get("release_scope", ""))
+    revision = str(state.get("latest_source_revision", ""))
+    execution = str(state.get("native_q_runner_execution", ""))
+    mechanism = str(state.get("runner_attestation_mechanism", ""))
     required = (
         (
             str(state.get("release_version", "")),
@@ -431,6 +447,9 @@ def token_errors(label: str, current_text: str, state: dict) -> list[str]:
         ),
         (scope, scope in current_text),
         (native, native in current_text),
+        (revision, revision in current_text),
+        (execution, execution in current_text),
+        (mechanism, mechanism in current_text),
     )
     return [
         f"{label}: current record missing {name}"
@@ -531,17 +550,30 @@ def identity_errors(root: pathlib.Path, state: dict) -> list[str]:
         errors.append(
             f"{STATE_RELATIVE}: independent_acceptance is not PENDING"
         )
-    commit = state["main_commit"]
+    baseline = state["main_commit"]
+    if not isinstance(baseline, str) or not COMMIT_RE.fullmatch(baseline):
+        errors.append(f"{STATE_RELATIVE}: main_commit is not a full commit SHA")
+    commit = state["source_commit"]
     if not isinstance(commit, str) or not COMMIT_RE.fullmatch(commit):
-        errors.append(f"{STATE_RELATIVE}: main_commit is not a full SHA-256")
-    if not is_historical(state):
+        errors.append(f"{STATE_RELATIVE}: source_commit is not a full SHA-1")
+    elif not is_historical(state):
         head = git_head(root)
         if not head:
             errors.append(f"{STATE_RELATIVE}: git HEAD is unavailable")
         elif head != commit:
             errors.append(
-                f"{STATE_RELATIVE}: main_commit does not match git HEAD"
+                f"{STATE_RELATIVE}: source_commit does not match git HEAD"
             )
+    revision = source_pr_number(state)
+    if revision is None:
+        errors.append(
+            f"{STATE_RELATIVE}: latest_source_revision must be 'PR #<number>'"
+        )
+    elif not pr.isdigit() or revision < int(pr):
+        errors.append(
+            f"{STATE_RELATIVE}: latest_source_revision predates the "
+            "product release baseline"
+        )
     for field in ("manifest_sha256", "verification_report_sha256"):
         digest = state.get(field)
         if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
@@ -617,8 +649,8 @@ def test_inventory_errors(state: dict, gates: dict) -> list[str]:
     return errors
 
 
-def branch_policy_errors(state: dict, gates: dict) -> list[str]:
-    """Validate branch protection, the native-q gate and trading status."""
+def branch_policy_errors(state: dict) -> list[str]:
+    """Validate the state-owned branch, runner and trading policy."""
     errors: list[str] = []
     protection = state.get("branch_protection")
     if not isinstance(protection, dict):
@@ -631,10 +663,23 @@ def branch_policy_errors(state: dict, gates: dict) -> list[str]:
             errors.append(f"{STATE_RELATIVE}: required_approvals is not 0")
         if protection.get("native_q_gated") is not True:
             errors.append(f"{STATE_RELATIVE}: native q is not gated")
-    hosted = gates.get("hosted_ci", {}).get("counts", {})
-    native = hosted.get("native_q_result")
-    if native != "GATED_NOT_RUN" or state.get("native_q_status") != native:
-        errors.append(f"{STATE_RELATIVE}: native_q_status is not GATED_NOT_RUN")
+    native = state.get("native_q_status")
+    expected_execution = (
+        "NOT_OBSERVED" if native == "GATED_NOT_RUN" else "OBSERVED"
+    )
+    if state.get("native_q_runner_execution") != expected_execution:
+        errors.append(
+            f"{STATE_RELATIVE}: native_q_runner_execution does not match "
+            "the native-q gate result"
+        )
+    if state.get("runner_attestation_mechanism") != "CHECKED":
+        errors.append(
+            f"{STATE_RELATIVE}: runner_attestation_mechanism is not CHECKED"
+        )
+    if state.get("latest_branch_protection_captured") is not True:
+        errors.append(
+            f"{STATE_RELATIVE}: latest_branch_protection_captured is not true"
+        )
     trading = state.get("trading_authorization")
     if (
         not isinstance(trading, dict)
@@ -642,6 +687,114 @@ def branch_policy_errors(state: dict, gates: dict) -> list[str]:
         or trading.get("decision") != "NO_TRADE"
     ):
         errors.append(f"{STATE_RELATIVE}: trading authorization is not locked")
+    return errors
+
+
+def branch_policy_report_errors(state: dict, gates: dict) -> list[str]:
+    """Reconcile the native-q gate with the generated hosted-ci evidence."""
+    hosted = gates.get("hosted_ci", {}).get("counts", {})
+    native = hosted.get("native_q_result")
+    if native != "GATED_NOT_RUN" or state.get("native_q_status") != native:
+        return [f"{STATE_RELATIVE}: native_q_status is not GATED_NOT_RUN"]
+    return []
+
+
+def capture_envelope_errors(
+    relative: str, text: str, payload: dict, state: dict
+) -> list[str]:
+    """Validate the capture metadata, digest and historical labelling."""
+    errors: list[str] = []
+    if text != canonical_text(payload):
+        errors.append(f"{relative}: not canonical JSON (2-space, sorted)")
+    digest = payload.get("response_sha256")
+    if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
+        errors.append(f"{relative}: response_sha256 is not a SHA-256 digest")
+    if payload.get("http_status") != 200:
+        errors.append(f"{relative}: http_status is not 200")
+    for field in ("api_version", "captured_at"):
+        if not str(payload.get(field, "")).strip():
+            errors.append(f"{relative}: missing {field}")
+    note = str(payload.get("note", "")).lower()
+    if "historical" not in note:
+        errors.append(f"{relative}: capture is not labelled HISTORICAL")
+    revision = str(state.get("latest_source_revision", ""))
+    if revision and revision.lower() not in note:
+        errors.append(f"{relative}: capture is not at {revision}")
+    return errors
+
+
+def capture_policy_errors(
+    relative: str, payload: dict, state: dict
+) -> list[str]:
+    """Reconcile captured settings with the canonical branch policy."""
+    errors: list[str] = []
+    protection = state.get("branch_protection")
+    if not isinstance(protection, dict):
+        return [f"{relative}: state branch_protection must be an object"]
+    expected = {
+        "branch": "main",
+        "main_sha": state.get("source_commit"),
+        "required_approvals": protection.get("required_approvals"),
+    }
+    for field, value in expected.items():
+        if payload.get(field) != value:
+            errors.append(f"{relative}: {field} differs from the state")
+    checks = payload.get("required_checks")
+    if not isinstance(checks, list) or not isinstance(
+        protection.get("required_checks"), list
+    ):
+        errors.append(f"{relative}: required_checks differ from the state")
+    elif set(checks) != set(protection["required_checks"]):
+        errors.append(f"{relative}: required_checks differ from the state")
+    for field in (
+        "strict_checks",
+        "required_conversation_resolution",
+        "enforce_admins",
+    ):
+        if payload.get(field) is not True:
+            errors.append(f"{relative}: {field} is not true")
+    for field in ("allow_force_pushes", "allow_deletions"):
+        if payload.get(field) is not False:
+            errors.append(f"{relative}: {field} is not false")
+    return errors
+
+
+def capture_history_errors(relative: str, payload: dict) -> list[str]:
+    """Require earlier labelled captures to be preserved."""
+    history = payload.get("historical_captures")
+    if not isinstance(history, list) or not history:
+        return [f"{relative}: historical_captures must be retained"]
+    errors: list[str] = []
+    for number, item in enumerate(history, 1):
+        label = f"{relative}: historical_captures[{number}]"
+        if not isinstance(item, dict):
+            errors.append(f"{label} incomplete")
+            continue
+        if "historical" not in str(item.get("note", "")).lower():
+            errors.append(f"{label} not labelled HISTORICAL")
+        old = str(item.get("response_sha256", ""))
+        if not SHA256_RE.fullmatch(old):
+            errors.append(f"{label} response_sha256 is not SHA-256")
+    return errors
+
+
+def branch_protection_capture_errors(
+    root: pathlib.Path, state: dict
+) -> list[str]:
+    """Cross-check the fresh branch-protection capture with the state."""
+    relative = BRANCH_PROTECTION_CAPTURE_RELATIVE
+    text = read_text(root, relative)
+    if text is None:
+        return [f"{relative}: missing or unreadable"]
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return [f"{relative}: invalid JSON: {exc}"]
+    if not isinstance(payload, dict):
+        return [f"{relative}: object required"]
+    errors = capture_envelope_errors(relative, text, payload, state)
+    errors.extend(capture_policy_errors(relative, payload, state))
+    errors.extend(capture_history_errors(relative, payload))
     return errors
 
 
@@ -698,24 +851,26 @@ def state_errors(root: pathlib.Path, state: dict) -> list[str]:
     if errors:
         return errors
     errors.extend(identity_errors(root, state))
+    errors.extend(branch_protection_capture_errors(root, state))
+    errors.extend(workstream_errors(state))
+    errors.extend(branch_policy_errors(state))
     report_text = read_text(root, REPORT_RELATIVE)
     if report_text is None:
-        # A generated report is absent in a clean checkout. A historical
-        # capture does not claim that generated file, so the check is
+        # A generated report is absent in a clean checkout. A point-in-time
+        # capture does not claim that volatile file, so generated gates are
         # NOT_APPLICABLE there; a current-state record must still provide it.
         if not is_historical(state):
             errors.append(f"{REPORT_RELATIVE}: missing or unreadable")
         return errors
     report_errors, gates, valid = report_file_errors(
-        state, state["main_commit"], is_historical(state), report_text
+        state, state["source_commit"], is_historical(state), report_text
     )
     errors.extend(report_errors)
-    if not valid:
+    if not valid or is_historical(state):
         return errors
     errors.extend(gate_errors(state, gates))
     errors.extend(test_inventory_errors(state, gates))
-    errors.extend(branch_policy_errors(state, gates))
-    errors.extend(workstream_errors(state))
+    errors.extend(branch_policy_report_errors(state, gates))
     return errors
 
 
@@ -745,9 +900,14 @@ def show(root: pathlib.Path = ROOT) -> int:
         "release_scope",
         "merged_pull_requests",
         "main_commit",
+        "latest_source_revision",
+        "source_commit",
         "manifest_sha256",
         "verification_report_sha256",
         "native_q_status",
+        "native_q_runner_execution",
+        "runner_attestation_mechanism",
+        "latest_branch_protection_captured",
         "independent_acceptance",
     ):
         print(f"{name}: {state.get(name, 'missing')}")
