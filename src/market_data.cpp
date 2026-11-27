@@ -479,6 +479,105 @@ bool RecoverUniversePublication(const std::string& path,
 // Normalisation helpers.
 
 // ---------------------------------------------------------------------------
+int64_t ParseIsoTimestampMs(const std::string& text) {
+  if (text.size() < 19 || text[4] != '-' || text[7] != '-' || text[10] != 'T' ||
+      text[13] != ':' || text[16] != ':')
+    return -1;
+  auto digits = [&text](size_t at, size_t count) {
+    int value = 0;
+    for (size_t i = 0; i < count; ++i) {
+      if (at + i >= text.size() ||
+          !std::isdigit(static_cast<unsigned char>(text[at + i])))
+        return -1;
+      value = value * 10 + (text[at + i] - '0');
+    }
+    return value;
+  };
+  const int year = digits(0, 4);
+  const int month = digits(5, 2);
+  const int day = digits(8, 2);
+  const int hour = digits(11, 2);
+  const int minute = digits(14, 2);
+  const int second = digits(17, 2);
+  static constexpr int kDaysInMonth[] = {
+      31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  const bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+  const int max_day = kDaysInMonth[month - 1] + (month == 2 && leap ? 1 : 0);
+  if (year < 1970 || month < 1 || month > 12 || day < 1 || day > max_day ||
+      hour > 23 || minute > 59 || second > 60)
+    return -1;
+  std::tm time{};
+  time.tm_year = year - 1900;
+  time.tm_mon = month - 1;
+  time.tm_mday = day;
+  time.tm_hour = hour;
+  time.tm_min = minute;
+  time.tm_sec = second;
+  const std::time_t base = timegm(&time);
+  if (base < 0)
+    return -1;
+  int64_t millis = static_cast<int64_t>(base) * 1000;
+  size_t at = 19;
+  if (at < text.size() && text[at] == '.') {
+    ++at;
+    int factor = 100;
+    while (at < text.size() &&
+           std::isdigit(static_cast<unsigned char>(text[at]))) {
+      if (factor > 0) {
+        millis += (text[at] - '0') * factor;
+        factor /= 10;
+      }
+      ++at;
+    }
+  }
+  int offset_minutes = 0;
+  if (at < text.size() && (text[at] == 'Z' || text[at] == 'z')) {
+    ++at;
+  } else if (at + 5 < text.size() && (text[at] == '+' || text[at] == '-')) {
+    const int sign = text[at] == '+' ? 1 : -1;
+    const int oh = digits(at + 1, 2);
+    const int om = digits(at + 4, 2);
+    if (oh < 0 || om < 0 || oh > 23 || om > 59)
+      return -1;
+    offset_minutes = sign * (oh * 60 + om);
+    at += 6;
+  } else {
+    return -1;
+  }
+  if (at != text.size())
+    return -1;
+  return millis - static_cast<int64_t>(offset_minutes) * 60000;
+}
+
+int64_t ParseProviderMillis(const Json* value) {
+  if (value == nullptr)
+    return 0;
+  if (value->type() == Json::Type::kString) {
+    const std::string text = value->as_string();
+    if (text.find('T') != std::string::npos)
+      return ParseIsoTimestampMs(text);
+    if (text.empty())
+      return 0;
+    try {
+      size_t used = 0;
+      const long long parsed = std::stoll(text, &used, 10);
+      return used == text.size() ? static_cast<int64_t>(parsed) : -1;
+    } catch (...) {
+      return -1;
+    }
+  }
+  if (value->is_exact_integer())
+    return value->as_int(0);
+  return -1;
+}
+
+bool TimestampWithinSkew(int64_t timestamp_ms, int64_t wall_now_ms) {
+  constexpr int64_t kMaxFutureSkewMs = 5 * 60 * 1000;
+  constexpr int64_t kMaxPastSkewMs = 10LL * 365 * 24 * 60 * 60 * 1000;
+  return timestamp_ms > 0 && timestamp_ms <= wall_now_ms + kMaxFutureSkewMs &&
+         timestamp_ms >= wall_now_ms - kMaxPastSkewMs;
+}
+
 Quote NormalizeUpstoxQuote(const Json& item,
                            const std::string& symbol,
                            const std::string& provider_key) {
@@ -497,9 +596,21 @@ Quote NormalizeUpstoxQuote(const Json& item,
   // Upstox provides distinct feed-update and last-trade times. Keep both.
   const Json* update = item.Find("timestamp");
   const Json* trade = item.Find("last_trade_time");
-  quote.provider_timestamp_ms = update == nullptr ? 0 : update->as_int(0);
-  quote.last_trade_timestamp_ms = trade == nullptr ? 0 : trade->as_int(0);
-  quote.exchange_timestamp_ms = quote.last_trade_timestamp_ms;
+  const int64_t wall_now =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count();
+  quote.provider_timestamp_ms = ParseProviderMillis(update);
+  quote.last_trade_timestamp_ms = ParseProviderMillis(trade);
+  if (!TimestampWithinSkew(quote.provider_timestamp_ms, wall_now) ||
+      !TimestampWithinSkew(quote.last_trade_timestamp_ms, wall_now)) {
+    quote.provider_timestamp_ms = 0;
+    quote.last_trade_timestamp_ms = 0;
+    quote.exchange_timestamp_ms = 0;
+    quote.quality = "invalid_timestamp";
+  } else {
+    quote.exchange_timestamp_ms = quote.last_trade_timestamp_ms;
+  }
   if (const Json* ohlc = item.Find("ohlc")) {
     quote.open = ohlc->Find("open") != nullptr
                      ? ohlc->Find("open")->as_double(0.0)
@@ -533,10 +644,13 @@ Quote NormalizeUpstoxQuote(const Json& item,
                           : 0;
     }
   }
-  if (quote.bid <= 0.0 || quote.ask < quote.bid)
+  if (quote.quality == "invalid_timestamp") {
+    // Invalid time remains explicit; no depth assessment can repair it.
+  } else if (quote.bid <= 0.0 || quote.ask < quote.bid) {
     quote.quality = "missing_depth";
-  else
+  } else {
     quote.quality = "ok";
+  }
   return quote;
 }
 
@@ -766,14 +880,16 @@ bool StrictNumber(const Json& value, double* out) {
 HistoryParseResult BuildHistoryCsv(const Json& candles,
                                    const std::string& symbol) {
   HistoryParseResult result;
-  result.csv = "date,open,high,low,close,volume\n";
+  result.csv = "date,open,high,low,close,volume,open_interest\n";
   std::set<std::string> dates;
+  std::vector<std::pair<std::string, std::string>> ordered_rows;
   if (candles.type() != Json::Type::kArray || candles.array().empty()) {
     result.errors.push_back(symbol + ": no candles");
     return result;
   }
   for (const Json& row : candles.array()) {
-    if (row.type() != Json::Type::kArray || row.array().size() != 6) {
+    if (row.type() != Json::Type::kArray ||
+        (row.array().size() != 6 && row.array().size() != 7)) {
       result.errors.push_back(symbol + ": row width mismatch");
       return result;
     }
@@ -793,12 +909,18 @@ HistoryParseResult BuildHistoryCsv(const Json& candles,
       result.errors.push_back(symbol + ": duplicate date " + date);
       return result;
     }
-    double values[5] = {};
-    for (size_t i = 0; i < 5; ++i) {
+    double values[6] = {};
+    const size_t value_count = row.array().size() == 7 ? 6 : 5;
+    for (size_t i = 0; i < value_count; ++i) {
       if (!StrictNumber(row.array()[i + 1], &values[i])) {
         result.errors.push_back(symbol + ": non-numeric field");
         return result;
       }
+    }
+    const double open_interest = row.array().size() == 7 ? values[5] : -1.0;
+    if (open_interest < -1.0 || open_interest != std::floor(open_interest)) {
+      result.errors.push_back(symbol + ": invalid open interest");
+      return result;
     }
     const double open = values[0];
     const double high = values[1];
@@ -814,9 +936,18 @@ HistoryParseResult BuildHistoryCsv(const Json& candles,
     line.imbue(std::locale::classic());
     line << std::setprecision(std::numeric_limits<double>::max_digits10);
     line << date << ',' << open << ',' << high << ',' << low << ',' << close
-         << ',' << volume << '\n';
-    result.csv += line.str();
+         << ',' << volume << ',' << static_cast<int64_t>(open_interest) << '\n';
+    ordered_rows.emplace_back(date, line.str());
     ++result.accepted;
+  }
+  std::sort(ordered_rows.begin(),
+            ordered_rows.end(),
+            [](const auto& left, const auto& right) {
+              return left.first < right.first;
+            });
+  for (const auto& [date, line_text] : ordered_rows) {
+    (void)date;
+    result.csv += line_text;
   }
   return result;
 }
@@ -892,6 +1023,7 @@ HistorySyncResult MarketDataService::SyncHistory(
           std::chrono::system_clock::now().time_since_epoch())
           .count();
   contract.provenance = "UPSTOX_BOD_DAILY";
+  contract.csv_schema = "v3";
   contract.min_rows = 1;
   auto safe_identity = [](std::string value) {
     for (char& c : value) {
@@ -904,8 +1036,11 @@ HistorySyncResult MarketDataService::SyncHistory(
   for (const Instrument& instrument : targets)
     contract.instrument_ids[instrument.symbol] = safe_identity(
         instrument.isin.empty() ? instrument.provider_key : instrument.isin);
-  for (const std::string& symbol : config_.index_symbols)
+  for (const std::string& symbol : config_.index_symbols) {
     contract.instrument_ids[symbol] = safe_identity(IndexKey(symbol));
+    contract.storage_keys[symbol] =
+        DatasetStorageKey(contract.instrument_ids[symbol]);
+  }
   for (const auto& [symbol, ignored] : contract.instrument_ids) {
     (void)ignored;
     contract.symbols.push_back(symbol);
@@ -956,7 +1091,8 @@ HistorySyncResult MarketDataService::SyncHistory(
     for (const Json& row : candles->array())
       if (row.type() == Json::Type::kArray && !row.array().empty())
         sessions.insert(row.array()[0].as_string().substr(0, 10));
-    const std::string path = config_.history_dir + "/" + symbol + ".csv";
+    const std::string path =
+        config_.history_dir + "/" + contract.storage_keys.at(symbol) + ".csv";
     std::string publish_error;
     if (!PublishHistoryFile(path, parsed.csv, &publish_error)) {
       failures.push_back(symbol + ": " + publish_error);
@@ -998,7 +1134,8 @@ HistorySyncResult MarketDataService::SyncHistory(
   }
   Json::Object files;
   for (const std::string& symbol : contract.symbols) {
-    const std::string path = config_.history_dir + "/" + symbol + ".csv";
+    const std::string path =
+        config_.history_dir + "/" + contract.storage_keys.at(symbol) + ".csv";
     std::ifstream input(path, std::ios::binary);
     if (!input.is_open())
       continue;  // Missing required instruments leave the dataset PARTIAL.

@@ -705,11 +705,9 @@ std::map<std::string, std::vector<Candle>> LoadHistory(App& app) {
   if (verification.status != DatasetStatus::kComplete)
     return history;
   for (const std::string& symbol : expected.symbols) {
-    std::string error;
-    std::vector<Candle> candles;
-    if (ReadCsvCandles(
-            app.config.history_dir + "/" + symbol + ".csv", &candles, &error))
-      history[symbol] = candles;
+    const auto verified = verification.candles.find(symbol);
+    if (verified != verification.candles.end())
+      history[symbol] = verified->second;
   }
   return history;
 }
