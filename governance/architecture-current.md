@@ -1,10 +1,21 @@
-# Current architecture — R8 target at PR #63 / R8.4.1 (2026-11-27)
+# Current architecture — R8 target for PR #66 / R8.4.2 (2026-11-27)
+
+## CURRENT RELEASE RECORD (authoritative)
+
+Canonical machine-readable state: `governance/release-state.json`, checked
+by `scripts/check_release_state.py`. R8.4.2 / PR #66 is COMPLETE; merged
+PRs 47-66; scope PORTABLE_RESEARCH; 4 required checks with zero GitHub
+approvals; native q GATED_NOT_RUN; trading DISABLED / NO TRADE. W1 is
+PARTIAL with 36 offline tests and W1-D PENDING; W9 NOT QUALIFIED; W13-W15
+FUTURE; W16/W18 PENDING; W19/W20 PROPOSED. The PR #63 R8.4.1 record below
+is HISTORICAL; PR #64 was an intermediate R8.4.2 step.
+
+## Architecture scope and history
 
 This document maps the target logical architecture of the R8 directive onto
-the code at the PR #63 merge (release history, R8.4.1 COMPLETE and the
-CURRENT RELEASE until PR #64 merges), including the earlier R8.1 corrections
-for exact-integer open interest and volume, the wall-clock journal replay
-field and the R8.3 / W1 A/B/C work. The PR #58 main SHA
+the code, including the R8.1 corrections for exact-integer open interest and
+volume, the wall-clock journal replay field and the R8.3 / W1 A/B/C work.
+HISTORICAL merge values: the PR #58 main SHA
 `1a91da2fb08995c9f6ee20e373d004ad28e58a72`, the PR #61 merge SHA
 `201f5ba602f68fc1370579cefa50b8b599af05d5`, the PR #62 merge SHA
 `66f037cc1d508244a821fef22dd35023d996e2ab` and the PR #63 merge SHA
@@ -84,7 +95,7 @@ R8.4.1 (PR #63) was IN PROGRESS: bundle validator PASS support, complete
 report schema, native-q self-provisioning CI, offline W1 fixture and
 hardened retrieval; it is COMPLETE at PR #63 (release record below).
 
-### R8.4.1 at PR #63 (COMPLETE, release history; current release)
+### R8.4.1 at PR #63 (COMPLETE, HISTORICAL release record)
 
 R8.4.1 was MERGED at PR #63 with merge SHA
 `399652ca6803d65b1c460f0c57419f619c6a950d`. HISTORICAL at PR #63: hosted
@@ -92,8 +103,8 @@ CI run `46023401318` succeeded with three passing jobs and one skipped
 native-q job, the then-final bundle had 117 entries and digest
 `f67054a7586e26219c21e3b25682bb79ea70fa3dd9b2159d212dd97813b7c795`.
 Current main SHA, CI runs and bundle digest are in the current bundle
-`MANIFEST.md` (external artifact, generated after R8.4.2). R8.4.1 is
-COMPLETE and is the CURRENT RELEASE until PR #64 merges.
+`MANIFEST.md` (external artifact). R8.4.1 is COMPLETE (HISTORICAL); the
+current release is R8.4.2 / PR #66 (recorded above).
 
 R8.4.1 closed the bundle validator PASS path, complete report schema,
 native-q self-provisioning CI, offline W1 fixture and hardened retrieval.
@@ -103,9 +114,8 @@ pinned snapshots) with W1-D live consistency and effective dating PENDING
 and no full W1 exit. The release scope was PORTABLE_RESEARCH and native q
 was GATED_NOT_RUN; the skipped hosted job was reported as GATED_NOT_RUN,
 never as passed. Independent acceptance is NOT RECORDED and native-q runner
-provisioning remains OPEN under TD-015. R8.4.2 / PR #64 is IN PROGRESS
-(runner isolation, native_q_checker gate, skip enforcement, explicit W1
-evidence and hosted release assurance) with no exit claim.
+provisioning remains OPEN under TD-015. The intermediate PR #64 runner and
+assurance work is HISTORICAL; R8.4.2 / PR #66 is COMPLETE.
 
 ## 2. C++ / Python / q authority separation as implemented
 
@@ -188,15 +198,16 @@ Consistent with `docs/master-acceptance-register.md` and
 `docs/release-status.md`: research INCONCLUSIVE/negative; holdout
 SEALED_NOT_EVALUATED; Upstox read-only V2 REST with no V3 endpoint call;
 V3 limited to CSV fixture-schema normalisation; FYERS profile probe only;
-no streaming; W1-A/B/C offline public-master evidence (28 tests, four
-bundled snapshots, 9,926 VERIFIED / 174 UNMAPPED) with W1-D effective
+no streaming; W1-A/B/C offline public-master evidence (36 tests at PR #66,
+four bundled snapshots, 9,926 VERIFIED / 174 UNMAPPED) with W1-D effective
 dating PENDING and no full W1 exit; paper OMS not operational; power-loss
 durability NOT PROVEN; intraday/HFT UNSUPPORTED; multi-asset NOT
 ESTABLISHED; live execution DISABLED; decision NO TRADE. The R7 remediations,
 R8.1 corrections, R8.3/W1 A/B/C work, R8.4, R8.4.1 and the reorganized
-governance records are included. R8.4.1 (PR #63) is COMPLETE and is the
-CURRENT RELEASE until PR #64 merges; R8.4.2 / PR #64 is IN PROGRESS with no
-exit claim. At PR #58 (HISTORICAL) hosted CI runs `45969369813` and
+governance records are included. R8.4.1 (PR #63) is COMPLETE (HISTORICAL
+release record). R8.4.2 / PR #66 is COMPLETE under PORTABLE_RESEARCH with
+4 required checks, 36 W1 tests and native q GATED_NOT_RUN.
+At PR #58 (HISTORICAL) hosted CI runs `45969369813` and
 `45969624206` passed; at PR #61 (HISTORICAL) hosted CI run `46007348694`
 passed with native-q skipped/GATED_NOT_RUN; at PR #62 (HISTORICAL) hosted CI
 run `46015103880` passed with native-q skipped/GATED_NOT_RUN; at PR #63

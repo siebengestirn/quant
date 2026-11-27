@@ -1,4 +1,11 @@
-"""Cross-language golden tests for the QUANT v2 dataset contract."""
+"""Cross-language golden tests for the QUANT v2 dataset contract.
+
+The canonical C++ binary comes from ``QUANT_CONTRACT_BIN`` when that variable
+is set, and otherwise falls back to ``build/quant_contract`` (``TOOL``).
+``scripts/verify_report.py`` always sets the variable to the freshly built
+``build-ci/quant_contract`` so a stale, ignored ``build/`` binary cannot
+satisfy these tests.
+"""
 
 from __future__ import annotations
 

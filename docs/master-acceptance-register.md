@@ -1,5 +1,15 @@
 # QUANT master requirements and acceptance register
 
+## CURRENT RELEASE RECORD (authoritative)
+
+Canonical machine-readable state: `governance/release-state.json`, checked
+by `scripts/check_release_state.py`. Release R8.4.2 / PR #66 is COMPLETE;
+scope PORTABLE_RESEARCH; merged PRs 47-66; 4 required checks with zero
+GitHub approvals; native q GATED_NOT_RUN; trading DISABLED / NO TRADE.
+W1 is PARTIAL with 36 offline tests and W1-D PENDING; W9 NOT QUALIFIED;
+W13-W15 FUTURE; W16/W18 PENDING; W19/W20 PROPOSED. PR #64 is HISTORICAL
+intermediate work, no longer the current release.
+
 This is the authoritative definition of "complete" for the platform
 programme. A capability is complete only when requirement, implementation,
 tests, failure behaviour, operational evidence and independent acceptance
@@ -74,22 +84,26 @@ release:
   r8_4_1_native_q: GATED_NOT_RUN
   r8_4_1_release_scope: PORTABLE_RESEARCH
   r8_4_1_w1_offline_tests: 28
-  # R8.4.2 / PR #64 is IN PROGRESS; it has no release identifiers yet:
-  r8_4_2_pr: 64
-  r8_4_2_status: IN PROGRESS
-  # Current release scope and hosted native-q tier (until PR #64 merges):
+  # R8.4.2 / PR #66 is COMPLETE; canonical pins in release-state.json:
+  r8_4_2_pr: 66
+  r8_4_2_status: COMPLETE
+  r8_4_2_merged_pr_range: "47-66"
+  r8_4_2_w1_offline_tests: 36
+  required_checks: 4
+  required_approvals: 0
   release_scope: PORTABLE_RESEARCH
   native_q: GATED_NOT_RUN
   # At PR #62 merge (HISTORICAL); live inventory is external:
   open_prs_at_pr_62: 0
   current_pr_inventory_source: GitHub pull request index (external)
 w1: >-
-  PARTIAL: 28 offline tests on captured bytes (R8.4.1 / PR #63); W1-D
-  live consistency and effective dating PENDING; no full W1 exit
+  PARTIAL: 36 offline tests at PR #66 (HISTORICAL at PR #63: 28 tests);
+  W1-D live consistency and effective dating PENDING; no full W1 exit
 governance: >-
   model SINGLE_DEVELOPER, required_github_approvals 0,
   self_review_checklist REQUIRED, exact_head_ci REQUIRED,
-  required_checks 3, independent_external_acceptance PENDING
+  required_checks 4, native_q GATED_NOT_RUN,
+  independent_external_acceptance PENDING
 trading: >-
   research INCONCLUSIVE, holdout SEALED_NOT_EVALUATED,
   live_execution DISABLED, decision NO_TRADE
@@ -117,16 +131,18 @@ Release history at PR #63 (HISTORICAL) records the R8.4.1 merge at
 bundle with digest
 `f67054a7586e26219c21e3b25682bb79ea70fa3dd9b2159d212dd97813b7c795`,
 hosted CI run `46023401318` success and native q skipped/GATED_NOT_RUN.
-R8.4.1 is COMPLETE at PR #63 and is the CURRENT RELEASE until PR #64
-merges; 28 W1 offline tests were recorded, W1 remains PARTIAL with W1-D
-PENDING, and the release scope was PORTABLE_RESEARCH. R8.4.2 / PR #64 is
-IN PROGRESS (runner isolation, native_q_checker gate, skip enforcement,
-explicit W1 evidence and hosted release assurance); it has no exit claim.
+R8.4.1 is COMPLETE at PR #63 (HISTORICAL release record): 28 W1 offline
+tests were recorded, W1 remains PARTIAL with W1-D PENDING, and the release
+scope was PORTABLE_RESEARCH. R8.4.2 / PR #66 is COMPLETE under
+PORTABLE_RESEARCH with 36 W1 offline tests, 4 required checks and native q
+GATED_NOT_RUN; PR #64 was an intermediate HISTORICAL step (runner isolation,
+native_q_checker gate, skip enforcement, explicit W1 evidence and hosted
+release assurance), not the final release.
 The exact current digest and CI runs are in `MANIFEST.md` of the current
 bundle (external; the current bundle is generated after R8.4.2).
-PRs #47–#63 are all MERGED; the live PR inventory is external. Merges use
+PRs #47–#66 are all MERGED; the live PR inventory is external. Merges use
 the single-developer policy: zero required GitHub approvals, a self-review
-checklist and exact-head CI with three required checks. Independent
+checklist and exact-head CI with 4 required checks. Independent
 external technical acceptance is PENDING / NOT RECORDED. The older
 `0b353f84…` SHA is the baseline snapshot retained as historical evidence,
 not a current state claim.
@@ -168,7 +184,7 @@ accepted.
 
 | Workstream | Implementation | Verification | Independent acceptance | Blocked by |
 |---|---|---|---|---|
-| W1 Instrument master | W1-A/B/C implemented from pinned public Upstox and FYERS masters; effective-dated registry (W1-D) still PENDING | 28 offline tests on captured bytes; 9,926 VERIFIED crosswalk matches, 174 UNMAPPED; four bundled pinned snapshots | Pending: W1-D live consistency and effective dating; no full W1 exit | W1-D live consistency |
+| W1 Instrument master | W1-A/B/C implemented from pinned public Upstox and FYERS masters; effective-dated registry (W1-D) still PENDING | 36 offline tests at PR #66; 9,926 VERIFIED crosswalk matches, 174 UNMAPPED; four bundled pinned snapshots | Pending: W1-D live consistency and effective dating; no full W1 exit | W1-D live consistency |
 | W2 Upstox V3 | Partial (V2 REST; V3 fixture-schema normalisation only) | Unit-tested corrections | Pending | W1 |
 | W3 FYERS Data Socket | Not implemented | Not tested | Pending | W1, valid token |
 | W4 Provider journal | Not proven | Synthetic coverage only | Pending | W2, W3 |
@@ -184,7 +200,7 @@ contains requirement IDs from the same register.
 | ID | Workstream | Current status | Dependencies | Exit evidence | Release blocking |
 |---|---|---|---|---|---|
 | W0 | Evidence-integrity registers | PARTIAL: four governance CSV registers tracked; no prior W0 definition in repository (UNVERIFIED PROVENANCE) | none | Independent reviewer disposition of the four registers | No for routine merges |
-| W1 | Instrument master and multi-venue identity | PARTIAL: W1-A/B/C implemented from pinned public Upstox/FYERS masters (9,926 VERIFIED / 174 UNMAPPED); 28 offline tests and four bundled snapshots; W1-D live consistency and effective dating PENDING | none | Effective-dated registry, provider crosswalk report, per-class conformance matrix and live consistency tests | Yes for multi-asset |
+| W1 | Instrument master and multi-venue identity | PARTIAL: W1-A/B/C implemented from pinned public Upstox/FYERS masters (9,926 VERIFIED / 174 UNMAPPED); 36 offline tests at PR #66 and four bundled snapshots; W1-D live consistency and effective dating PENDING | none | Effective-dated registry, provider crosswalk report, per-class conformance matrix and live consistency tests | Yes for multi-asset |
 | W2 | Upstox V3 data adapter | PARTIAL: read-only V2 REST; V3 seven-field candle schema normalisation of fixtures only | W1 | ISO timestamp parsing, V3 seven-field candles, ascending canonical history, raw payload archive, 10-session qualification | Yes for provider certification |
 | W3 | FYERS Data Socket adapter | NOT IMPLEMENTED | W1, fresh token | REST quotes, history, Data Socket only, reconnect and replay evidence | Yes for dual-provider |
 | W4 | Provider-to-journal-to-q path | NOT PROVEN with real events | W2, W3 | Raw and normalised events, durable journal, q replay parity | Yes |
@@ -192,14 +208,14 @@ contains requirement IDs from the same register.
 | W6 | Corporate actions | NOT IMPLEMENTED | W1, W5 | Split, bonus, dividend, rights, merger and demerger fixtures with provenance | Yes |
 | W7 | Research and statistical acceptance | INCONCLUSIVE / BLOCKED | W5, W6 | Nested validation, full trial registry, Reality Check/SPA or approved alternative, cost model, sealed holdout | Yes for strategy acceptance |
 | W8 | Feature registry | PARTIAL | W5 | Versioned definitions, availability tests, C++/Python parity | No for data release; yes for strategy |
-| W9 | Contract-note reconciliation | NOT IMPLEMENTED | W1, W6 | Independent charge recalculation; zero unexplained differences | Yes for financial gate |
+| W9 | Contract-note reconciliation | NOT QUALIFIED: reconciliation not implemented | W1, W6 | Independent charge recalculation; zero unexplained differences | Yes for financial gate |
 | W10 | Operational paper OMS | NOT IMPLEMENTED | W2–W4, W9 | Full lifecycle, partial fills, cancels, restarts, 20-session qualification | Yes |
 | W11 | Native q hosted check | GATED | governed licensed runner | Required workflow passing on q-changing PRs | Yes for persistence releases |
 | W12 | Durability qualification | NOT PROVEN | W4 | Process, OS, power and storage fault matrix on named hardware; acknowledged event survival | Yes for operational release |
-| W13 | Intraday support | UNSUPPORTED | W2–W5, W11 | Intraday session conformance, auction and halt handling, intraday costs | Yes for intraday scope |
-| W14 | HFT feasibility | SEPARATE PROJECT | W13, low-latency infrastructure | Tick-by-tick conformance, clock sync, latency distribution | Yes for HFT scope |
-| W15 | Multi-asset conformance | NOT ESTABLISHED | W1, W6, W9 | Signed per-class conformance matrix | Yes per class |
-| W16 | Independent acceptance | NOT RECORDED (external) | all relevant gates | Required merge controls: zero GitHub approvals, self-review checklist and exact-head CI. External technical review is optional. Independent acceptance is mandatory only for defined high-risk release gates | No for routine merges; yes for defined high-risk gates |
+| W13 | Intraday support | FUTURE (intraday unsupported) | W2–W5, W11 | Intraday session conformance, auction and halt handling, intraday costs | Yes for intraday scope |
+| W14 | HFT feasibility | FUTURE (separate project) | W13, low-latency infrastructure | Tick-by-tick conformance, clock sync, latency distribution | Yes for HFT scope |
+| W15 | Multi-asset conformance | FUTURE (not established) | W1, W6, W9 | Signed per-class conformance matrix | Yes per class |
+| W16 | Independent acceptance | PENDING (external, NOT RECORDED) | all relevant gates | Required merge controls: zero GitHub approvals, self-review checklist and exact-head CI. External technical review is optional. Independent acceptance is mandatory only for defined high-risk release gates | No for routine merges; yes for defined high-risk gates |
 | W17 | Live execution authorisation | DISABLED | W7, W10, W12, W16, compliance | Written broker and compliance approval; separate release decision | Yes for any live route |
 | W18 | Independent release assurance and security remediation | PENDING (independent reviewer) | W16 and all defined high-risk release gates | This row is the authoritative W18 definition. Exit evidence: disposition of each security finding by an independent reviewer and recorded external acceptance. Local checks and CI are not acceptance; acceptance NOT RECORDED | Yes for release acceptance |
 

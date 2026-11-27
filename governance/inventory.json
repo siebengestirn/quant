@@ -176,6 +176,13 @@
       "retention": "current"
     },
     {
+      "class": "policy",
+      "owner": "maintainer",
+      "path": "governance/release-state.json",
+      "purpose": "Canonical machine-readable R8.4.2 release and governance state",
+      "retention": "current"
+    },
+    {
       "class": "evidence-record",
       "owner": "QA",
       "path": "governance/requirements-traceability.csv",
@@ -221,7 +228,7 @@
       "class": "evidence-record",
       "owner": "maintainer",
       "path": "governance/instrument-master-snapshots.json",
-      "purpose": "Immutable public instrument-master snapshot provenance",
+      "purpose": "Immutable instrument-master provenance pointing at tracked reference-data bytes",
       "retention": "current"
     }
   ],

@@ -12,6 +12,7 @@ import sys
 import zipfile
 from email.message import Message
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -38,22 +39,16 @@ fetcher = _load_module(
 REAL_DOWNLOAD = fetcher.download
 
 PROVENANCE = ROOT / "governance" / "instrument-master-snapshots.json"
+REFERENCE = ROOT / "reference-data" / "instrument-master"
 DATA = ROOT / "data" / "instrument-master"
 EVIDENCE = ROOT / fetcher.BUNDLE_SNAPSHOT_DIR
 BUNDLE_ENV = fetcher.BUNDLE_ENV
-METAS = im.load_provenance(PROVENANCE)
+METAS = {meta.provider: meta for meta in fetcher.load_pins(PROVENANCE)}
+SOURCE_IS_REFERENCE = True
 MARUTI_ISIN = "INE585B01010"
 MARUTI_KEY = f"NSE_EQ|{MARUTI_ISIN}"
 MARUTI_TICKER = "NSE:MARUTI-EQ"
 MARUTI_FY_TOKEN = "101000000010999"
-
-
-def _local_available() -> bool:
-    """Return True when every pinned snapshot has verified local bytes."""
-    return all(
-        fetcher.verify_local(meta, DATA)
-        for meta in fetcher.load_pins(PROVENANCE)
-    )
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -70,23 +65,29 @@ def _block_network() -> None:
 
 
 def _prepare_snapshots(
-    data_root: Path, evidence_root: Path, bundle_path: str
-) -> Path:
+    data_root: Path,
+    evidence_root: Path,
+    bundle_path: str,
+    reference_root: Path = REFERENCE,
+) -> tuple[Path, str]:
     """Resolve offline bytes or fail with the exact recovery command."""
     try:
         source = fetcher.resolve_evidence(
-            data_root, evidence_root, PROVENANCE, bundle_path
+            data_root, evidence_root, PROVENANCE, bundle_path, reference_root
         )
     except fetcher.EvidenceUnavailable as exc:
         pytest.fail(str(exc))
-    return source.root
+    return source.root, source.source
 
 
 @pytest.fixture(scope="session", autouse=True)
 def pinned_snapshots() -> None:
-    """Prefer local bytes, then extracted evidence, then an offline ZIP."""
-    global DATA
-    DATA = _prepare_snapshots(DATA, EVIDENCE, os.environ.get(BUNDLE_ENV, ""))
+    """Prefer tracked reference bytes, then local data, then a bundle."""
+    global DATA, SOURCE_IS_REFERENCE
+    DATA, source = _prepare_snapshots(
+        DATA, EVIDENCE, os.environ.get(BUNDLE_ENV, "")
+    )
+    SOURCE_IS_REFERENCE = source == fetcher.SOURCE_REFERENCE
 
 
 @pytest.fixture(scope="session", name="upstox_data")
@@ -109,21 +110,43 @@ def _crosswalk_fixture(upstox_data, fyers_data):
     return im.crosswalk([upstox_data, fyers_data])
 
 
+def _decoded_bytes(provider: str) -> bytes:
+    """Read pinned decoded bytes from whichever offline source was resolved."""
+    return fetcher.decoded_payload(
+        METAS[provider], DATA, PROVENANCE, reference=SOURCE_IS_REFERENCE
+    )
+
+
+def _original_bytes(provider: str) -> bytes:
+    """Read pinned original wire bytes from the resolved offline source."""
+    meta = METAS[provider]
+    if SOURCE_IS_REFERENCE:
+        pair = fetcher.reference_paths(meta, DATA, PROVENANCE)
+        assert pair is not None
+        payload = pair[0].read_bytes()
+        if meta.original_filename.endswith(".gz"):
+            return payload
+        return fetcher._gunzip(payload, fetcher.MAX_DECODED_BYTES)
+    return fetcher.paths(meta, DATA)[0].read_bytes()
+
+
 def _parse(provider: str):
     """Parse one captured snapshot using its provenance-derived context."""
     meta = METAS[provider]
-    return im.parse_snapshot(
-        im.snapshot_path(DATA, meta), provider, im.snapshot_context(meta)
-    )
+    context = im.snapshot_context(meta)
+    payload = _decoded_bytes(provider)
+    if provider == "upstox":
+        return im.parse_upstox(payload, context)
+    if provider == "fyers":
+        return im.parse_fyers(payload, context)
+    raise AssertionError(f"unsupported provider: {provider}")
 
 
 def _upstox_maruti():
     """Return the captured Upstox record for the known MARUTI ISIN."""
     return next(
         record
-        for record in im.parse_upstox_records(
-            im.snapshot_path(DATA, METAS["upstox"]).read_bytes()
-        )
+        for record in im.parse_upstox_records(_decoded_bytes("upstox"))
         if record.instrument_key == MARUTI_KEY
     )
 
@@ -132,9 +155,7 @@ def _fyers_maruti():
     """Return the captured FYERS record for the known MARUTI ticker."""
     return next(
         record
-        for record in im.parse_fyers_symbols(
-            im.snapshot_path(DATA, METAS["fyers"]).read_bytes()
-        )
+        for record in im.parse_fyers_symbols(_decoded_bytes("fyers"))
         if record.sym_ticker == MARUTI_TICKER
     )
 
@@ -163,12 +184,30 @@ def _identity(provider: str, key: str, upstox, fyers) -> str:
 
 
 def _copy_pinned_bytes(data_root: Path) -> None:
-    """Copy the verified pinned bytes into a temporary data root."""
+    """Copy the verified pinned bytes into a temporary plain data root."""
     for meta in fetcher.load_pins(PROVENANCE):
-        for source in fetcher.paths(meta, DATA):
-            destination = data_root / source.relative_to(DATA)
+        for decoded in (False, True):
+            relative = fetcher.paths(meta, Path())[int(decoded)]
+            payload = (
+                _decoded_bytes(meta.provider)
+                if decoded
+                else _original_bytes(meta.provider)
+            )
+            destination = data_root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(payload)
+
+
+def _copy_reference_tree(root: Path) -> Path:
+    """Copy tracked reference files into a temporary reference root."""
+    for meta in fetcher.load_pins(PROVENANCE):
+        pair = fetcher.reference_paths(meta, REFERENCE, PROVENANCE)
+        assert pair is not None
+        for source in pair:
+            destination = root / source.relative_to(REFERENCE)
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(source.read_bytes())
+    return root
 
 
 def _mini_bundle(tmp_path: Path) -> tuple[Path, Path]:
@@ -215,18 +254,29 @@ def _rewrite_bundle(
             rewritten.writestr(name, payload)
 
 
-def test_provenance_is_canonical_and_digests_match_snapshot_files():
-    """Recorded digests and byte counts must match the captured bytes."""
+def test_provenance_is_canonical_and_digests_match_reference_files():
+    """Recorded digests and byte counts must match the tracked bytes."""
     text = PROVENANCE.read_text(encoding="utf-8")
     document = json.loads(text)
     assert text == json.dumps(document, indent=2, sort_keys=True) + "\n"
     assert {"upstox", "fyers"} <= set(METAS)
     assert METAS["upstox"].status == "AVAILABLE"
+    for entry in document["snapshots"]:
+        assert entry["source_class"] == "immutable-reference-data"
+        assert fetcher.verify_reference(
+            METAS[entry["provider"]], REFERENCE, PROVENANCE
+        )
+        for kind in ("original", "decoded"):
+            path = REFERENCE / fetcher._safe_reference_path(
+                entry[f"reference_{kind}_path"], f"reference_{kind}_path"
+            )
+            payload = path.read_bytes()
+            assert len(payload) == entry[f"reference_{kind}_bytes"]
+            assert im.sha256_hex(payload) == entry[f"reference_{kind}_sha256"]
+            assert path.name.endswith(".gz")
     for meta in METAS.values():
-        if meta.status != "AVAILABLE":
-            continue
-        original = im.snapshot_path(DATA, meta, decoded=False).read_bytes()
-        decoded = im.snapshot_path(DATA, meta).read_bytes()
+        original = _original_bytes(meta.provider)
+        decoded = _decoded_bytes(meta.provider)
         assert len(original) == meta.original_bytes
         assert im.sha256_hex(original) == meta.original_sha256
         assert len(decoded) == meta.decoded_bytes
@@ -236,9 +286,7 @@ def test_provenance_is_canonical_and_digests_match_snapshot_files():
 
 def test_upstox_parser_extracts_actual_record_fields():
     """The Upstox parser must expose the fields in the captured JSON."""
-    records = im.parse_upstox_records(
-        im.snapshot_path(DATA, METAS["upstox"]).read_bytes()
-    )
+    records = im.parse_upstox_records(_decoded_bytes("upstox"))
     assert len(records) == 87029
     maruti = _upstox_maruti()
     assert maruti.segment == "NSE_EQ"
@@ -256,9 +304,7 @@ def test_upstox_parser_extracts_actual_record_fields():
 
 def test_fyers_parser_extracts_actual_symbol_master_fields():
     """The FYERS parser must expose every documented NSE_CM field."""
-    records = im.parse_fyers_symbols(
-        im.snapshot_path(DATA, METAS["fyers"]).read_bytes()
-    )
+    records = im.parse_fyers_symbols(_decoded_bytes("fyers"))
     assert len(records) == 10230
     maruti = _fyers_maruti()
     assert maruti.sym_ticker == MARUTI_TICKER
@@ -559,7 +605,7 @@ def test_digest_mismatch_is_rejected():
     """Parsing must fail closed when bytes disagree with provenance."""
     context = im.snapshot_context(METAS["upstox"])
     bad = context._replace(source_digest="0" * 64)
-    payload = im.snapshot_path(DATA, METAS["upstox"]).read_bytes()
+    payload = _decoded_bytes("upstox")
     with pytest.raises(ValueError, match="digest"):
         im.parse_upstox(payload, bad)
 
@@ -567,7 +613,7 @@ def test_digest_mismatch_is_rejected():
 def test_corrupt_snapshot_bytes_are_rejected(tmp_path):
     """Both the fetch verifier and the parser must reject corrupt bytes."""
     meta = METAS["upstox"]
-    payload = im.snapshot_path(DATA, meta).read_bytes()
+    payload = _decoded_bytes(meta.provider)
     corrupted = payload[:-1] + bytes([payload[-1] ^ 0x01])
     with pytest.raises(ValueError, match="SHA-256"):
         fetcher.verify(
@@ -621,15 +667,62 @@ def test_effective_dating_is_partial_and_snapshot_derived(crosswalk_data):
         assert instrument.effective_to is None
 
 
-def test_verify_cli_checks_local_bytes_without_network(tmp_path):
-    """The verify command exits 0 for valid bytes and 1 for corrupt bytes."""
-    _copy_pinned_bytes(tmp_path)
-    assert fetcher.main(["verify", "--data-root", str(tmp_path)]) == 0
+def test_verify_cli_checks_tracked_reference_bytes_without_network(tmp_path):
+    """Verify checks reference files, exiting 1 when they are tampered."""
+    root = _copy_reference_tree(
+        tmp_path / "reference-data" / "instrument-master"
+    )
+    assert fetcher.main(["verify", "--reference-root", str(root)]) == 0
     meta = METAS["upstox"]
-    decoded = im.snapshot_path(tmp_path, meta)
-    payload = decoded.read_bytes()
-    decoded.write_bytes(payload[:-1] + bytes([payload[-1] ^ 0x01]))
-    assert fetcher.main(["verify", "--data-root", str(tmp_path)]) == 1
+    pair = fetcher.reference_paths(meta, root, PROVENANCE)
+    assert pair is not None
+    target = pair[1]
+    payload = target.read_bytes()
+    target.write_bytes(payload[:-1] + bytes([payload[-1] ^ 0x01]))
+    assert fetcher.main(["verify", "--reference-root", str(root)]) == 1
+
+
+def test_clean_checkout_uses_tracked_reference_data_without_network(
+    tmp_path, monkeypatch
+):
+    """No data/ and no bundle still resolves the immutable tracked bytes."""
+    monkeypatch.delenv(BUNDLE_ENV, raising=False)
+    root, source = _prepare_snapshots(
+        tmp_path / "absent-data",
+        tmp_path / "absent-evidence",
+        "",
+        REFERENCE,
+    )
+    assert root == REFERENCE
+    assert source == fetcher.SOURCE_REFERENCE
+    assert fetcher.main(["verify"]) == 0
+    assert all(
+        fetcher.verify_reference(meta, REFERENCE, PROVENANCE)
+        for meta in fetcher.load_pins(PROVENANCE)
+    )
+
+
+def test_tampered_tracked_bytes_fail_resolution(tmp_path, monkeypatch):
+    """A modified reference file fails closed without falling back to data."""
+    monkeypatch.delenv(BUNDLE_ENV, raising=False)
+    root = _copy_reference_tree(
+        tmp_path / "reference-data" / "instrument-master"
+    )
+    pair = fetcher.reference_paths(METAS["fyers"], root, PROVENANCE)
+    assert pair is not None
+    payload = pair[0].read_bytes()
+    pair[0].write_bytes(payload[:-1] + bytes([payload[-1] ^ 0x01]))
+    assert not fetcher.verify_reference(METAS["fyers"], root, PROVENANCE)
+    with pytest.raises(
+        fetcher.EvidenceUnavailable, match="failed verification"
+    ):
+        fetcher.resolve_evidence(
+            DATA,
+            tmp_path / "no-evidence",
+            PROVENANCE,
+            "",
+            root,
+        )
 
 
 def test_fetch_command_is_explicit_in_argument_parser():
@@ -642,6 +735,13 @@ def test_fetch_command_is_explicit_in_argument_parser():
     )
     assert extract_args.command == "extract"
     assert extract_args.from_bundle == Path("/tmp/bundle.zip")
+    update_args = fetcher.parse_args(
+        ["update-provenance", "--output", "/tmp/candidate.json"]
+    )
+    assert update_args.command == "update-provenance"
+    assert update_args.output == Path("/tmp/candidate.json")
+    with pytest.raises(ValueError, match="must not overwrite"):
+        fetcher.update_provenance(PROVENANCE, PROVENANCE)
     with pytest.raises(SystemExit):
         fetcher.parse_args([])
 
@@ -678,6 +778,10 @@ def test_bad_filename_market_date_and_path_are_rejected(tmp_path):
         fetcher.safe_market_date("2026-99-99")
     with pytest.raises(ValueError, match="escapes output"):
         fetcher.ensure_contained(tmp_path, tmp_path.parent / "outside.json")
+    with pytest.raises(ValueError, match="unsafe reference-data path"):
+        fetcher._safe_reference_path(
+            "../../NSE.json.gz", "reference_original_path"
+        )
 
 
 def test_oversize_and_unexpected_content_are_rejected():
@@ -702,7 +806,7 @@ def test_oversize_and_unexpected_content_are_rejected():
 
     url = METAS["upstox"].url
     with pytest.raises(ValueError, match="unexpected content type"):
-        fetcher._check_content_type(Response("text/plain", "1"), url, ".json")
+        fetcher._check_content_type(Response("text/html", "1"), url, ".json")
     with pytest.raises(ValueError, match="Content-Length"):
         fetcher._check_content_length(
             Response("application/json", "99"), url, 10
@@ -749,6 +853,99 @@ def test_download_rejects_bad_status_and_streams_with_limits(monkeypatch):
     assert fetcher.download(url, 100, ".json") == b'{"ok":true}'
 
 
+class _StubResponse:
+    """In-memory response with declared headers and a synthetic body."""
+
+    def __init__(
+        self, content_type: str, body: bytes, status: int = 200
+    ) -> None:
+        self.status = status
+        self.headers = Message()
+        self.headers["Content-Type"] = content_type
+        self.headers["Content-Length"] = str(len(body))
+        self._body = io.BytesIO(body)
+
+    def read(self, count: int) -> bytes:
+        """Return the next body chunk."""
+        return self._body.read(count)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args) -> bool:
+        return False
+
+
+def _stub_retrieval(
+    monkeypatch: pytest.MonkeyPatch,
+    content_type: str,
+    body: bytes,
+    status: int = 200,
+) -> list[tuple[str, int]]:
+    """Restore real retrieval and serve one synthetic response offline."""
+    response = _StubResponse(content_type, body, status)
+    calls: list[tuple[str, int]] = []
+
+    def open_stub(url: str, timeout: int) -> _StubResponse:
+        """Record the URL and timeout, then return the prepared response."""
+        calls.append((url, timeout))
+        return response
+
+    opener = SimpleNamespace(open=open_stub)
+    monkeypatch.setattr(
+        fetcher.urllib.request, "build_opener", lambda *args: opener
+    )
+    monkeypatch.setattr(fetcher, "download", REAL_DOWNLOAD)
+    return calls
+
+
+def test_content_type_allowlist_is_explicit_and_provider_scoped() -> None:
+    """Upstox stays gzip/binary; FYERS allows text/plain for its JSON."""
+    assert fetcher.CONTENT_TYPES[".gz"] == frozenset(
+        {"application/gzip", "application/x-gzip", "application/octet-stream"}
+    )
+    assert fetcher.CONTENT_TYPES[".json"] == frozenset(
+        {"application/json", "text/plain", "application/octet-stream"}
+    )
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    ["text/plain", "application/json", "application/octet-stream"],
+)
+def test_fyers_json_download_accepts_allowlisted_content_types(
+    monkeypatch: pytest.MonkeyPatch, content_type: str
+) -> None:
+    """A text/plain label must not reject the valid FYERS JSON body."""
+    body = b'[{"symbol":"NSE:MARUTI-EQ"}]'
+    calls = _stub_retrieval(monkeypatch, content_type, body)
+    url = METAS["fyers"].url
+    assert fetcher.download(url, 100, ".json") == body
+    assert calls == [(url, fetcher.TIMEOUT_SECONDS)]
+
+
+def test_fyers_html_content_type_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An HTML error page is never accepted as a pinned JSON snapshot."""
+    _stub_retrieval(monkeypatch, "text/html", b'{"ok":true}')
+    with pytest.raises(ValueError, match="unexpected content type"):
+        fetcher.download(METAS["fyers"].url, 100, ".json")
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    ["text/plain", "application/json", "application/octet-stream"],
+)
+def test_malformed_json_is_rejected_with_an_allowed_content_type(
+    monkeypatch: pytest.MonkeyPatch, content_type: str
+) -> None:
+    """An allowed header cannot make non-JSON bytes an acceptable body."""
+    _stub_retrieval(monkeypatch, content_type, b"<html>not json</html>")
+    with pytest.raises(ValueError, match="not valid JSON"):
+        fetcher.download(METAS["fyers"].url, 100, ".json")
+
+
 def test_bundle_extraction_is_offline_and_digest_checked(tmp_path):
     """The four pinned snapshots can be restored from a ZIP without network."""
     provenance, bundle = _mini_bundle(tmp_path)
@@ -793,10 +990,14 @@ def test_real_bundle_extraction_restores_all_four_snapshots(tmp_path):
     with zipfile.ZipFile(bundle, "w") as archive:
         for meta in metas:
             for decoded in (False, True):
-                source = fetcher.paths(meta, DATA)[int(decoded)]
+                payload = (
+                    _decoded_bytes(meta.provider)
+                    if decoded
+                    else _original_bytes(meta.provider)
+                )
                 archive.writestr(
                     fetcher._zip_member_name(meta, decoded),
-                    source.read_bytes(),
+                    payload,
                 )
     output = tmp_path / "clean" / "data"
     result = fetcher.main(
@@ -812,13 +1013,13 @@ def test_real_bundle_extraction_restores_all_four_snapshots(tmp_path):
     assert all(fetcher.verify_local(meta, output) for meta in metas)
 
 
-def test_evidence_resolution_prefers_verified_local_bytes(tmp_path):
-    """Valid local bytes win over an evidence directory or a bundle."""
+def test_evidence_resolution_prefers_tracked_reference_data(tmp_path):
+    """Tracked reference bytes win over local data, evidence and a bundle."""
     source = fetcher.resolve_evidence(
         DATA, tmp_path / "evidence", PROVENANCE, ""
     )
-    assert source.root == DATA
-    assert source.source == fetcher.SOURCE_DATA
+    assert source.root == REFERENCE
+    assert source.source == fetcher.SOURCE_REFERENCE
     assert source.extraction_command == ""
 
 
@@ -834,9 +1035,12 @@ def test_extracted_evidence_needs_no_env_var_and_no_network(
         raise AssertionError("extraction must not run with valid evidence")
 
     monkeypatch.setattr(fetcher, "main", forbidden)
-    assert _prepare_snapshots(tmp_path / "empty-data", evidence, "") == evidence
+    absent = tmp_path / "absent-reference"
+    assert _prepare_snapshots(
+        tmp_path / "empty-data", evidence, "", absent
+    ) == (evidence, fetcher.SOURCE_EVIDENCE)
     source = fetcher.resolve_evidence(
-        tmp_path / "empty-data", evidence, PROVENANCE, ""
+        tmp_path / "empty-data", evidence, PROVENANCE, "", absent
     )
     assert source.root == evidence
     assert source.source == fetcher.SOURCE_EVIDENCE
@@ -881,15 +1085,16 @@ def test_missing_evidence_fails_with_precise_recovery_commands(
 ) -> None:
     """No usable evidence fails with the exact restore-and-verify commands."""
     monkeypatch.delenv(BUNDLE_ENV, raising=False)
+    absent = tmp_path / "absent-reference"
     with pytest.raises(fetcher.EvidenceUnavailable) as exc:
         fetcher.resolve_evidence(
-            tmp_path / "data", tmp_path / "evidence", PROVENANCE, ""
+            tmp_path / "data", tmp_path / "evidence", PROVENANCE, "", absent
         )
     message = str(exc.value)
     for token in ("extract --from-bundle", "verify", "pytest", "network"):
         assert token in message
     with pytest.raises(pytest.fail.Exception) as failed:
-        _prepare_snapshots(tmp_path / "data", tmp_path / "evidence", "")
+        _prepare_snapshots(tmp_path / "data", tmp_path / "evidence", "", absent)
     assert BUNDLE_ENV in str(failed.value)
 
 
@@ -900,13 +1105,16 @@ def test_tampered_snapshot_fails_resolution_and_report(
     monkeypatch.delenv(BUNDLE_ENV, raising=False)
     data = tmp_path / "data"
     _copy_pinned_bytes(data)
+    absent = tmp_path / "absent-reference"
     meta = fetcher.load_pins(PROVENANCE)[0]
     target = fetcher.paths(meta, data)[1]
     payload = target.read_bytes()
     target.write_bytes(payload[:-1] + bytes([payload[-1] ^ 0x01]))
     assert not fetcher.verify_local(meta, data)
     with pytest.raises(fetcher.EvidenceUnavailable):
-        fetcher.resolve_evidence(data, tmp_path / "no-evidence", PROVENANCE, "")
+        fetcher.resolve_evidence(
+            data, tmp_path / "no-evidence", PROVENANCE, "", absent
+        )
     output = tmp_path / "tampered.json"
     assert (
         fetcher.main(
@@ -918,6 +1126,8 @@ def test_tampered_snapshot_fails_resolution_and_report(
                 str(data),
                 "--evidence-root",
                 str(tmp_path / "no-evidence"),
+                "--reference-root",
+                str(absent),
                 "--provenance",
                 str(PROVENANCE),
             ]
@@ -933,7 +1143,7 @@ def test_tampered_snapshot_fails_resolution_and_report(
         ),
     )
     report, code = fetcher.evidence_report(
-        output, data, tmp_path / "no-evidence", PROVENANCE, ""
+        output, data, tmp_path / "no-evidence", PROVENANCE, "", absent
     )
     assert code == 1
     assert report["verification_status"] == fetcher.FAIL
@@ -948,7 +1158,7 @@ def test_tampered_snapshot_fails_resolution_and_report(
 
 
 def test_evidence_report_contents_match_pinned_digests(tmp_path: Path) -> None:
-    """The JSON report records exact paths, byte counts and digests."""
+    """The report records tracked wrapper bytes and unwrapped digests."""
     output = tmp_path / "assurance" / "instrument-evidence.json"
     report, code = fetcher.evidence_report(
         output, DATA, tmp_path / "evidence", PROVENANCE, ""
@@ -958,7 +1168,7 @@ def test_evidence_report_contents_match_pinned_digests(tmp_path: Path) -> None:
     assert text == json.dumps(report, indent=2, sort_keys=True) + "\n"
     assert report["schema_version"] == fetcher.REPORT_SCHEMA_VERSION
     assert report["verification_status"] == fetcher.PASS
-    assert report["provenance_source"] == fetcher.SOURCE_DATA
+    assert report["provenance_source"] == fetcher.SOURCE_REFERENCE
     assert report["extraction_command"] == ""
     assert report["snapshot_count"] == 2
     assert {item["provider"] for item in report["snapshots"]} == {
@@ -972,18 +1182,26 @@ def test_evidence_report_contents_match_pinned_digests(tmp_path: Path) -> None:
             if item["provider"] == meta.provider
         )
         assert entry["market_date"] == meta.market_date
-        assert entry["provenance_source"] == fetcher.SOURCE_DATA
-        original, decoded = fetcher.paths(meta, DATA)
-        for kind, path, size, digest in (
-            (
-                "original",
-                original,
-                meta.original_bytes,
-                meta.original_sha256,
-            ),
-            ("decoded", decoded, meta.decoded_bytes, meta.decoded_sha256),
-        ):
+        assert entry["provenance_source"] == fetcher.SOURCE_REFERENCE
+        pair = fetcher.reference_paths(meta, REFERENCE, PROVENANCE)
+        assert pair is not None
+        spec = fetcher.reference_specs(PROVENANCE)[meta.provider]
+        for kind, path in zip(("original", "decoded"), pair, strict=True):
             record = entry[kind]
+            size = spec[f"reference_{kind}_bytes"]
+            digest = spec[f"reference_{kind}_sha256"]
+            unwrapped_size = (
+                meta.original_bytes
+                if kind == "original"
+                and not meta.original_filename.endswith(".gz")
+                else meta.decoded_bytes
+            )
+            unwrapped_digest = (
+                meta.original_sha256
+                if kind == "original"
+                and not meta.original_filename.endswith(".gz")
+                else meta.decoded_sha256
+            )
             assert Path(record["path"]) == path.resolve()
             assert (
                 record["relative_path"]
@@ -994,6 +1212,9 @@ def test_evidence_report_contents_match_pinned_digests(tmp_path: Path) -> None:
             assert record["expected_bytes"] == size
             assert record["expected_sha256"] == digest
             assert record["verification"] == fetcher.PASS
+            assert record["unwrapped_verification"] == fetcher.PASS
+            assert record["unwrapped_bytes"] == unwrapped_size
+            assert record["unwrapped_sha256"] == unwrapped_digest
 
 
 def test_evidence_report_cli_uses_bundle_env(

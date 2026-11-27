@@ -7,12 +7,15 @@ QUANT_FRESHNESS_TEMP to an existing directory to override that location.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import pathlib
 import re
 import subprocess
 import sys
 import tempfile
+
+from quant_common import HISTORICAL_MARKERS
 
 HISTORICAL_HEADER_LINES = 12
 HISTORICAL_HEADER_MARKERS = ("superseded", "historical")
@@ -43,20 +46,7 @@ IDENTIFIERS = (
     ),
     ("CI run ID", re.compile(r"(?<![0-9A-Za-z])\d{11}(?![0-9A-Za-z])")),
 )
-MARKERS = (
-    "historical",
-    "superseded",
-    "at pr #",
-    "at_pr_",
-    "baseline",
-    "snapshot",
-    "captured",
-    "previous",
-    "past",
-    "release history",
-    "old",
-    "archive",
-)
+MARKERS = (*HISTORICAL_MARKERS, "at pr #", "at_pr_", "old")
 CURRENT_KEY_RE = re.compile(
     r"(?<![\w])([a-z_]*current[a-z_0-9]*)\s*[\"']?\s*[:=]\s*(.+)",
     re.IGNORECASE,
@@ -241,6 +231,23 @@ def path_errors(
     return errors
 
 
+def release_state_errors(root: pathlib.Path) -> list[str]:
+    """Validate the canonical release state when this root provides one."""
+    path = root / "governance" / "release-state.json"
+    if not path.is_file():
+        return []
+    script = root / "scripts" / "check_release_state.py"
+    spec = importlib.util.spec_from_file_location("check_release_state", script)
+    if spec is None or spec.loader is None:
+        return ["governance/release-state.json: validator unavailable"]
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+        return list(module.check(root))
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
+        return [f"governance/release-state.json: validator failed: {exc}"]
+
+
 def check(root: pathlib.Path) -> list[str]:
     """Return precise state-freshness errors for tracked authored files."""
     resolved = root.resolve()
@@ -255,6 +262,7 @@ def check(root: pathlib.Path) -> list[str]:
         errors.extend(identifier_errors(relative, lines, historical))
         if relative.endswith(".md"):
             errors.extend(path_errors(resolved, relative, lines, historical))
+    errors.extend(release_state_errors(resolved))
     return errors
 
 

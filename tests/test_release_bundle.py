@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 import subprocess
+import sys
 import tempfile
 import zipfile
 from collections.abc import Iterator
@@ -15,6 +16,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
 SPEC = importlib.util.spec_from_file_location(
     "release_bundle", ROOT / "scripts" / "release_bundle.py"
 )
@@ -39,7 +41,10 @@ GATE_TEST_FILES = {
     "release_bundle_tests": "tests/test_release_bundle.py",
     "verify_report_tests": "tests/test_verify_report.py",
     "native_q_checker_tests": "tests/test_native_q_ci.py",
+    "ci_security_tests": "tests/test_ci_security.py",
 }
+BINARY_DIGEST = hashlib.sha256(b"fresh build-ci contract binary\n").hexdigest()
+STALE_DIGEST = hashlib.sha256(b"stale build contract binary\n").hexdigest()
 PASS_REASON = (
     "native-q integration tests executed: 8 passed, 0 skipped, 0 failed"
 )
@@ -343,11 +348,20 @@ def sample_report(commit: str, *, native: dict | None = None) -> dict:
             "sanitizer_ctest_percent": 100,
             "sanitizer_ctest_total": 3,
         },
-        "portable_pytest": pytest_counts(51),
+        "portable_pytest": {
+            **pytest_counts(51),
+            RELEASE_BUNDLE.BINARY_PATH_KEY: RELEASE_BUNDLE.CANONICAL_BINARY_PATH,
+            RELEASE_BUNDLE.BINARY_DIGEST_KEY: BINARY_DIGEST,
+            RELEASE_BUNDLE.BINARY_BUILD_DIR_KEY: (
+                RELEASE_BUNDLE.CANONICAL_BUILD_DIR
+            ),
+            RELEASE_BUNDLE.BINARY_COMMIT_KEY: commit,
+        },
         "w1": pytest_counts(14),
         "release_bundle_tests": pytest_counts(74),
         "verify_report_tests": pytest_counts(122),
         "native_q_checker_tests": pytest_counts(8),
+        "ci_security_tests": pytest_counts(11),
         "style": {"pass_checks": 8, "checks_total": 8},
         "state_freshness": {"self_test": "PASS", "findings": 0},
         "terminology_audit": {"findings": 0, "binding": 0, "advisory": 0},
@@ -814,6 +828,7 @@ def write_test_bundle(
 
 ALLOWED_SKIP_ID = "tests/test_dataset_contract.py::test_skipped_case"
 OTHER_SKIP_ID = "tests/test_dataset_contract.py::test_other_case"
+CI_SKIP_ID = "tests/test_ci_security.py::test_skipped_case"
 SKIP_REASON = "governed fixture unavailable"
 
 
@@ -842,11 +857,14 @@ def add_skip(
 ) -> None:
     """Record one skipped test in a gate's counts and step output."""
     gate = named_gate(report, name)
-    gate["counts"] = pytest_counts(51, skipped=1)
+    gate["counts"] = {
+        **gate["counts"],
+        **pytest_counts(gate["counts"]["passed"], skipped=1),
+    }
     if test_id is not None:
         gate["steps"][0]["output"] = (
             f"SKIPPED [1] {test_id}:42: {SKIP_REASON}\n"
-            "51 passed, 1 skipped in 0.1s"
+            f"{gate['counts']['passed']} passed, 1 skipped in 0.1s"
         )
 
 
@@ -868,6 +886,128 @@ def test_native_q_checker_gate_is_versioned() -> None:
     named_gate(report, "native_q_checker_tests")["name"] = "unlisted"
     with pytest.raises(ValueError, match="unknown gate names"):
         RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+def test_ci_security_gate_is_versioned() -> None:
+    """The CI security gate cannot be omitted, duplicated or renamed."""
+    report = sample_report(COMMIT)
+    report["gates"] = [
+        gate for gate in report["gates"] if gate["name"] != "ci_security_tests"
+    ]
+    with pytest.raises(ValueError, match="missing required gates"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+    report = sample_report(COMMIT)
+    report["gates"].append(dict(named_gate(report, "ci_security_tests")))
+    with pytest.raises(ValueError, match="duplicate gate names"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+    report = sample_report(COMMIT)
+    named_gate(report, "ci_security_tests")["name"] = "unlisted"
+    with pytest.raises(ValueError, match="unknown gate names"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+def test_ci_security_gate_has_exact_pinned_command() -> None:
+    """The pinned offline command is recorded as evidence."""
+    gate = named_gate(sample_report(COMMIT), "ci_security_tests")
+    assert gate["command"] == (
+        "python3 -m pytest tests/test_ci_security.py -o addopts='' -q"
+    )
+    assert gate["counts"] == pytest_counts(11)
+
+
+@pytest.mark.parametrize("test_id", [None, CI_SKIP_ID, OTHER_SKIP_ID])
+def test_unapproved_ci_security_skip_fails(test_id: str | None) -> None:
+    """A skip in the CI security suite needs an authored, matching reason."""
+    report = sample_report(COMMIT)
+    gate = named_gate(report, "ci_security_tests")
+    baseline = gate["counts"]["passed"]
+    gate["counts"] = pytest_counts(baseline - 1, skipped=1)
+    if test_id is not None:
+        gate["steps"][0]["output"] = (
+            f"SKIPPED [1] {test_id}:42: {SKIP_REASON}\n"
+            f"{baseline - 1} passed, 1 skipped in 0.1s"
+        )
+    with pytest.raises(ValueError, match="unapproved skip"):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+    if test_id == CI_SKIP_ID:
+        report["config"]["allowed_skips"] = [
+            {"test_id": CI_SKIP_ID, "reason": SKIP_REASON}
+        ]
+        assert RELEASE_BUNDLE.validate_report(report, COMMIT) is report
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        (RELEASE_BUNDLE.BINARY_PATH_KEY, "build/quant_contract", "binary path"),
+        (RELEASE_BUNDLE.BINARY_BUILD_DIR_KEY, "build", "build directory"),
+        (RELEASE_BUNDLE.BINARY_DIGEST_KEY, "", "invalid"),
+        (RELEASE_BUNDLE.BINARY_DIGEST_KEY, "deadbeef", "invalid"),
+        (
+            RELEASE_BUNDLE.BINARY_DIGEST_KEY,
+            BINARY_DIGEST.upper(),
+            "invalid",
+        ),
+        (RELEASE_BUNDLE.BINARY_COMMIT_KEY, COMMIT[:-1] + "f", "does not match"),
+    ],
+    ids=[
+        "stale-path",
+        "stale-build-dir",
+        "empty-digest",
+        "short-digest",
+        "uppercase",
+        "commit",
+    ],
+)
+def test_canonical_binary_evidence_is_validated(
+    field: str, value: str, match: str
+) -> None:
+    """Wrong binary evidence cannot support a release."""
+    report = sample_report(COMMIT)
+    named_gate(report, "portable_pytest")["counts"][field] = value
+    with pytest.raises(ValueError, match=match):
+        RELEASE_BUNDLE.validate_report(report, COMMIT)
+
+
+def test_canonical_binary_evidence_is_rendered() -> None:
+    """The manifest records the report's binary path and digest verbatim."""
+    report = sample_report(COMMIT)
+    manifest = manifest_for(report)
+    assert (
+        f"- Canonical dataset contract binary: "
+        f"{RELEASE_BUNDLE.CANONICAL_BINARY_PATH} "
+        f"(SHA-256 {BINARY_DIGEST}), "
+        f"built in {RELEASE_BUNDLE.CANONICAL_BUILD_DIR} from commit {COMMIT}."
+    ) in manifest
+    assert (
+        "- CI security suite (offline): 11/0/0/0/11 "
+        "(passed/failed/errors/skipped/total)."
+    ) in manifest
+
+
+@pytest.mark.parametrize("mutate", ["report", "manifest"])
+def test_stale_binary_digest_fails_bundle_verification(
+    snapshots: SnapshotFixture, workspace: Path, mutate: str
+) -> None:
+    """A digest changed after build breaks evidence/manifest agreement."""
+    bundle = write_test_bundle(workspace, snapshots, corrupt=False)
+    with zipfile.ZipFile(bundle) as archive:
+        payloads = {name: archive.read(name) for name in archive.namelist()}
+    if mutate == "report":
+        report = json.loads(payloads[RELEASE_BUNDLE.REPORT_ENTRY])
+        gate = named_gate(report, "portable_pytest")
+        gate["counts"][RELEASE_BUNDLE.BINARY_DIGEST_KEY] = STALE_DIGEST
+        payloads[RELEASE_BUNDLE.REPORT_ENTRY] = json.dumps(report).encode()
+    else:
+        path = "quant/MANIFEST.md"
+        text = payloads[path].decode("utf-8")
+        payloads[path] = text.replace(BINARY_DIGEST, STALE_DIGEST).encode()
+    with zipfile.ZipFile(bundle, "w") as archive:
+        for name, payload in payloads.items():
+            archive.writestr(name, payload)
+    result = RELEASE_BUNDLE.verify_bundle(bundle)
+    assert not result["ok"]
+    assert any("verification totals" in error for error in result["errors"])
 
 
 @pytest.mark.parametrize("name", RELEASE_BUNDLE.PYTHON_GATES)

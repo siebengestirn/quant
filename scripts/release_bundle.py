@@ -25,11 +25,19 @@ total counts; a gate passes only with executed tests and zero failures,
 errors and unapproved skips. The rendered ``## Verification`` section is
 derived from those counts and the same config, then compared byte for byte
 to the embedded report by verify.
+
+The portable pytest gate records the canonical ``build-ci/quant_contract``
+binary path, its SHA-256, its build directory and the report commit. Verify
+checks those fields and renders them in the verification section, so a stale
+or fabricated binary claim cannot support a release. The mandatory
+``ci_security_tests`` gate is versioned and validated like every other
+Python suite.
 """
 
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import io
 import json
@@ -40,8 +48,19 @@ import sys
 import tarfile
 import tempfile
 import zipfile
+import zlib
 from datetime import UTC, datetime
 from pathlib import Path
+
+from quant_common import (
+    BINARY_BUILD_DIR_KEY,
+    BINARY_COMMIT_KEY,
+    BINARY_DIGEST_KEY,
+    BINARY_PATH_KEY,
+    CANONICAL_BINARY_PATH,
+    CANONICAL_BUILD_DIR,
+    run_cli,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT = ROOT.parent / "quant-final-20261127.zip"
@@ -71,6 +90,7 @@ GATE_NAMES = (
     "release_bundle_tests",
     "verify_report_tests",
     "native_q_checker_tests",
+    "ci_security_tests",
 )
 REQUIRED_GATES = frozenset(GATE_NAMES)
 PYTEST_COUNT_KEYS = ("passed", "failed", "errors", "skipped", "total")
@@ -87,6 +107,7 @@ REQUIRED_COUNTS = {
     "release_bundle_tests": PYTEST_COUNT_KEYS,
     "verify_report_tests": PYTEST_COUNT_KEYS,
     "native_q_checker_tests": PYTEST_COUNT_KEYS,
+    "ci_security_tests": PYTEST_COUNT_KEYS,
     "style": ("pass_checks", "checks_total"),
     "state_freshness": ("findings",),
     "terminology_audit": ("findings", "binding", "advisory"),
@@ -104,6 +125,7 @@ REQUIRED_COUNTS = {
 REPORT_METADATA = ("generated_at", "started_at", "completed_at", "toolchain")
 PYTHON_GATES = (
     "native_q_checker_tests",
+    "ci_security_tests",
     "portable_pytest",
     "w1",
     "verify_report_tests",
@@ -134,13 +156,17 @@ GITHUB_REMOTE_URLS = (
     f"ssh://git@github.com/{REPOSITORY}.git",
 )
 INSTRUMENT_DIR = "evidence/instrument-master"
+REFERENCE_DIR = "reference-data/instrument-master"
 INSTRUMENT_DATA = ROOT / "data" / "instrument-master"
+INSTRUMENT_REFERENCE = ROOT / "reference-data" / "instrument-master"
 INSTRUMENT_PROVENANCE = ROOT / "governance" / "instrument-master-snapshots.json"
 INSTRUMENT_PROVENANCE_ENTRY = (
     f"{PREFIX}governance/instrument-master-snapshots.json"
 )
 INSTRUMENT_PREFIX = f"{PREFIX}{INSTRUMENT_DIR}/"
-SNAPSHOTS_REMEDY = "run python3 scripts/fetch_instrument_snapshots.py first"
+SNAPSHOTS_REMEDY = (
+    "restore the tracked reference-data/instrument-master bytes from git"
+)
 SNAPSHOT_FIELDS = frozenset(
     {
         "provider",
@@ -152,9 +178,20 @@ SNAPSHOT_FIELDS = frozenset(
         "decoded_sha256",
     }
 )
+REFERENCE_FIELD_NAMES = (
+    "source_class",
+    "reference_decoded_path",
+    "reference_decoded_bytes",
+    "reference_decoded_sha256",
+    "reference_original_path",
+    "reference_original_bytes",
+    "reference_original_sha256",
+)
+REFERENCE_FIELDS = frozenset(REFERENCE_FIELD_NAMES)
 SNAPSHOT_TEXT_FIELDS = ("provider", "market_date", "original_filename")
 SNAPSHOT_SIZE_FIELDS = ("original_bytes", "decoded_bytes")
 SNAPSHOT_DIGEST_FIELDS = ("original_sha256", "decoded_sha256")
+MAX_SNAPSHOT_BYTES = 100 * 1024 * 1024
 
 
 def run_command(command: list[str]) -> str:
@@ -365,7 +402,41 @@ def parse_snapshot_provenance(text: str) -> list[dict]:
             digest = value.lower() if isinstance(value, str) else ""
             if len(digest) != 64 or not set(digest) <= HEX_DIGITS:
                 raise ValueError(f"invalid instrument provenance field: {key}")
+        validate_reference_fields(entry)
     return entries
+
+
+def validate_reference_fields(entry: dict) -> None:
+    """Validate optional tracked reference-data fields in one entry."""
+    if not REFERENCE_FIELDS & set(entry):
+        return
+    if not REFERENCE_FIELDS <= set(entry):
+        raise ValueError("incomplete reference-data provenance fields")
+    if entry["source_class"] != "immutable-reference-data":
+        raise ValueError("unsupported instrument source_class")
+    for key in ("reference_original_path", "reference_decoded_path"):
+        value = entry[key]
+        if not isinstance(value, str) or not value.startswith(
+            f"{REFERENCE_DIR}/"
+        ):
+            raise ValueError(f"invalid instrument provenance field: {key}")
+        if Path(value).is_absolute() or ".." in Path(value).parts:
+            raise ValueError(f"unsafe instrument reference path: {value}")
+        if not value.endswith(".gz"):
+            raise ValueError(f"unsupported instrument reference path: {value}")
+    for key in ("reference_original_bytes", "reference_decoded_bytes"):
+        value = entry[key]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 0 < value <= MAX_SNAPSHOT_BYTES
+        ):
+            raise ValueError(f"invalid instrument provenance field: {key}")
+    for key in ("reference_original_sha256", "reference_decoded_sha256"):
+        value = entry[key]
+        digest = value.lower() if isinstance(value, str) else ""
+        if len(digest) != 64 or not set(digest) <= HEX_DIGITS:
+            raise ValueError(f"invalid instrument provenance field: {key}")
 
 
 def snapshot_relative(provider: str, market_date: str, filename: str) -> str:
@@ -439,34 +510,121 @@ def check_snapshot_bytes(
         )
 
 
+def reference_files(entry: dict) -> tuple[str, str] | None:
+    """Return the two tracked reference-relative paths for one entry."""
+    if not REFERENCE_FIELDS <= set(entry):
+        return None
+    return tuple(
+        Path(entry[key]).relative_to(REFERENCE_DIR).as_posix()
+        for key in ("reference_original_path", "reference_decoded_path")
+    )
+
+
+def reference_plan(entries: list[dict]) -> list[tuple[str, int, str]]:
+    """Flatten tracked reference files into a unique verification plan."""
+    plan: list[tuple[str, int, str]] = []
+    for entry in entries:
+        pair = reference_files(entry)
+        if pair is None:
+            continue
+        for relative, key in zip(
+            pair, ("reference_original", "reference_decoded"), strict=True
+        ):
+            plan.append(
+                (
+                    relative,
+                    entry[f"{key}_bytes"],
+                    entry[f"{key}_sha256"].lower(),
+                )
+            )
+    paths = [path for path, _, _ in plan]
+    if len(paths) != len(set(paths)):
+        raise ValueError("duplicate tracked reference files in provenance")
+    return plan
+
+
+def gunzip_snapshot(payload: bytes, label: str) -> bytes:
+    """Decompress one bounded gzip-wrapped snapshot payload."""
+    if len(payload) > MAX_SNAPSHOT_BYTES:
+        raise ValueError(f"{label}: gzip wrapper exceeds size limit")
+    result = gzip.decompress(payload)
+    if len(result) > MAX_SNAPSHOT_BYTES:
+        raise ValueError(f"{label}: decoded data exceeds size limit")
+    return result
+
+
+def wire_payload(entry: dict, stored: bytes, label: str) -> bytes:
+    """Return original wire bytes from a raw gzip or a gzip wrapper."""
+    expected = entry["original_sha256"].lower()
+    if hashlib.sha256(stored).hexdigest() == expected:
+        return stored
+    unwrapped = gunzip_snapshot(stored, label)
+    if hashlib.sha256(unwrapped).hexdigest() == expected:
+        return unwrapped
+    raise ValueError(f"instrument snapshot SHA-256 mismatch: {label}")
+
+
 def stage_instrument_snapshots(
     quant_root: Path,
     data_root: Path = INSTRUMENT_DATA,
     provenance: Path = INSTRUMENT_PROVENANCE,
+    reference_root: Path = INSTRUMENT_REFERENCE,
 ) -> int:
-    """Stage pinned raw snapshots from the ignored data tree."""
-    plan = instrument_plan(provenance)
-    sources = [
-        (data_root / relative, relative, size, digest)
-        for relative, size, digest in plan
-    ]
-    missing = [
-        str(source) for source, _, _, _ in sources if not source.is_file()
-    ]
-    if missing:
-        raise RuntimeError(
-            "missing pinned instrument snapshots: "
-            + ", ".join(missing)
-            + f"; {SNAPSHOTS_REMEDY}"
-        )
+    """Stage pinned bytes from tracked reference-data, or legacy local data."""
+    entries = parse_snapshot_provenance(provenance.read_text(encoding="utf-8"))
     target = quant_root / INSTRUMENT_DIR
-    for source, relative, size, digest in sources:
-        payload = source.read_bytes()
-        check_snapshot_bytes(relative, payload, size, digest)
-        destination = target / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(payload)
-    return len(sources)
+    staged = 0
+    for entry in entries:
+        pair = reference_files(entry)
+        if pair is not None:
+            stored_payloads = []
+            for relative, key in zip(
+                pair, ("reference_original", "reference_decoded"), strict=True
+            ):
+                source = reference_root / relative
+                if not source.is_file():
+                    raise RuntimeError(
+                        f"missing tracked instrument snapshot: {source}; "
+                        f"{SNAPSHOTS_REMEDY}"
+                    )
+                payload = source.read_bytes()
+                check_snapshot_bytes(
+                    relative,
+                    payload,
+                    entry[f"{key}_bytes"],
+                    entry[f"{key}_sha256"].lower(),
+                )
+                tracked = quant_root / REFERENCE_DIR / relative
+                tracked.parent.mkdir(parents=True, exist_ok=True)
+                tracked.write_bytes(payload)
+                stored_payloads.append(payload)
+            decoded = gunzip_snapshot(stored_payloads[1], pair[1])
+            payloads = (
+                wire_payload(entry, stored_payloads[0], pair[0]),
+                decoded,
+            )
+            sources = zip(snapshot_files(entry), payloads, strict=True)
+            for (relative, size, digest), payload in sources:
+                check_snapshot_bytes(relative, payload, size, digest)
+                destination = target / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(payload)
+                staged += 1
+            continue
+        for relative, size, digest in snapshot_files(entry):
+            source = data_root / relative
+            if not source.is_file():
+                raise RuntimeError(
+                    f"missing pinned instrument snapshots: {source}; "
+                    f"{SNAPSHOTS_REMEDY}"
+                )
+            payload = source.read_bytes()
+            check_snapshot_bytes(relative, payload, size, digest)
+            destination = target / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(payload)
+            staged += 1
+    return staged
 
 
 def response_urls(payload: object) -> list[str]:
@@ -847,6 +1005,28 @@ def validate_gate_values(
         raise ValueError("hosted_ci: inconsistent job counts")
 
 
+def validate_canonical_binary(report: dict, head: str) -> None:
+    """Require the report's canonical binary evidence to be exact."""
+    counts = gate_counts(report, "portable_pytest")
+    path = counts.get(BINARY_PATH_KEY)
+    digest = counts.get(BINARY_DIGEST_KEY)
+    build_dir = counts.get(BINARY_BUILD_DIR_KEY)
+    commit = counts.get(BINARY_COMMIT_KEY)
+    if path != CANONICAL_BINARY_PATH:
+        raise ValueError("portable_pytest: wrong canonical binary path")
+    if build_dir != CANONICAL_BUILD_DIR:
+        raise ValueError("portable_pytest: wrong canonical build directory")
+    if (
+        not isinstance(digest, str)
+        or len(digest) != 64
+        or digest != digest.lower()
+        or not set(digest) <= HEX_DIGITS
+    ):
+        raise ValueError("portable_pytest: invalid canonical binary digest")
+    if commit != head:
+        raise ValueError("portable_pytest: binary commit does not match HEAD")
+
+
 def validate_native_pass(native: dict) -> None:
     """Require full integration evidence for a native PASS."""
     if native["enabled"] is not True:
@@ -980,6 +1160,7 @@ def validate_report(
             raise ValueError(f"required gate failed: {name}")
         validate_gate_metadata(gate, name)
     validate_gate_values(report, allowed)
+    validate_canonical_binary(report, head)
     hosted = validate_hosted_evidence(report, head)
     native = hosted.get("native_q")
     validate_native_record(native, scope)
@@ -1039,6 +1220,7 @@ def render_verification(report: dict) -> list[str]:
     bundle_tests = gate_counts(report, "release_bundle_tests")
     report_tests = gate_counts(report, "verify_report_tests")
     checker_tests = gate_counts(report, "native_q_checker_tests")
+    security_tests = gate_counts(report, "ci_security_tests")
     style = gate_counts(report, "style")
     freshness = gate_counts(report, "state_freshness")
     audit = gate_counts(report, "terminology_audit")
@@ -1062,6 +1244,11 @@ def render_verification(report: dict) -> list[str]:
         f"{sanitizer.get('sanitizer_failures')} failures.",
         "- Portable pytest (dataset contract, research, adversarial): "
         f"{pytest_totals(pytest)} (passed/failed/errors/skipped/total).",
+        "- Canonical dataset contract binary: "
+        f"{pytest.get(BINARY_PATH_KEY, 'missing')} "
+        f"(SHA-256 {pytest.get(BINARY_DIGEST_KEY, 'missing')}), "
+        f"built in {pytest.get(BINARY_BUILD_DIR_KEY, 'missing')} from commit "
+        f"{pytest.get(BINARY_COMMIT_KEY, 'missing')}.",
         "- Pinned instrument-master (W1): "
         f"{pytest_totals(w1)} (passed/failed/errors/skipped/total).",
         "- Release bundle suite: "
@@ -1072,6 +1259,9 @@ def render_verification(report: dict) -> list[str]:
         "(passed/failed/errors/skipped/total).",
         "- Native-q checker suite (offline): "
         f"{pytest_totals(checker_tests)} "
+        "(passed/failed/errors/skipped/total).",
+        "- CI security suite (offline): "
+        f"{pytest_totals(security_tests)} "
         "(passed/failed/errors/skipped/total).",
         f"- Python gate skip policy: "
         f"{len(report_skip_entries(report))} allowlisted skip(s): "
@@ -1285,6 +1475,51 @@ def check_evidence(
     return details
 
 
+def verify_reference_snapshots(
+    archive: zipfile.ZipFile, errors: list[str]
+) -> int:
+    """Digest-check bundled tracked reference files against provenance."""
+    names = set(archive.namelist())
+    if INSTRUMENT_PROVENANCE_ENTRY not in names:
+        return 0
+    try:
+        text = archive.read(INSTRUMENT_PROVENANCE_ENTRY).decode("utf-8")
+        entries = parse_snapshot_provenance(text)
+    except (ValueError, KeyError, TypeError, UnicodeDecodeError) as exc:
+        errors.append(f"instrument provenance error: {exc}")
+        return 0
+    count = 0
+    for entry in entries:
+        pair = reference_files(entry)
+        if pair is None:
+            continue
+        for relative, kind in zip(pair, ("original", "decoded"), strict=True):
+            name = f"{PREFIX}{REFERENCE_DIR}/{relative}"
+            if name not in names:
+                errors.append(f"missing tracked reference snapshot: {name}")
+                continue
+            payload = archive.read(name)
+            try:
+                check_snapshot_bytes(
+                    relative,
+                    payload,
+                    entry[f"reference_{kind}_bytes"],
+                    entry[f"reference_{kind}_sha256"].lower(),
+                )
+                unwrapped = gunzip_snapshot(payload, name)
+                accepted = {entry[f"{kind}_sha256"].lower()}
+                if kind == "original":
+                    accepted.add(entry["decoded_sha256"].lower())
+                if hashlib.sha256(unwrapped).hexdigest() not in accepted:
+                    raise ValueError(
+                        f"instrument snapshot unwrapped digest mismatch: {name}"
+                    )
+            except (ValueError, EOFError, OSError, zlib.error) as exc:
+                errors.append(str(exc))
+            count += 1
+    return count
+
+
 def verify_instrument_snapshots(
     archive: zipfile.ZipFile, errors: list[str]
 ) -> int:
@@ -1375,6 +1610,9 @@ def verify_bundle(
             details["instrument_snapshots"] = verify_instrument_snapshots(
                 archive, errors
             )
+            details["reference_snapshots"] = verify_reference_snapshots(
+                archive, errors
+            )
             entries = len(manifest)
             listed: set[str] = set()
             for name in names:
@@ -1425,6 +1663,7 @@ def print_summary(bundle: Path, result: dict[str, object]) -> None:
     print(f"Evidence report: {result.get('report')}")
     print(f"Manifest commit: {result.get('commit', '')}")
     print(f"Instrument snapshots: {result.get('instrument_snapshots', 0)}")
+    print(f"Tracked reference files: {result.get('reference_snapshots', 0)}")
     print(f"Native q tier: {result.get('native_q')}")
     print(f"Release scope: {result.get('release_scope', 'missing')}")
     for error in result["errors"]:
@@ -1533,27 +1772,32 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Dispatch the requested subcommand."""
+def dispatch(argv: list[str] | None) -> int:
+    """Build or verify a bundle from the parsed command line."""
     args = parse_args(argv)
-    try:
-        if args.command == "build":
-            build(args.output, args.report, args.staging_dir, args.scope)
-        else:
-            result = verify_bundle(args.bundle, args.scope)
-            print_summary(args.bundle, result)
-            if not result["ok"]:
-                return 1
-    except (
-        OSError,
-        RuntimeError,
-        ValueError,
-        tarfile.TarError,
-        zipfile.BadZipFile,
-    ) as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 1
+    if args.command == "build":
+        build(args.output, args.report, args.staging_dir, args.scope)
+    else:
+        result = verify_bundle(args.bundle, args.scope)
+        print_summary(args.bundle, result)
+        if not result["ok"]:
+            return 1
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Dispatch the requested subcommand, failing closed on bad evidence."""
+    return run_cli(
+        dispatch,
+        argv,
+        (
+            OSError,
+            RuntimeError,
+            ValueError,
+            tarfile.TarError,
+            zipfile.BadZipFile,
+        ),
+    )
 
 
 if __name__ == "__main__":

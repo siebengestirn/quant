@@ -26,9 +26,10 @@ import subprocess
 import sys
 import time
 import tomllib
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from pathlib import Path
 
+from quant_common import Finding
 from state_freshness import check as check_state_freshness
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -139,17 +140,6 @@ PATTERNS = (
 BINDING_CATEGORIES = {"tautology", "audit_ignore"}
 IGNORE = re.compile(r"(?:prose|english)-audit-ignore:")
 FENCE = re.compile(r"^\s*(```|~~~)")
-
-
-@dataclass(frozen=True)
-class Finding:
-    """A terminology candidate."""
-
-    source: str
-    line: int
-    category: str
-    phrase: str
-    context: str
 
 
 def command(
@@ -497,9 +487,10 @@ class Gate:
         if not ok:
             self.failed = True
 
-    def skip(self, label: str, reason: str) -> None:
+    def skip(self, label: str, reason: str, code: str | None = None) -> None:
         """Record a gate check that is explicitly not applicable."""
-        print(f"== {label}: skipped ({reason})")
+        marker = f" SKIP {code}" if code else " skipped"
+        print(f"== {label}:{marker} ({reason})")
         self.rows.append((label, "SKIP", 0.0))
 
     def summary(self) -> int:
@@ -645,11 +636,16 @@ def run_checks(gate: Gate, allow_dirty: bool) -> None:
                 "pytest",
                 "tests/test_dataset_contract.py",
                 "tests/test_research.py",
-                "tests/test_kdbx.py",
                 "-q",
             ]
         ).returncode
         == 0,
+    )
+    gate.skip(
+        "native q tests",
+        "KDB-X disabled in portable build; native-q qualification is a "
+        "separate gated tier",
+        code="NOT_APPLICABLE",
     )
     gate.run(
         "sanitizer build",

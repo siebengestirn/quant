@@ -12,6 +12,8 @@ WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 POLICY = ROOT / "git-policy.json"
 RELEASE_CHECK = "Release assurance (offline)"
 SELF_HOSTED = "self-hosted"
+NATIVE_LABEL = "quant-native-q"
+NATIVE_RUNS_ON = [SELF_HOSTED, NATIVE_LABEL]
 SELF_HOSTED_GUARD = (
     "github.event_name != 'pull_request' && "
     "vars.QUANT_NATIVE_Q_ENABLED == 'true'"
@@ -22,6 +24,12 @@ OFFLINE_SUITES = (
     "tests/test_release_bundle.py",
     "tests/test_verify_report.py",
     "tests/test_native_q_ci.py",
+    "tests/test_ci_security.py",
+)
+ASSURANCE = ROOT / "scripts" / "assurance.py"
+NATIVE_Q_SKIP_REASON = (
+    "KDB-X disabled in portable build; native-q qualification is a "
+    "separate gated tier"
 )
 
 
@@ -129,6 +137,14 @@ def commands(job: dict[str, Any]) -> str:
     return "\n".join(str(step.get("run", "")) for step in steps(job))
 
 
+def is_self_hosted(job: dict[str, Any]) -> bool:
+    """Report whether a job declares a self-hosted runner or label set."""
+    value = job.get("runs-on")
+    if isinstance(value, list):
+        return SELF_HOSTED in {str(item) for item in value}
+    return str(value) == SELF_HOSTED
+
+
 def events(document: dict[str, Any]) -> set[str]:
     """Return event names, tolerant of YAML 1.1 parsing of ``on`` as True."""
     triggers = document.get("on")
@@ -168,9 +184,54 @@ def test_workflow_subset_parses_jobs_triggers_and_permissions():
 def test_native_q_has_explicit_pr_guard():
     """The licensed job carries the exact required pull_request guard."""
     native = jobs(workflow())["native-q"]
-    assert native["runs-on"] == SELF_HOSTED
+    assert native["runs-on"] == NATIVE_RUNS_ON
     assert str(native["if"]) == SELF_HOSTED_GUARD
     assert not pr_can_reach(native)
+
+
+def test_native_q_uses_dedicated_runner_and_uploads_evidence():
+    """The licensed job runs only on the labelled runner and records proof."""
+    native = jobs(workflow())["native-q"]
+    assert NATIVE_LABEL in str(native["runs-on"])
+    assert "QUANT_NATIVE_Q_ENABLED" in str(native["if"])
+    assert (
+        "NOT a required status check for PORTABLE_RESEARCH"
+        in WORKFLOW.read_text(encoding="utf-8")
+    )
+    evidence_steps = [
+        step
+        for step in steps(native)
+        if "capture_runner_evidence.py" in str(step.get("run", ""))
+    ]
+    assert len(evidence_steps) == 1
+    evidence = evidence_steps[0]
+    assert "--output data/assurance/runner-evidence.json" in str(
+        evidence["run"]
+    )
+    assert "RUNNER_LABELS" in evidence["env"]
+    assert NATIVE_LABEL in str(evidence["env"]["RUNNER_LABELS"])
+    assert "QUANT_EXPECTED_SHA" in evidence["env"]
+    uploads = [
+        step
+        for step in steps(native)
+        if "upload-artifact@" in str(step.get("uses", ""))
+        and "runner-evidence.json" in str(step.get("with", ""))
+    ]
+    assert uploads
+
+
+def test_portable_pytest_excludes_native_q_module():
+    """Portable core tests never run the licensed kdbx integration module."""
+    core = jobs(workflow())["core"]
+    assert "tests/test_kdbx.py" not in commands(core)
+    assurance = ASSURANCE.read_text(encoding="utf-8")
+    pytest_gate = assurance[assurance.index('"pytest",') :]
+    pytest_gate = pytest_gate[: pytest_gate.index("gate.skip")]
+    assert "tests/test_kdbx.py" not in pytest_gate
+    assert 'gate.skip(\n        "native q tests",' in assurance
+    assert 'code="NOT_APPLICABLE"' in assurance
+    assert NATIVE_Q_SKIP_REASON.split("; ", maxsplit=1)[0] in assurance
+    assert '"separate gated tier"' in assurance
 
 
 def test_native_q_qualifies_exact_protected_main_tip():
@@ -244,10 +305,20 @@ def test_release_assurance_runs_only_offline_suites():
     )
     for suite in OFFLINE_SUITES:
         assert suite in text
+    assert "-o addopts='' -q" in text
     assert "python3 scripts/style_contract.py" in text
     assert "python3 scripts/state_freshness.py" in text
     assert "python3 scripts/release_bundle.py verify" in text
     assert "NOT_APPLICABLE" in text
+
+
+def test_ci_security_suite_is_in_hosted_release_assurance():
+    """CI security invariants run in the required hosted assurance job."""
+    text = commands(jobs(workflow())["release-assurance"])
+    assert "tests/test_ci_security.py" in text
+    offline_block = text[text.index("tests/test_release_bundle.py") :]
+    assert "tests/test_ci_security.py" in offline_block
+    assert "-o addopts='' -q" in offline_block
 
 
 def test_no_self_hosted_job_can_run_on_pull_request():
@@ -255,7 +326,7 @@ def test_no_self_hosted_job_can_run_on_pull_request():
     self_hosted = {
         name: job
         for name, job in jobs(workflow()).items()
-        if job.get("runs-on") == SELF_HOSTED
+        if is_self_hosted(job)
     }
     assert self_hosted
     for name, job in self_hosted.items():
