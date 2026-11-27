@@ -153,7 +153,7 @@ class Finding:
 def command(
     args: list[str], cwd: Path = ROOT, timeout: int | None = None
 ) -> subprocess.CompletedProcess:
-    """Enforce the QUANT style contract."""
+    """Run an external command and capture its result."""
     return subprocess.run(
         args,
         cwd=cwd,
@@ -165,18 +165,18 @@ def command(
 
 
 def git(*args: str) -> str:
-    """Enforce the QUANT style contract."""
+    """Run a Git command and return its standard output."""
     result = command(["git", *args])
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
 def tracked() -> list[str]:
-    """Enforce the QUANT style contract."""
+    """Return the tracked repository file paths."""
     return [p for p in git("ls-files", "-z", "--cached").split("\0") if p]
 
 
 def tree_fingerprint() -> str:
-    """Enforce the QUANT style contract."""
+    """Hash the working-tree state to detect gate mutations."""
     parts = [
         git("status", "--porcelain=v1", "-z"),
         git("diff", "--binary", "HEAD"),
@@ -186,7 +186,7 @@ def tree_fingerprint() -> str:
 
 
 def exclude_path(path: str) -> bool:
-    """Enforce the QUANT style contract."""
+    """Report whether a path is generated or out of audit scope."""
     excluded = set(POLICY["generated_paths"]["forbidden_components"])
     excluded.update(POLICY["generated_paths"]["forbidden_component_prefixes"])
     if path.startswith(("references/", "data/", ".git/")):
@@ -276,7 +276,7 @@ def audit(json_out: Path | None = None) -> tuple[list[Finding], Path | None]:
 
 
 def check_style_references() -> bool:
-    """Enforce the QUANT style contract."""
+    """Verify the curated style reference inventory."""
     index = (ROOT / "references" / "index.md").read_text(encoding="utf-8")
     rows = re.findall(r"\| `([^`]+)` \| <[^>]+> \| `([0-9a-f]{64})` \|", index)
     if not rows:
@@ -294,7 +294,7 @@ def check_style_references() -> bool:
 
 
 def is_generated(path: str) -> bool:
-    """Enforce the QUANT style contract."""
+    """Report whether a path is excluded as generated output."""
     excluded = set(POLICY["generated_paths"]["forbidden_components"])
     excluded.update(POLICY["generated_paths"]["forbidden_component_prefixes"])
     return any(part in excluded for part in path.split("/")) or path.endswith(
@@ -303,7 +303,7 @@ def is_generated(path: str) -> bool:
 
 
 def check_generated_paths() -> bool:
-    """Enforce the QUANT style contract."""
+    """Detect generated artifacts inside the source tree."""
     bad = [path for path in tracked() if is_generated(path)]
     for path in bad[:10]:
         print(f"generated file tracked: {path}")
@@ -311,7 +311,7 @@ def check_generated_paths() -> bool:
 
 
 def check_reference_integrity() -> bool:
-    """Enforce the QUANT style contract."""
+    """Verify reference digests against the inventory."""
     directory = ROOT / "references"
     index = directory / "index.md"
     if not index.is_file():
@@ -346,7 +346,7 @@ def check_reference_integrity() -> bool:
 
 
 def check_q_style() -> bool:
-    """Enforce the QUANT style contract."""
+    """Validate q indentation and line-length rules."""
     rules = tomllib.loads((ROOT / "q" / "qstyle.toml").read_text())
     text = (ROOT / "q" / "quant.q").read_text(encoding="utf-8")
     lines = text.splitlines()
@@ -381,7 +381,7 @@ def check_q_style() -> bool:
 
 
 def check_secrets() -> bool:
-    """Enforce the QUANT style contract."""
+    """Scan tracked source files for credential material."""
     services = [
         "NIRNAY_FYERS_APP_ID",
         "NIRNAY_FYERS_APP_SECRET",
@@ -409,7 +409,7 @@ def check_secrets() -> bool:
 
 
 def check_git_policy(allow_dirty: bool) -> bool:
-    """Enforce the QUANT style contract."""
+    """Validate branch, commit and merge policy state."""
     ok = True
     branch = git("rev-parse", "--abbrev-ref", "HEAD")
     if branch == "HEAD":
@@ -454,7 +454,7 @@ def check_git_policy(allow_dirty: bool) -> bool:
 
 
 def step(label: str, fn) -> tuple[str, bool, float]:
-    """Enforce the QUANT style contract."""
+    """Run one gate step and record its outcome."""
     started = time.monotonic()
     print(f"\n== {label}")
     try:
@@ -478,24 +478,24 @@ class Gate:
     """Fail-closed runner with a summary."""
 
     def __init__(self) -> None:
-        """Enforce the QUANT style contract."""
+        """Initialize an empty gate result set."""
         self.rows: list[tuple[str, str, float]] = []
         self.failed = False
 
     def run(self, label: str, fn) -> None:
-        """Enforce the QUANT style contract."""
+        """Record a named gate check and its status."""
         status, ok, elapsed = step(label, fn)
         self.rows.append((label, status, elapsed))
         if not ok:
             self.failed = True
 
     def skip(self, label: str, reason: str) -> None:
-        """Enforce the QUANT style contract."""
+        """Record a gate check that is explicitly not applicable."""
         print(f"== {label}: skipped ({reason})")
         self.rows.append((label, "SKIP", 0.0))
 
     def summary(self) -> int:
-        """Enforce the QUANT style contract."""
+        """Print the gate summary and return its exit code."""
         print("\n======== gate summary ========")
         for label, status, elapsed in self.rows:
             print(f"{label:<54} {status:<5} {elapsed:.1f}s")
@@ -504,7 +504,7 @@ class Gate:
 
 
 def apply_format() -> bool:
-    """Enforce the QUANT style contract."""
+    """Apply the repository formatters to tracked files."""
     ok = True
     if shutil.which("clang-format"):
         result = command(
@@ -532,7 +532,7 @@ def apply_format() -> bool:
 
 
 def run_checks(gate: Gate, allow_dirty: bool) -> None:
-    """Enforce the QUANT style contract."""
+    """Execute the gate steps in deterministic order."""
     gate.run("style reference integrity", check_style_references)
     gate.run("generated-path policy", check_generated_paths)
     gate.run("reference integrity", check_reference_integrity)
@@ -681,7 +681,7 @@ def run_checks(gate: Gate, allow_dirty: bool) -> None:
 
 
 def main() -> int:
-    """Enforce the QUANT style contract."""
+    """Parse arguments and run the research command."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "command", choices=["check", "polish", "audit", "status"]
