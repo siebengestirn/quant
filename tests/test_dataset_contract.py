@@ -239,6 +239,10 @@ def test_cross_language_exact_volume_parity(tmp_path: Path):
         "9007199254740993",
         "9007199254740994",
         "9223372036854775807",
+        "0001",
+        "01",
+        "+1",
+        "-0",
     ):
         content = f"{header}2026-01-01,100,103,99,102,{value}\n".encode()
         rows, errors = contract._read_csv_content(content, "x.csv", "v2")

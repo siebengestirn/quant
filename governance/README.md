@@ -14,6 +14,7 @@ governance/
   architecture-current.md        current architecture record
   baseline-inventory.md          baseline repository inventory
   branch-protection-capture.json captured protection settings
+  instrument-master-snapshots.json public-master snapshot provenance
   requirements-traceability.csv  requirement-to-evidence register
   research-report-registry.csv   research report register
   security-findings.csv          security finding register

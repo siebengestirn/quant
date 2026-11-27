@@ -167,11 +167,18 @@ counts are rejected with an explicit volume error.
 
 A quote carries `volume_validity`: `VALID`, `MISSING`, `INVALID` or `UNKNOWN`.
 The provider adapter sets this explicitly; a missing or malformed count is
-never reported as a genuine zero. The journal records the state and replay
-restores it. A legacy event without the field defaults to `VALID`, since a
-directly constructed quote asserts its own count. Only `VALID` volume enters
-the durable market-data pipeline. Derived depth calculations respect the same
-`2^53` bound before converting a count to an integer.
+never reported as a genuine zero. A newly constructed quote defaults to
+`UNKNOWN`; trusted constructors and fixtures must set `VALID` explicitly. The
+journal records the state and replay restores it. A legacy event without the
+field replays as `UNKNOWN`, because the old provider path could substitute zero
+for a missing count; its price fields are preserved and its zero volume is not
+promoted to a verified observation. Only `VALID` volume enters the durable
+market-data pipeline or q volume-dependent tables. Derived depth calculations
+respect the same `2^53` bound before converting a count to an integer.
+
+The canonical decimal count grammar is `0` or a non-zero digit followed by
+digits. Leading zeros, signs and decimal points are rejected by both canonical
+CSV readers, giving one unique representation for every count.
 
 ## Provider timestamp policy
 

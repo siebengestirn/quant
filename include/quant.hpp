@@ -431,10 +431,10 @@ struct Quote {
   int64_t bid_qty = 0;
   int64_t ask_qty = 0;
   double volume = 0.0;
-  // A directly constructed quote asserts its own volume validity. Provider
-  // normalisation always sets this explicitly; zero is never a substitute for
-  // a missing or malformed provider count.
-  VolumeValidity volume_validity = VolumeValidity::kValid;
+  // Volume validity is never inferred. Trusted constructors must set it
+  // explicitly; an unset value stays UNKNOWN and cannot enter volume-dependent
+  // features. Zero is never proof of a genuine zero-volume observation.
+  VolumeValidity volume_validity = VolumeValidity::kUnknown;
   double open = 0.0;
   double high = 0.0;
   double low = 0.0;

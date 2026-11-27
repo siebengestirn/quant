@@ -261,6 +261,14 @@ bool KdbxClient::IngestQuote(const Quote& quote,
                              const std::string& event_id,
                              std::string* error) {
 #ifdef QUANT_HAS_KDBX
+  // q has no volume-validity column. Only a proven count may enter its
+  // volume-dependent tables and features; do not rely on the pipeline guard
+  // because callers can also reach this client directly.
+  if (quote.volume_validity != VolumeValidity::kValid) {
+    if (error)
+      *error = "unverified volume cannot enter q";
+    return false;
+  }
   if (!Connect(error))
     return false;
   // Typed KX IPC: 64-bit sequences and nanosecond timestamps remain integers.
@@ -380,6 +388,7 @@ bool KdbxClient::SelfTest(std::string* report, std::string* error) {
     quote.bid = price - 0.05;
     quote.ask = price + 0.05;
     quote.volume = 1000.0;
+    quote.volume_validity = VolumeValidity::kValid;
     quote.exchange_timestamp_ms = now - 60000 + seq;
     quote.provider_timestamp_ms = quote.exchange_timestamp_ms;
     quote.receive_timestamp_ms = now;
@@ -468,6 +477,7 @@ bool KdbxClient::Benchmark(std::string* report, std::string* error) {
     quote.bid = quote.last - 0.05;
     quote.ask = quote.last + 0.05;
     quote.volume = 1000.0;
+    quote.volume_validity = VolumeValidity::kValid;
     quote.exchange_timestamp_ms = now - 60000 + static_cast<int64_t>(i);
     quote.provider_timestamp_ms = quote.exchange_timestamp_ms;
     quote.receive_timestamp_ms = now;

@@ -92,6 +92,8 @@ Quote GoodQuote(double price = 100.0) {
   quote.exchange_timestamp_ms = now;
   quote.provider_timestamp_ms = now;
   quote.last_trade_timestamp_ms = now;
+  // This helper constructs trusted quote fixtures explicitly.
+  quote.volume_validity = VolumeValidity::kValid;
   return quote;
 }
 
@@ -1280,6 +1282,15 @@ void TestProviderHistoryValidation() {
                     "v2") &&
             bounded_candles[0].volume == 9007199254740992.0,
         "canonical v2 reader preserves exact boundary volume");
+  for (const char* value : {"0001", "01", "+1", "-0"}) {
+    const std::string csv = std::string(
+                                "date,open,high,low,close,volume\n"
+                                "2026-01-01,100,103,99,102,") +
+                            value + "\n";
+    Check(
+        !ReadCsvText(csv, &bounded_candles, &error, "v2"),
+        std::string("canonical reader rejects non-canonical volume: ") + value);
+  }
 
   HistoryParseResult reversed = BuildHistoryCsv(
       Json::Array({ValidCandleRow("2026-01-02"), ValidCandleRow("2026-01-01")}),
@@ -3175,6 +3186,10 @@ void TestMarketDataPipeline() {
   bad_volume.volume = std::numeric_limits<double>::quiet_NaN();
   Check(!pipeline.IngestQuote(bad_volume, &error),
         "non-finite quote volume rejected");
+  Quote unknown_volume = quote;
+  unknown_volume.volume_validity = VolumeValidity::kUnknown;
+  Check(!pipeline.IngestQuote(unknown_volume, &error),
+        "unknown volume cannot enter the durable pipeline");
   Candle candle;
   candle.date = "2026-11-26";
   candle.open = 100.0;
@@ -3285,7 +3300,9 @@ void TestWallClockJournalReplay() {
   payload["ask"] = Json::Number(100.1);
   payload["bid_qty"] = Json::Integer(1000);
   payload["ask_qty"] = Json::Integer(1000);
-  payload["volume"] = Json::Number(1000.0);
+  // Legacy events could contain zero as a substitute for a missing provider
+  // count; that zero must not be promoted to a verified observation.
+  payload["volume"] = Json::Number(0.0);
   payload["exchange_timestamp_ms"] = Json::Integer(1795754730000);
   payload["provider_timestamp_ms"] = Json::Integer(1795754731000);
   payload["last_trade_timestamp_ms"] = Json::Integer(1795754730000);
@@ -3308,6 +3325,11 @@ void TestWallClockJournalReplay() {
         "legacy quote still replays");
   Check(legacy_publisher.last_quote.receive_wall_clock_ms == 0,
         "legacy event restores unknown wall clock as zero");
+  Check(legacy_publisher.last_quote.volume_validity == VolumeValidity::kUnknown,
+        "legacy zero volume is not promoted to a verified observation");
+  Check(legacy_publisher.last_quote.last == 100.0 &&
+            legacy_publisher.last_quote.bid == 99.9,
+        "legacy price information survives unknown-volume replay");
   legacy_reopened.Close();
 }
 

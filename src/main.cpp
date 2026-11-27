@@ -847,6 +847,11 @@ DailyReport BuildReport(App& app, bool* ok) {
       continue;
     }
     const Quote& quote = quote_it->second;
+    if (quote.volume_validity != VolumeValidity::kValid) {
+      report.rejections.push_back(instrument.symbol +
+                                  ": unverified volume; traded value unknown");
+      continue;
+    }
     const double traded_value = quote.last * quote.volume;
     if (traded_value < app.config.min_traded_value_inr) {
       report.rejections.push_back(instrument.symbol +
