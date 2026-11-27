@@ -20,7 +20,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -476,7 +476,7 @@ def build(output: Path) -> None:
         stage_tracked(quant_root)
         stage_optional_evidence(quant_root)
         protection, merged = stage_api_evidence(quant_root)
-        generated = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        generated = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         final_sha = git_text("rev-parse", "HEAD")
         pr_count, pr_range = merged_pr_range(merged)
         manifest = render_manifest(
