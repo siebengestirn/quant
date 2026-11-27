@@ -47,7 +47,7 @@
     "grandfather_reason": "Published correctness commits predate adoption of this policy and are not rewritten.",
     "grandfathered_through_commit": "f321d0c",
     "maximum_length": 72,
-    "pattern": "^(feat|fix|docs|test|refactor|perf|build|ci|chore|correctness)(\\([a-z0-9][a-z0-9._/-]*\\))?: .{1,64}$",
+    "pattern": "^(feat|fix|docs|test|refactor|perf|build|ci|chore|policy|correctness)(\\([a-z0-9][a-z0-9._/-]*\\))?: .{1,64}$",
     "required_author_email": "22kartikjangid@gmail.com",
     "validate_unmerged_topic_commits_against": "main"
   },
