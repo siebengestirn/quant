@@ -6,6 +6,7 @@ import gzip
 import hashlib
 import importlib.util
 import io
+import itertools
 import json
 import os
 import sys
@@ -138,22 +139,32 @@ def _alias_obs(
     )
 
 
-def _eligible_rows() -> list[im.Observation]:
-    """Return observations affirming every independent eligibility gate."""
+def _eligible_rows(
+    valid_from: str | None = DAY,
+) -> list[im.Observation]:
+    """Return observations affirming every independent eligibility gate.
+
+    Attested validity is itself a gate. Passing None builds the perfect-but
+    unknown-validity shape used by the fail-closed regression test.
+    """
     return [
-        _obs(im.ATTR_IDENTITY_STATUS, im.VERIFIED),
-        _obs(im.ATTR_CONFORMANCE_STATUS, im.PASS),
-        _obs(im.ATTR_PROVIDER_TRADING_STATUS, im.ACTIVE),
-        _obs(im.ATTR_EXCHANGE_STATUS, im.OPEN),
-        _obs(im.ATTR_EXCHANGE_ELIGIBILITY, im.ALLOWED),
-        _obs(im.ATTR_DATA_FRESHNESS, im.FRESH),
+        _obs(im.ATTR_IDENTITY_STATUS, im.VERIFIED, valid_from=valid_from),
+        _obs(im.ATTR_CONFORMANCE_STATUS, im.PASS, valid_from=valid_from),
+        _obs(im.ATTR_PROVIDER_TRADING_STATUS, im.ACTIVE, valid_from=valid_from),
+        _obs(im.ATTR_EXCHANGE_STATUS, im.OPEN, valid_from=valid_from),
+        _obs(im.ATTR_EXCHANGE_ELIGIBILITY, im.ALLOWED, valid_from=valid_from),
+        _obs(im.ATTR_DATA_FRESHNESS, im.FRESH, valid_from=valid_from),
         _obs(
             im.provider_attribute("fyers", im.PROVIDER_KEY_ATTRIBUTE),
             im.provider_alias("fyers", MARUTI_FY_TOKEN),
+            valid_from=valid_from,
+            digest="b" * 64,
         ),
         _obs(
             im.provider_attribute("upstox", im.PROVIDER_KEY_ATTRIBUTE),
             im.provider_alias("upstox", MARUTI_KEY),
+            valid_from=valid_from,
+            digest="c" * 64,
         ),
     ]
 
@@ -1814,3 +1825,173 @@ def test_converter_preserves_unknown_effective_dates(
     assert resolution.status == im.RESOLVED
     assert resolution.validity == im.UNKNOWN_INTERVAL
     assert resolution.canonical_instrument_id == identity
+
+
+def test_perfect_instrument_with_unknown_validity_is_not_eligible() -> None:
+    """Every other gate can pass while unknown validity still refuses."""
+    state = im.build_registry(_eligible_rows(valid_from=None)).as_of(DAY, T1)[
+        CID
+    ]
+    assert state.identity_status == im.VERIFIED
+    assert state.provider_coverage == im.MULTI_SOURCE
+    assert state.conformance_status == im.PASS
+    assert state.provider_trading_status == im.ACTIVE
+    assert state.exchange_status == im.OPEN
+    assert state.exchange_eligibility == im.ALLOWED
+    assert state.data_freshness == im.FRESH
+    assert state.validity == im.UNKNOWN_INTERVAL
+    assert state.proven_valid is False
+    assert state.conflict_status == im.RESOLVED
+    assert state.quant_eligibility == im.NOT_ELIGIBLE
+
+
+def test_open_ended_and_bounded_intervals_gate_eligibility() -> None:
+    """A known start is proven valid; an end still needs FRESH data."""
+    rows = _eligible_rows()
+    open_ended = im.build_registry(rows).as_of(DAY, T1)[CID]
+    assert open_ended.validity == im.OPEN_ENDED
+    assert open_ended.proven_valid is True
+    assert open_ended.quant_eligibility == im.ELIGIBLE
+
+    stale = im.build_registry(
+        _replace_value(rows, im.ATTR_DATA_FRESHNESS, im.STALE)
+    ).as_of(DAY, T1)[CID]
+    assert stale.validity == im.OPEN_ENDED
+    assert stale.quant_eligibility == im.NOT_ELIGIBLE
+
+    bounded = [row._replace(valid_to=NEXT_DAY) for row in rows]
+    known = im.build_registry(bounded).as_of(DAY, T1)[CID]
+    assert known.validity == im.KNOWN_INTERVAL
+    assert known.quant_eligibility == im.ELIGIBLE
+
+
+def test_expired_interval_leaves_no_eligible_state() -> None:
+    """A bounded interval stops selecting rows at its exclusive end."""
+    rows = [row._replace(valid_to=NEXT_DAY) for row in _eligible_rows()]
+    registry = im.build_registry(rows)
+    assert registry.as_of(DAY, T1)[CID].quant_eligibility == im.ELIGIBLE
+    assert registry.as_of(NEXT_DAY, T1) == {}
+
+
+def test_alias_outside_validity_is_not_resolved() -> None:
+    """Neither side of an alias interval yields a canonical ID."""
+    alias = im.provider_alias("fyers", "OUTSIDE")
+    registry = im.build_registry(
+        [_alias_obs(alias, valid_from=JAN, valid_to=FEB)]
+    )
+    early = registry.resolve_alias(alias, "2025-12-31", MID)
+    assert early.status == im.NOT_YET_VALID
+    assert early.canonical_instrument_id is None
+    assert registry.resolve(alias, "2025-12-31", MID) is None
+    late = registry.resolve_alias(alias, FEB, MID)
+    assert late.status == im.EXPIRED
+    assert late.canonical_instrument_id is None
+    assert registry.resolve(alias, FEB, MID) is None
+
+
+def test_token_reuse_with_equal_precedence_is_ambiguous() -> None:
+    """Two tied claimants are ambiguous, never chosen by input order."""
+    alias = im.provider_alias("fyers", "REUSE")
+    first = _alias_obs(
+        alias,
+        CID + "-A",
+        observed_at=EARLY,
+        valid_from=JAN,
+        valid_to=MAR,
+        digest="1" * 64,
+    )
+    second = _alias_obs(
+        alias,
+        CID + "-B",
+        observed_at=EARLY,
+        valid_from=FEB,
+        valid_to=APR,
+        digest="1" * 64,
+    )
+    registry = im.build_registry([second, first])
+    resolution = registry.resolve_alias(alias, FEB, MID)
+    assert resolution.status == im.AMBIGUOUS
+    assert resolution.canonical_instrument_id is None
+    assert resolution.claimants == (CID + "-A", CID + "-B")
+    assert registry.resolve(alias, FEB, MID) is None
+
+
+def test_equivalent_precedence_conflicts_are_permutation_invariant() -> None:
+    """Tied rows with different values report CONFLICT in every order."""
+    left = _obs("tick_size", 0.05, digest="1" * 64)
+    right = _obs("tick_size", 0.10, digest="1" * 64)
+    other = _obs("lot_size", 7, digest="2" * 64)
+    baseline = None
+    for order in itertools.permutations([left, right, other]):
+        state = im.build_registry(list(order)).as_of(DAY, T1)[CID]
+        result = (
+            state.conformance_status,
+            state.quant_eligibility,
+            state.validity,
+            tuple(sorted(state.conflicts.items())),
+            state.attributes.get("tick_size"),
+            state.attributes.get("lot_size"),
+        )
+        if baseline is None:
+            baseline = result
+        assert result == baseline
+    assert baseline is not None
+    assert baseline[0] == im.CONFLICT
+    assert baseline[1] == im.NOT_ELIGIBLE
+    assert state.conflict_status == im.AMBIGUOUS
+    assert set(state.conflicts) == {"tick_size"}
+    assert len(state.conflicts["tick_size"]) == 2
+    identifiers = set(state.conflicts["tick_size"])
+    assert identifiers == {
+        im.observation_id(left),
+        im.observation_id(right),
+    }
+    assert state.as_dict()["conflicts"] == dict(state.conflicts)
+
+
+def test_invalid_interval_is_quarantined_before_eligibility() -> None:
+    """Malformed intervals never enter the registry or pass the gate."""
+    with pytest.raises(ValueError, match="valid_from must precede"):
+        im.observation(
+            CID,
+            "tick_size",
+            1.0,
+            observed_at=T0,
+            valid_from=NEXT_DAY,
+            valid_to=DAY,
+            source_digest="a" * 64,
+        )
+    direct = im.Observation(
+        CID,
+        "tick_size",
+        1.0,
+        NEXT_DAY,
+        DAY,
+        T0,
+        T0,
+        None,
+        "a" * 64,
+        im.SCHEMA_VERSION,
+        im.REGISTRY_VERSION,
+    )
+    with pytest.raises(ValueError, match="valid_from must precede"):
+        im.build_registry([direct])
+    denied = im.fail_closed_eligibility(
+        identity_status=im.VERIFIED,
+        provider_coverage=im.MULTI_SOURCE,
+        conformance_status=im.PASS,
+        provider_trading_status=im.ACTIVE,
+        exchange_status=im.OPEN,
+        exchange_eligibility=im.ALLOWED,
+        data_freshness=im.FRESH,
+        validity=im.INVALID_INTERVAL,
+    )
+    assert denied == im.NOT_ELIGIBLE
+
+    rows = _eligible_rows() + [
+        _obs(im.ATTR_EFFECTIVE_FROM, NEXT_DAY),
+        _obs(im.ATTR_EFFECTIVE_TO, DAY),
+    ]
+    state = im.build_registry(rows).as_of(DAY, T1)[CID]
+    assert state.validity == im.INVALID_INTERVAL
+    assert state.quant_eligibility == im.NOT_ELIGIBLE
