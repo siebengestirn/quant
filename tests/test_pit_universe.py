@@ -187,6 +187,37 @@ def _universe(
     )
 
 
+def _decision_view(result: pit.UniverseResult) -> tuple[object, ...]:
+    """Return only point-in-time fields, excluding full-artifact provenance."""
+    return (
+        result.as_of_market_date,
+        result.as_of_observation_time,
+        result.eligible,
+        result.ineligible,
+        result.symbol_resolution,
+        result.calendar_provenance,
+        result.reasons,
+        result.digest,
+        result.universe_digest,
+        result.calendar_digest,
+        result.decision_digest,
+    )
+
+
+def _decision_core(item: pit.Decision) -> tuple[object, ...]:
+    """Return decision fields, excluding provenance digests."""
+    return (
+        item.canonical_instrument_id,
+        item.eligible,
+        item.reasons,
+        item.status_event_id,
+        item.revision,
+        item.published_at,
+        item.source_digest,
+        item.symbols,
+    )
+
+
 def test_positive_universe_resolves_aliases_by_registry() -> None:
     """Two aliases for one canonical ID yield one deterministic decision."""
     history = {CID_A: (_event(),)}
@@ -264,8 +295,8 @@ def test_symbol_equality_is_not_identity() -> None:
     assert decision_b.reasons == (pit.STATUS_NOT_ELIGIBLE,)
 
 
-def test_conflicting_and_superseded_statuses_fail_closed() -> None:
-    """Overlapping disagreements and newer non-covering revisions block."""
+def test_conflicting_statuses_fail_closed() -> None:
+    """Overlapping disagreements from distinct events block."""
     conflicting = (
         _event(event_id="SYNTHETIC-YES", eligible=True),
         _event(event_id="SYNTHETIC-NO", eligible=False),
@@ -273,7 +304,9 @@ def test_conflicting_and_superseded_statuses_fail_closed() -> None:
     result = _universe({CID_A: conflicting}, {CID_A: CID_A})
     assert result.ineligible[0].reasons == (pit.CONFLICTING_STATUS,)
 
-    superseded = (
+    # A distinct event with a future effective date is a new event, not a
+    # revision of the governing one, so it cannot stale an earlier date.
+    future_event = (
         _event(event_id="SYNTHETIC-OLD", revision=1),
         _event(
             CID_A,
@@ -282,8 +315,9 @@ def test_conflicting_and_superseded_statuses_fail_closed() -> None:
             revision=2,
         ),
     )
-    result = _universe({CID_A: superseded}, {CID_A: CID_A})
-    assert result.ineligible[0].reasons == (pit.STALE_STATUS_REVISION,)
+    result = _universe({CID_A: future_event}, {CID_A: CID_A})
+    assert result.eligible[0].status_event_id == "SYNTHETIC-OLD"
+    assert result.eligible[0].reasons == ()
 
 
 def test_half_open_interval_boundaries() -> None:
@@ -366,8 +400,9 @@ def test_future_publication_never_changes_a_historical_decision() -> None:
         date=FEB_DATE,
     )
     assert before.eligible[0].reasons == ()
-    assert after == before
+    assert _decision_view(after) == _decision_view(before)
     assert after.digest == before.digest
+    assert after.artifact_digest != before.artifact_digest
     assert pit.STALE_STATUS_REVISION not in after.eligible[0].reasons
 
 
@@ -401,8 +436,9 @@ def test_future_observation_never_changes_a_historical_decision() -> None:
         as_of=FEB_AS_OF,
         date=FEB_DATE,
     )
-    assert after == before
+    assert _decision_view(after) == _decision_view(before)
     assert after.eligible[0].reasons == ()
+    assert after.artifact_digest != before.artifact_digest
 
 
 def test_future_effective_date_is_not_applied_early() -> None:
@@ -453,8 +489,9 @@ def test_retroactive_correction_learned_later_does_not_rewrite() -> None:
         date=FEB_DATE,
     )
     assert before.eligible[0].eligible
-    assert after == before
+    assert _decision_view(after) == _decision_view(before)
     assert after.eligible[0].status_event_id == "SYNTHETIC-FEB"
+    assert after.artifact_digest != before.artifact_digest
 
 
 def test_revision_closing_earlier_interval_learned_later_is_ignored() -> None:
@@ -488,8 +525,9 @@ def test_revision_closing_earlier_interval_learned_later_is_ignored() -> None:
         as_of=FEB_AS_OF,
         date=FEB_DATE,
     )
-    assert after == before
+    assert _decision_view(after) == _decision_view(before)
     assert after.eligible[0].eligible
+    assert after.artifact_digest != before.artifact_digest
 
 
 def test_conflicting_same_revision_observations_fail_closed() -> None:
@@ -538,7 +576,8 @@ def test_publication_time_and_ingestion_time_disagreement() -> None:
     baseline = _universe({CID_A: (event,)}, {ALIAS_A: CID_A})
     for extra in (published_early_seen_late, published_late_seen_early):
         result = _universe({CID_A: (event, extra)}, {ALIAS_A: CID_A})
-        assert result == baseline
+        assert _decision_view(result) == _decision_view(baseline)
+        assert result.artifact_digest != baseline.artifact_digest
 
     ingested_late = _Resolver(
         {
@@ -755,3 +794,284 @@ def test_universe_and_calendar_digests_are_recorded() -> None:
     )
     assert changed_calendar.calendar_digest != result.calendar_digest
     assert changed_calendar.digest != result.digest
+
+
+def test_invalid_future_event_only_fails_full_artifact() -> None:
+    """A malformed later event does not corrupt an earlier PIT decision."""
+    january = _event(
+        event_id="SYNTHETIC-JAN",
+        effective_from="2024-01-01",
+        published_at="2024-01-01T01:00:00Z",
+        observed_at="2024-01-01T02:00:00Z",
+    )
+    malformed = _event(
+        event_id="SYNTHETIC-BAD-FUTURE",
+        effective_from="2024-02-01",
+        published_at="2024-03-01T01:00:00Z",
+        observed_at="2024-03-01T02:00:00Z",
+        revision=2,
+    )._replace(eligible="not-a-bool", source_digest="short")
+    coordinates = {"as_of": FEB_AS_OF, "date": FEB_DATE}
+    before = _universe(
+        {CID_A: (january,)},
+        {ALIAS_A: CID_A},
+        _calendar_on(FEB_DATE),
+        **coordinates,
+    )
+    after = _universe(
+        {CID_A: (january, malformed)},
+        {ALIAS_A: CID_A},
+        _calendar_on(FEB_DATE),
+        **coordinates,
+    )
+    assert before.eligible[0].status_event_id == "SYNTHETIC-JAN"
+    assert after.eligible == before.eligible
+    assert after.ineligible == before.ineligible
+    assert after.reasons == before.reasons == ()
+    assert after.decision_digest == before.decision_digest
+    assert after.digest == before.digest
+    assert after.artifact_digest != before.artifact_digest
+    assert after.artifact_qualified is False
+    assert any(
+        "eligible must be a boolean" in item for item in after.artifact_errors
+    )
+    assert (
+        pit.qualify_status_artifact({CID_A: (january, malformed)}).errors
+        == after.artifact_errors
+    )
+
+
+def test_full_artifact_failure_is_reported_separately() -> None:
+    """Artifact qualification and a PIT decision answer different questions."""
+    good = _event(
+        event_id="SYNTHETIC-GOOD",
+        effective_from="2024-01-01",
+        published_at="2024-01-01T01:00:00Z",
+        observed_at="2024-01-01T02:00:00Z",
+    )
+    malformed_visible = _event(
+        event_id="SYNTHETIC-MALFORMED-VISIBLE",
+        effective_from="2024-02-01",
+        published_at="2024-01-15T01:00:00Z",
+        observed_at="2024-01-15T02:00:00Z",
+        revision=2,
+    )._replace(eligible=None)
+    history = {CID_A: (good, malformed_visible)}
+    result = _universe(
+        history,
+        {ALIAS_A: CID_A},
+        _calendar_on(FEB_DATE),
+        as_of=FEB_AS_OF,
+        date=FEB_DATE,
+    )
+    assert result.eligible == ()
+    assert result.ineligible[0].reasons == (pit.INVALID_STATUS_EVENT,)
+    assert result.artifact_qualified is False
+    assert result.artifact_errors
+    assert pit.qualify_status_artifact(history).qualified is False
+
+
+def test_artifact_and_decision_digests_have_distinct_scopes() -> None:
+    """Artifact digests see all records; decision digests see visible ones."""
+    january = _event(
+        event_id="SYNTHETIC-JAN",
+        effective_from="2024-01-01",
+        published_at="2024-01-01T01:00:00Z",
+        observed_at="2024-01-01T02:00:00Z",
+    )
+    later = _event(
+        event_id="SYNTHETIC-LATER",
+        effective_from="2024-03-01",
+        published_at="2024-03-01T01:00:00Z",
+        observed_at="2024-03-01T02:00:00Z",
+        revision=2,
+    )
+    coordinates = {"as_of": FEB_AS_OF, "date": FEB_DATE}
+    baseline = _universe(
+        {CID_A: (january,)},
+        {ALIAS_A: CID_A},
+        _calendar_on(FEB_DATE),
+        **coordinates,
+    )
+    appended = _universe(
+        {CID_A: (january, later)},
+        {ALIAS_A: CID_A},
+        _calendar_on(FEB_DATE),
+        **coordinates,
+    )
+    assert appended.artifact_digest != baseline.artifact_digest
+    assert appended.decision_digest == baseline.decision_digest
+    assert appended.digest == baseline.digest
+    assert appended.eligible == baseline.eligible
+    assert all(
+        item.decision_digest == appended.decision_digest
+        for item in appended.eligible
+    )
+    assert len(appended.artifact_digest) == 64
+    assert len(appended.decision_digest) == 64
+
+    other_observation = _universe(
+        {CID_A: (january, later)},
+        {ALIAS_A: CID_A},
+        _calendar_on(FEB_DATE),
+        as_of="2024-02-06T06:00:00Z",
+        date=FEB_DATE,
+    )
+    assert other_observation.artifact_digest == appended.artifact_digest
+    assert other_observation.decision_digest != appended.decision_digest
+
+    changed_visible = _universe(
+        {CID_A: (january._replace(eligible=False),)},
+        {ALIAS_A: CID_A},
+        _calendar_on(FEB_DATE),
+        **coordinates,
+    )
+    assert changed_visible.artifact_digest != baseline.artifact_digest
+    assert changed_visible.decision_digest != baseline.decision_digest
+
+
+def test_revision_and_new_future_event_have_distinct_contracts() -> None:
+    """Only a same-identity revision can supersede an earlier decision."""
+    original = _event(
+        event_id="SYNTHETIC-ORIGINAL",
+        effective_from="2024-01-01",
+        effective_to="2024-03-01",
+        published_at="2024-01-01T01:00:00Z",
+        observed_at="2024-01-01T02:00:00Z",
+    )
+    revision = _event(
+        event_id="SYNTHETIC-ORIGINAL",
+        eligible=False,
+        effective_from="2024-03-01",
+        published_at="2024-01-15T01:00:00Z",
+        observed_at="2024-01-15T02:00:00Z",
+        revision=2,
+    )
+    new_event = _event(
+        event_id="SYNTHETIC-NEW",
+        eligible=False,
+        effective_from="2024-03-01",
+        published_at="2024-01-15T01:00:00Z",
+        observed_at="2024-01-15T02:00:00Z",
+    )
+    february = {"as_of": FEB_AS_OF, "date": FEB_DATE}
+    for extra in (revision, new_event):
+        baseline = _universe(
+            {CID_A: (original,)},
+            {ALIAS_A: CID_A},
+            _calendar_on(FEB_DATE),
+            **february,
+        )
+        combined = _universe(
+            {CID_A: (original, extra)},
+            {ALIAS_A: CID_A},
+            _calendar_on(FEB_DATE),
+            **february,
+        )
+        assert _decision_core(combined.eligible[0]) == _decision_core(
+            baseline.eligible[0]
+        )
+        assert combined.ineligible == baseline.ineligible
+        assert pit.STALE_STATUS_REVISION not in combined.eligible[0].reasons
+        # Both extra records are visible but not yet effective: the decision
+        # is unchanged while the visible-history and artifact digests differ.
+        assert combined.universe_digest != baseline.universe_digest
+        assert combined.decision_digest != baseline.decision_digest
+        assert combined.artifact_digest != baseline.artifact_digest
+
+    march = {"as_of": "2024-03-04T06:00:00Z", "date": "2024-03-04"}
+    revised = _universe(
+        {CID_A: (original, revision)},
+        {ALIAS_A: CID_A},
+        _calendar_on("2024-03-04"),
+        **march,
+    )
+    assert revised.ineligible[0].status_event_id == "SYNTHETIC-ORIGINAL"
+    assert revised.ineligible[0].revision == 2
+    introduced = _universe(
+        {CID_A: (original, new_event)},
+        {ALIAS_A: CID_A},
+        _calendar_on("2024-03-04"),
+        **march,
+    )
+    assert introduced.ineligible[0].status_event_id == "SYNTHETIC-NEW"
+
+
+def test_stale_revision_requires_same_event_identity() -> None:
+    """A closing revision stales its own event, not an unrelated event."""
+    original = _event(
+        event_id="SYNTHETIC-ORIGINAL",
+        effective_from="2024-01-01",
+        effective_to="2024-04-01",
+        published_at="2024-01-01T01:00:00Z",
+        observed_at="2024-01-01T02:00:00Z",
+    )
+    closing = _event(
+        event_id="SYNTHETIC-ORIGINAL",
+        eligible=False,
+        effective_from="2024-01-01",
+        effective_to="2024-01-31",
+        published_at="2024-01-15T01:00:00Z",
+        observed_at="2024-01-15T02:00:00Z",
+        revision=2,
+    )
+    coordinates = {"as_of": FEB_AS_OF, "date": FEB_DATE}
+    own_revision = _universe(
+        {CID_A: (original, closing)},
+        {ALIAS_A: CID_A},
+        _calendar_on(FEB_DATE),
+        **coordinates,
+    )
+    assert own_revision.ineligible[0].reasons == (pit.STALE_STATUS_REVISION,)
+    unrelated = _universe(
+        {
+            CID_A: (
+                original,
+                closing._replace(status_event_id="SYNTHETIC-OTHER"),
+            )
+        },
+        {ALIAS_A: CID_A},
+        _calendar_on(FEB_DATE),
+        **coordinates,
+    )
+    assert unrelated.eligible[0].status_event_id == "SYNTHETIC-ORIGINAL"
+
+
+def test_retroactive_correction_applies_from_its_observation_time() -> None:
+    """A backdated correction changes only knowledge after it was seen."""
+    original = _event(
+        event_id="SYNTHETIC-FEB",
+        effective_from="2024-02-01",
+        published_at="2024-02-01T01:00:00Z",
+        observed_at="2024-02-01T02:00:00Z",
+    )
+    correction = _event(
+        event_id="SYNTHETIC-FEB",
+        eligible=False,
+        effective_from="2024-02-01",
+        published_at="2024-03-05T01:00:00Z",
+        observed_at="2024-03-05T02:00:00Z",
+        revision=2,
+    )
+    history = {CID_A: (original, correction)}
+    before = _universe(
+        history,
+        {ALIAS_A: CID_A},
+        _calendar_on(FEB_DATE),
+        as_of=FEB_AS_OF,
+        date=FEB_DATE,
+    )
+    after = _universe(
+        history,
+        {ALIAS_A: CID_A},
+        _calendar_on(FEB_DATE),
+        as_of="2024-03-06T06:00:00Z",
+        date=FEB_DATE,
+    )
+    assert before.eligible[0].status_event_id == "SYNTHETIC-FEB"
+    assert before.eligible[0].revision == 1
+    assert after.ineligible[0].status_event_id == "SYNTHETIC-FEB"
+    assert after.ineligible[0].revision == 2
+    assert after.ineligible[0].reasons == (pit.STATUS_NOT_ELIGIBLE,)
+    assert before.artifact_digest == after.artifact_digest
+    assert before.decision_digest != after.decision_digest
