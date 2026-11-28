@@ -65,6 +65,13 @@
     },
     {
       "class": "canonical-doc",
+      "owner": "Governance",
+      "path": "docs/data-authenticity.md",
+      "purpose": "Data classification vocabulary, mandatory provenance fields and historical experiment quarantine state",
+      "retention": "current"
+    },
+    {
+      "class": "canonical-doc",
       "owner": "maintainer",
       "path": "docs/dataset-contract.md",
       "purpose": "Snapshot identity and CSV schema contract",

@@ -9,10 +9,65 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from test_loader_support import load_test_module
 
 ROOT = Path(__file__).resolve().parent.parent
 research = load_test_module("quant_research", ROOT / "python" / "research.py")
+provenance = load_test_module(
+    "quant_data_provenance_for_research",
+    ROOT / "python" / "data_provenance.py",
+)
+
+
+def _authorization() -> research.ExperimentAuthorization:
+    """Authorized offline registration for simulated test fixtures."""
+    return research.ExperimentAuthorization(
+        classification=provenance.DataClassification.SIMULATED_MARKET_DATA,
+        approved_by="test",
+        reason="offline pytest fixture on synthetic data",
+    )
+
+
+def _registry(tmp_path: Path) -> Path:
+    """Explicit registry file path used by the sink and direct registration."""
+    return tmp_path / "data" / "assurance" / "experiments.jsonl"
+
+
+def _synthetic_dataset(**overrides: object) -> research.ValidatedDataset:
+    """Wrap simulated history as a COMPLETE dataset without PIT filtering."""
+    provenance_fields: dict = {
+        "data_classification": (
+            provenance.DataClassification.SIMULATED_MARKET_DATA
+        ),
+        "source_artifact_digest": "e" * 64,
+    }
+    for key in (
+        "data_classification",
+        "source_artifact_digest",
+        "corporate_action_digest",
+        "feature_version_digest",
+        "instrument_registry_digest",
+    ):
+        if key in overrides:
+            provenance_fields[key] = overrides.pop(key)
+    fields: dict = {
+        "history": research.synthetic_history(),
+        "quality": {},
+        "eligible_dates": {},
+        "status": "COMPLETE",
+        "source": "SYNTHETIC_TEST_FIXTURE",
+        "vintage": "TEST",
+        "invalid_rows": 0,
+        "pit_enforced": False,
+        "dataset_digest": "a" * 64,
+        "universe_digest": "b" * 64,
+        "calendar_digest": "c" * 64,
+        "code_version": "d" * 64,
+        "provenance": research.DatasetProvenance(**provenance_fields),
+    }
+    fields.update(overrides)
+    return research.ValidatedDataset(**fields)
 
 
 def test_synthetic_history_is_deterministic():
@@ -156,14 +211,15 @@ def test_deflated_sharpe_accounts_for_trials():
 
 def test_experiment_registry_is_append_only(tmp_path):
     """Enforce the QUANT style contract."""
-    first = research.register_experiment(tmp_path, {"strategy": "x"})
-    second = research.register_experiment(tmp_path, {"strategy": "y"})
-    assert first != second
-    lines = (
-        (tmp_path / "data" / "assurance" / "experiments.jsonl")
-        .read_text()
-        .splitlines()
+    auth = _authorization()
+    first = research.register_experiment(
+        _registry(tmp_path), {"strategy": "x"}, authorization=auth
     )
+    second = research.register_experiment(
+        _registry(tmp_path), {"strategy": "y"}, authorization=auth
+    )
+    assert first != second
+    lines = _registry(tmp_path).read_text().splitlines()
     assert len(lines) == 2
     assert research.json.loads(lines[0])["id"] == first
 
@@ -630,12 +686,10 @@ def test_selection_tests_are_not_overclaimed():
 
 def test_experiment_registry_records_reproducibility_inputs(tmp_path):
     """Enforce the QUANT style contract."""
-    identifier = research.register_experiment(tmp_path, {"strategy": "x"})
-    line = (
-        (tmp_path / "data" / "assurance" / "experiments.jsonl")
-        .read_text()
-        .splitlines()[0]
+    identifier = research.register_experiment(
+        _registry(tmp_path), {"strategy": "x"}, authorization=_authorization()
     )
+    line = _registry(tmp_path).read_text().splitlines()[0]
     entry = research.json.loads(line)
     assert entry["id"] == identifier
     assert entry["random_seed"] == research.SEED
@@ -1036,3 +1090,216 @@ def test_service_bound_resolver_integrates_with_dataset_path(tmp_path):
         entry["canonical_instrument_id"] == identity
         for entry in dataset.history["AAA"]
     )
+
+
+def test_analyze_default_sink_never_registers(tmp_path):
+    """The default sink must not create or modify any registry file."""
+    persistent = ROOT / "data" / "assurance" / "experiments.jsonl"
+    before = persistent.read_bytes() if persistent.is_file() else None
+    report = research.analyze(research.synthetic_history(), ROOT)
+    assert report["experiment_registration"]["sink"] == "NullExperimentSink"
+    assert report["experiment_registration"]["records"] == 4
+    research.analyze(research.synthetic_history(), tmp_path)
+    assert not _registry(tmp_path).exists()
+    after = persistent.read_bytes() if persistent.is_file() else None
+    assert after == before
+
+
+def test_synthetic_sink_records_are_never_real_data_research(tmp_path):
+    """Synthetic analysis can only emit SYNTHETIC_OR_UNVERIFIED records."""
+    sink = research.InMemoryExperimentSink()
+    report = research.analyze(
+        research.synthetic_history(), ROOT, experiment_sink=sink
+    )
+    assert len(sink.records()) == 4
+    assert all(
+        record["experiment_classification"] == "SYNTHETIC_OR_UNVERIFIED"
+        for record in sink.records()
+    )
+    assert all(
+        record["experiment_classification"] != "REAL_DATA_RESEARCH"
+        for record in sink.records()
+    )
+    assert report["experiment_registration"]["classification"] == (
+        "SYNTHETIC_OR_UNVERIFIED"
+    )
+
+    path = _registry(tmp_path)
+    file_sink = research.FileExperimentSink(path, _authorization())
+    research.analyze(
+        research.synthetic_history(), ROOT, experiment_sink=file_sink
+    )
+    entries = [json.loads(line) for line in path.read_text().splitlines()]
+    assert len(entries) == 4
+    assert all(
+        entry["experiment_classification"] == "SYNTHETIC_OR_UNVERIFIED"
+        for entry in entries
+    )
+    assert all(entry["approved_by"] == "test" for entry in entries)
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_complete_real_dataset_registers_real_research(tmp_path):
+    """A complete, correctly classified real dataset must be registrable."""
+    lineage = {
+        "corporate_action_digest": "1" * 64,
+        "feature_version_digest": "2" * 64,
+        "instrument_registry_digest": "3" * 64,
+    }
+    dataset = _synthetic_dataset(
+        data_classification=provenance.DataClassification.PROVIDER_API_CAPTURE,
+        source_artifact_digest="e" * 64,
+        **lineage,
+    )
+    assert dataset.status == "COMPLETE"
+    assert dataset.provenance.data_classification == "PROVIDER_API_CAPTURE"
+    authorization = research.ExperimentAuthorization(
+        classification=provenance.DataClassification.PROVIDER_API_CAPTURE,
+        approved_by="test",
+        reason="offline positive case for real-source research",
+    )
+    path = _registry(tmp_path)
+    sink = research.FileExperimentSink(path, authorization)
+    report = research.analyze(
+        dataset.history, ROOT, dataset, experiment_sink=sink
+    )
+
+    entries = [json.loads(line) for line in path.read_text().splitlines()]
+    assert report["experiment_registration"]["classification"] == (
+        "REAL_DATA_RESEARCH"
+    )
+    assert len(entries) == 4
+    assert all(
+        entry["experiment_classification"] == "REAL_DATA_RESEARCH"
+        and entry["data_classification"] == "PROVIDER_API_CAPTURE"
+        and entry["source_artifact_digest"] == "e" * 64
+        and entry["dataset_digest"] == "a" * 64
+        and entry["universe_digest"] == "b" * 64
+        and entry["calendar_digest"] == "c" * 64
+        and all(entry[key] == value for key, value in lineage.items())
+        for entry in entries
+    )
+
+
+def test_real_classification_refused_without_digest_or_classification(
+    tmp_path,
+):
+    """A real-source claim without a digest cannot become real research."""
+    dataset = _synthetic_dataset(
+        data_classification=provenance.DataClassification.PROVIDER_API_CAPTURE,
+        source_artifact_digest="",
+    )
+    assert dataset.provenance.data_classification == "UNVERIFIED"
+    assert any(
+        "real-source classification refused" in error
+        for error in dataset.status_errors
+    )
+    sink = research.InMemoryExperimentSink()
+    research.analyze(dataset.history, ROOT, dataset, experiment_sink=sink)
+    assert len(sink.records()) == 4
+    assert all(
+        record["experiment_classification"] == "SYNTHETIC_OR_UNVERIFIED"
+        and record["data_classification"] == "UNVERIFIED"
+        for record in sink.records()
+    )
+
+    unclassified = _synthetic_dataset(data_classification="UNVERIFIED")
+    refused = research.InMemoryExperimentSink()
+    research.analyze(
+        unclassified.history, ROOT, unclassified, experiment_sink=refused
+    )
+    assert all(
+        record["experiment_classification"] == "SYNTHETIC_OR_UNVERIFIED"
+        for record in refused.records()
+    )
+
+    real_auth = research.ExperimentAuthorization(
+        classification=provenance.DataClassification.PROVIDER_API_CAPTURE,
+        approved_by="test",
+        reason="offline negative case",
+    )
+    real_sink = research.FileExperimentSink(_registry(tmp_path), real_auth)
+    with pytest.raises(ValueError):
+        real_sink.append(
+            {"experiment_classification": "SYNTHETIC_OR_UNVERIFIED"}
+        )
+    assert not _registry(tmp_path).exists()
+
+
+def test_lineage_digests_and_configuration_digest_are_recorded(tmp_path):
+    """Lineage fields flow through loaders and into experiment records."""
+    _status, _calendar, records, sessions = _write_research_dataset(tmp_path)
+    lineage = {
+        "corporate_action_digest": "1" * 64,
+        "feature_version_digest": "2" * 64,
+        "instrument_registry_digest": "3" * 64,
+    }
+    dataset = research.load_history_validated(
+        tmp_path,
+        records,
+        "TEST",
+        sessions,
+        [],
+        [],
+        provenance=research.DatasetProvenance(
+            data_classification=(
+                provenance.DataClassification.SIMULATED_MARKET_DATA
+            ),
+            **lineage,
+        ),
+    )
+    assert dataset.provenance.data_classification == ("SIMULATED_MARKET_DATA")
+    for key, value in lineage.items():
+        assert getattr(dataset.provenance, key) == value
+    missing = research.load_history_validated(
+        tmp_path, records, "TEST", sessions, [], []
+    )
+    assert missing.provenance.corporate_action_digest == "UNKNOWN"
+    assert missing.provenance.feature_version_digest == "UNKNOWN"
+    assert missing.provenance.instrument_registry_digest == "UNKNOWN"
+
+    analyzed = _synthetic_dataset(**lineage)
+    sink = research.InMemoryExperimentSink()
+    research.analyze(analyzed.history, ROOT, analyzed, experiment_sink=sink)
+    assert len(sink.records()) == 4
+    assert all(
+        all(record[key] == value for key, value in lineage.items())
+        and provenance.is_sha256_hex(record["configuration_digest"])
+        for record in sink.records()
+    )
+
+
+def test_experiment_record_reconstructable_from_digests():
+    """The configuration digest is reproducible from recorded fields."""
+    dataset = _synthetic_dataset()
+    sink = research.InMemoryExperimentSink()
+    research.analyze(dataset.history, ROOT, dataset, experiment_sink=sink)
+    record = sink.records()[0]
+    config = research.experiment_configuration(record)
+    assert research.configuration_digest(config) == (
+        record["configuration_digest"]
+    )
+    rebuilt = {
+        "strategy": record["strategy"],
+        "dataset_digest": record["dataset_digest"],
+        "universe_digest": record["universe_digest"],
+        "calendar_digest": record["calendar_digest"],
+        "source_artifact_digest": record["source_artifact_digest"],
+        "corporate_action_digest": record["corporate_action_digest"],
+        "feature_version_digest": record["feature_version_digest"],
+        "instrument_registry_digest": record["instrument_registry_digest"],
+        "code_commit": record["code_commit"],
+        "data_classification": record["data_classification"],
+        "experiment_classification": record["experiment_classification"],
+        "random_seed": record["random_seed"],
+        "trial_count": record["trial_count"],
+        "holdout_status": record["holdout_status"],
+    }
+    assert config == rebuilt
+    assert research.configuration_digest(rebuilt) == (
+        record["configuration_digest"]
+    )
+    assert record["status"] == "INCONCLUSIVE"
+    assert record["holdout_status"] == "SEALED_NOT_EVALUATED"
+    assert record["random_seed"] == research.SEED
+    assert record["trial_count"] == research.TRIALS
