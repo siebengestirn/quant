@@ -12,6 +12,7 @@ import json
 import stat
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -37,6 +38,8 @@ REQUEST_ONCE = vars(upstox)["_request"]
 
 class FakeClient:
     """Deterministic in-memory HTTP client that never opens a socket."""
+
+    follow_redirects = False
 
     def __init__(self, responses: list[object]) -> None:
         self.responses = list(responses)
@@ -624,6 +627,8 @@ def test_timeout_and_client_exceptions_are_sanitised(
     class ExplodingClient:
         """Injected client that raises a token-bearing exception."""
 
+        follow_redirects = False
+
         def __init__(self, error: Exception) -> None:
             self.error = error
             self.calls: list[str] = []
@@ -668,6 +673,8 @@ def test_bounded_timeout_is_passed_to_supporting_clients() -> None:
 
     class TimeoutClient:
         """Client that records the timeout it was given."""
+
+        follow_redirects = False
 
         def __init__(self) -> None:
             self.timeouts: list[float] = []
@@ -732,3 +739,375 @@ def test_module_never_imports_network_primitives() -> None:
     assert "import socket" not in source
     assert "urlopen" not in source
     assert "requests.get" not in source
+
+
+# PR #84: the transport redirect policy is enforced in code before a token
+# is sent. The clients below model manual, configurable and auto-following
+# injected transports without opening any socket.
+
+EVIL_URL = "https://evil.example/v3/historical-candle/x"
+
+
+class FlagClient(FakeClient):
+    """Manual client that advertises a client-level redirect flag."""
+
+    def __init__(
+        self, responses: list[object], attribute: str = "follow_redirects"
+    ) -> None:
+        super().__init__(responses)
+        self.attribute = attribute
+        setattr(self, attribute, True)
+
+    def flag(self) -> object:
+        """Return the current redirect flag."""
+        return getattr(self, self.attribute)
+
+
+class ReadOnlyFlagClient(FakeClient):
+    """Auto-following client whose redirect flag cannot be disabled."""
+
+    @property
+    def follow_redirects(self) -> bool:
+        """Always report automatic redirect following."""
+        return True
+
+
+class BudgetClient(FakeClient):
+    """Client exposing a non-zero redirect budget."""
+
+    def __init__(self, responses: list[object], writable: bool = False) -> None:
+        super().__init__(responses)
+        self._budget = 5
+        self.writable = writable
+
+    @property
+    def max_redirects(self) -> int:
+        """Return the number of redirects the client would follow."""
+        return self._budget
+
+    @max_redirects.setter
+    def max_redirects(self, value: int) -> None:
+        """Change the budget only when the fake is marked writable."""
+        if self.writable:
+            self._budget = value
+
+
+class ExplicitRedirectClient(FakeClient):
+    """Client whose get() accepts explicit redirect and timeout keywords."""
+
+    def __init__(self, responses: list[object]) -> None:
+        super().__init__(responses)
+        self.options: list[dict[str, object]] = []
+
+    def get(
+        self,
+        url: str,
+        headers: dict[str, str],
+        follow_redirects: bool = True,
+        timeout: float = 0,
+    ) -> object:
+        """Record the enforced options and return the next queued response."""
+        self.calls.append(url)
+        self.headers.append(dict(headers))
+        self.options.append(
+            {"follow_redirects": follow_redirects, "timeout": timeout}
+        )
+        if not self.responses:
+            raise AssertionError("unexpected HTTP request")
+        return self.responses.pop(0)
+
+
+class KeywordRedirectClient(FakeClient):
+    """Requests-like client whose get() forwards arbitrary keywords."""
+
+    def __init__(self, responses: list[object]) -> None:
+        super().__init__(responses)
+        self.options: list[dict[str, object]] = []
+
+    def get(
+        self, url: str, headers: dict[str, str], **options: object
+    ) -> object:
+        """Record the enforced keywords and return the queued response."""
+        self.calls.append(url)
+        self.headers.append(dict(headers))
+        self.options.append(dict(options))
+        if not self.responses:
+            raise AssertionError("unexpected HTTP request")
+        return self.responses.pop(0)
+
+
+def _followed_result() -> object:
+    """Build a result that a client already followed to another URL."""
+    return SimpleNamespace(
+        status=200,
+        headers={},
+        url=EVIL_URL,
+        history=(object(),),
+    )
+
+
+class UnknownClient:
+    """Client interface with no control for automatic redirects."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def get(self, url: str, _headers: dict[str, str]) -> object:
+        """Record a request that must never be made."""
+        self.calls.append(url)
+        return _success([_row()])
+
+    def seen(self) -> tuple[str, ...]:
+        """Return the attempted URLs."""
+        return tuple(self.calls)
+
+
+def test_transport_policy_check_is_explicit_and_public() -> None:
+    """Callers and raw evidence can see the transport policy check."""
+    assert callable(upstox.enforce_transport_policy)
+    assert upstox.check_transport_policy is upstox.enforce_transport_policy
+    assert upstox.REDIRECT_POLICY_KEY == "redirect_policy_enforced"
+    assert upstox.MANUAL_REDIRECT_CONTROL == "manual"
+    assert upstox.TRANSPORT_POLICY_REASON in upstox.TRANSPORT_REASONS
+    assert upstox.enforce_transport_policy(FakeClient([])) == "manual"
+
+
+@pytest.mark.parametrize("attribute", ["follow_redirects", "allow_redirects"])
+def test_configurable_auto_follow_flag_is_disabled(attribute: str) -> None:
+    """A settable auto-follow flag is pinned off before any request."""
+    client = FlagClient([_success([_row()])], attribute)
+    assert upstox.enforce_transport_policy(client) == "manual"
+    assert getattr(client, attribute) is False
+    assert not client.calls
+    assert _fetch(client=client).status == "OK"
+    assert getattr(client, attribute) is False
+    assert len(client.seen()) == 1
+
+
+def test_client_without_any_redirect_control_is_rejected() -> None:
+    """An uninterrogatable transport gets no token and makes no request."""
+    client = UnknownClient()
+    with pytest.raises(upstox.TransportError) as caught:
+        _fetch(client=client)
+    assert caught.value.reason == upstox.TRANSPORT_POLICY_REASON
+    assert not client.seen()
+    assert TOKEN not in str(caught.value)
+    with pytest.raises(upstox.TransportError):
+        upstox.enforce_transport_policy(client)
+
+
+def test_call_level_redirect_controls_are_forced_off() -> None:
+    """Explicit and keyword-only client controls receive False every hop."""
+    same = _request_url()
+    explicit = ExplicitRedirectClient([_redirect(same), _success([_row()])])
+    assert upstox.enforce_transport_policy(explicit) == "follow_redirects"
+    assert _fetch(client=explicit).status == "OK"
+    assert explicit.options == [
+        {"follow_redirects": False, "timeout": upstox.DEFAULT_TIMEOUT_SECONDS},
+        {"follow_redirects": False, "timeout": upstox.DEFAULT_TIMEOUT_SECONDS},
+    ]
+
+    keyword = KeywordRedirectClient([_success([_row()])])
+    assert upstox.enforce_transport_policy(keyword) == "allow_redirects"
+    assert _fetch(client=keyword).status == "OK"
+    assert keyword.options == [
+        {
+            "allow_redirects": False,
+            "timeout": upstox.DEFAULT_TIMEOUT_SECONDS,
+        }
+    ]
+
+
+def test_auto_following_client_is_rejected_before_any_request(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A client that cannot be pinned to manual handling gets no token."""
+    client = ReadOnlyFlagClient([])
+    with pytest.raises(upstox.TransportError) as caught:
+        _fetch(client=client)
+    assert caught.value.reason == upstox.TRANSPORT_POLICY_REASON
+    assert not client.seen()
+    assert TOKEN not in str(caught.value)
+    assert TOKEN not in caplog.text
+    with pytest.raises(upstox.TransportError, match="automatic redirects"):
+        upstox.enforce_transport_policy(client)
+    with pytest.raises(upstox.TransportError):
+        REQUEST_ONCE(client, _request_url(), TOKEN)
+
+
+def test_redirect_budget_is_reduced_to_zero_when_writable() -> None:
+    """An equivalent redirect-budget control is pinned to zero hops."""
+    writable = BudgetClient([_success([_row()])], writable=True)
+    assert upstox.enforce_transport_policy(writable) == "manual"
+    assert writable.max_redirects == 0
+    assert _fetch(client=writable).status == "OK"
+
+    stubborn = BudgetClient([])
+    with pytest.raises(upstox.TransportError) as caught:
+        upstox.enforce_transport_policy(stubborn)
+    assert caught.value.reason == upstox.TRANSPORT_POLICY_REASON
+    assert not stubborn.seen()
+
+
+def test_result_already_followed_by_the_client_is_rejected() -> None:
+    """A silent client-side follow cannot be accepted as a clean response."""
+    client = FakeClient([_followed_result()])
+    outcome = _fetch(client=client)
+    assert outcome.status == "REJECTED"
+    assert outcome.rejections[0].failure_class is (
+        upstox.FailureClass.TRANSPORT_ERROR
+    )
+    assert outcome.rejections[0].detail == upstox.TRANSPORT_POLICY_REASON
+    assert TOKEN not in repr(outcome)
+    with pytest.raises(upstox.TransportError) as caught:
+        REQUEST_ONCE(FakeClient([_followed_result()]), _request_url(), TOKEN)
+    assert caught.value.__cause__ is None
+
+
+def test_off_host_redirect_is_inspected_after_policy_is_pinned() -> None:
+    """A configurable client still cannot forward credentials off-host."""
+    client = FlagClient([_redirect(EVIL_URL)])
+    outcome = _fetch(client=client)
+    assert outcome.status == "REJECTED"
+    assert outcome.rejections[0].failure_class is (
+        upstox.FailureClass.TRANSPORT_ERROR
+    )
+    assert outcome.rejections[0].detail == "disallowed redirect target"
+    assert client.seen() == (_request_url(),)
+    assert client.flag() is False
+    assert TOKEN not in repr(outcome)
+
+
+def test_credentials_are_reapplied_only_to_approved_destinations() -> None:
+    """Each hop gets fresh credentials only after destination validation."""
+    same = _request_url()
+    client = ExplicitRedirectClient([_redirect(same), _success([_row()])])
+    assert _fetch(client=client).status == "OK"
+    assert client.seen() == (same, same)
+    assert all(
+        url.startswith("https://api.upstox.com/v3/historical-candle/")
+        for url in client.seen()
+    )
+    assert all(
+        header["Authorization"] == f"Bearer {TOKEN}"
+        for header in client.headers
+    )
+    assert all(option["follow_redirects"] is False for option in client.options)
+
+    hostile = KeywordRedirectClient([_redirect(EVIL_URL)])
+    assert _fetch(client=hostile).status == "REJECTED"
+    assert hostile.seen() == (same,)
+    assert all(
+        url.startswith("https://api.upstox.com/v3/") for url in hostile.seen()
+    )
+    assert all(
+        header["Authorization"] == f"Bearer {TOKEN}"
+        for header in hostile.headers
+    )
+    assert all(option["allow_redirects"] is False for option in hostile.options)
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "https://api.upstox.com/v3/historical-candle/x?token=abc",
+        "https://api.upstox.com/v3/historical-candle/x#fragment",
+        "https://u:p@api.upstox.com/v3/historical-candle/x",
+        "https://api.upstox.com/v3/../evil",
+        "https://api.upstox.com/v3/%2e%2e/evil",
+        "//evil.example/v3/historical-candle/x",
+    ],
+)
+def test_redirect_hop_rejects_unsafe_targets(location: str) -> None:
+    """Query, fragment, credentials and traversal never reach a second hop."""
+    client = FlagClient([_redirect(location)])
+    outcome = _fetch(client=client)
+    assert outcome.status == "REJECTED"
+    assert outcome.rejections[0].detail == "disallowed redirect target"
+    assert client.seen() == (_request_url(),)
+    with pytest.raises(upstox.TransportError, match="disallowed redirect"):
+        VALIDATE_REDIRECT(
+            location, _request_url(), upstox.PRODUCTION_HOSTS, "api.upstox.com"
+        )
+
+
+def test_redirect_chain_is_bounded_with_explicit_controls() -> None:
+    """Redirect budgets hold for both explicit and keyword client controls."""
+    same = _request_url()
+    responses = [_redirect(same)] * (upstox.MAX_REDIRECTS + 1)
+    for client in (FlagClient(responses), ExplicitRedirectClient(responses)):
+        outcome = _fetch(client=client)
+        assert outcome.status == "REJECTED"
+        assert outcome.rejections[0].detail == "too many redirects"
+        assert len(client.seen()) == upstox.MAX_REDIRECTS + 1
+
+
+def test_limits_and_retries_hold_with_explicit_redirect_control(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Timeout, size and rate-limit bounds remain after policy enforcement."""
+    limited = upstox.HttpResponse(429, b"", {"Retry-After": "1"})
+    config = upstox.FetchConfig(max_rate_limit_retries=1)
+    client = ExplicitRedirectClient([limited, _success([_row()])])
+    assert _fetch(client=client, config=config).status == "OK"
+    assert len(client.seen()) == 2
+    assert all(option["follow_redirects"] is False for option in client.options)
+    assert all(
+        option["timeout"] == upstox.DEFAULT_TIMEOUT_SECONDS
+        for option in client.options
+    )
+
+    monkeypatch.setattr(upstox, "MAX_RESPONSE_BYTES", 64)
+    oversized = ExplicitRedirectClient(
+        [upstox.HttpResponse(200, b"x" * 65, {})]
+    )
+    outcome = _fetch(client=oversized)
+    assert outcome.status == "REJECTED"
+    assert "exceeds 64 bytes" in outcome.rejections[0].detail
+    assert TOKEN not in repr(outcome)
+
+
+def test_raw_manifest_records_enforced_redirect_policy(tmp_path: Path) -> None:
+    """Raw evidence states that the transport policy was checked."""
+    config = upstox.FetchConfig(raw_dir=tmp_path)
+    outcome = _fetch(config=config)
+    assert outcome.status == "OK"
+    manifest_path = next(tmp_path.glob("*.manifest.json"))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest[upstox.REDIRECT_POLICY_KEY] is True
+    assert TOKEN not in manifest_path.read_text(encoding="utf-8")
+    assert upstox.replay_daily(tmp_path, canonical_id=CANONICAL_ID) == outcome
+
+
+def test_historical_session_omission_is_explicit_in_raw_evidence(
+    tmp_path: Path,
+) -> None:
+    """Omitted sessions are recorded and a replay calendar is honoured."""
+    config = upstox.FetchConfig(raw_dir=tmp_path)
+    rows = [
+        _row(),
+        _row(stamp="2024-01-03T00:00:00+05:30"),
+    ]
+    assert _fetch(rows, config=config, end="2024-01-04").status == "OK"
+    manifest = json.loads(
+        next(tmp_path.glob("*.manifest.json")).read_text(encoding="utf-8")
+    )
+    assert manifest["expected_sessions"] is None
+    assert manifest[upstox.SESSION_OMISSION_KEY] is True
+
+    replayed = upstox.replay_daily(
+        tmp_path,
+        canonical_id=CANONICAL_ID,
+        expected_sessions=["2024-01-02", "2024-01-03", "2024-01-04"],
+    )
+    assert replayed.status == "REJECTED"
+    assert replayed.missing_dates == ("2024-01-04",)
+    assert replayed.rejections[0].reason == "missing sessions"
+
+
+def test_websocket_market_feed_policy_is_documented_as_separate() -> None:
+    """Market Feed V3 must not reuse the historical HTTP redirect policy."""
+    doc = upstox.__doc__ or ""
+    assert "WebSocket Market Feed V3" in doc
+    assert "must NOT reuse" in doc
+    assert "future work" in doc

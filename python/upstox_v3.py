@@ -23,6 +23,18 @@ Redirects must stay on the same allowlisted host over HTTPS and are bounded.
 Client calls carry a bounded timeout when the injected client accepts one,
 responses are size-limited (including streamed reads), and client exception
 text (which may contain a token) is never propagated, logged or stored.
+
+Transport policy (PR #84) is checked in code before the first request: an
+injected client is accepted only when automatic redirects are disabled at the
+client or call level. A client that signals auto-following and cannot be
+pinned to manual handling is rejected without sending a token. Every redirect
+hop is inspected separately and credentials are rebuilt for each approved
+destination. The enforced policy is recorded in the raw manifest.
+
+Live WebSocket Market Feed V3 is a separate authenticated transport with its
+own endpoint and redirect policy. It must NOT reuse this historical HTTP
+redirect policy; a dedicated Market Feed V3 adapter is future work and is not
+implemented in this module.
 """
 
 from __future__ import annotations
@@ -80,6 +92,12 @@ DEFAULT_RATE_LIMIT_RETRIES = 0
 REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 TRANSPORT_STATUS = 0
 TRANSPORT_REASON_HEADER = "X-Quant-Transport-Reason"
+TRANSPORT_POLICY_REASON = "automatic redirects cannot be disabled"
+REDIRECT_POLICY_KEY = "redirect_policy_enforced"
+SESSION_OMISSION_KEY = "historical_sessions_omitted"
+MANUAL_REDIRECT_CONTROL = "manual"
+REDIRECT_CONTROL_ATTRIBUTES = ("follow_redirects", "allow_redirects")
+REDIRECT_CONTROL_PARAMETERS = ("follow_redirects", "allow_redirects")
 TRANSPORT_REASONS = frozenset(
     {
         "request timed out",
@@ -87,6 +105,7 @@ TRANSPORT_REASONS = frozenset(
         "transport failure",
         "too many redirects",
         "disallowed redirect target",
+        TRANSPORT_POLICY_REASON,
         "invalid response body",
         "invalid response stream",
     }
@@ -118,6 +137,7 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*\|[A-Za-z0-9][A-Za-z0-9 .&/_-]*$")
 _RAW_NAME_RE = re.compile(r"^[A-Za-z0-9._:-]+_[0-9]{4}_[0-9a-f]{64}\.json$")
 _SIZE_REASON_RE = re.compile(r"^response exceeds \d+ bytes$")
+_MISSING = object()
 
 SessionCalendar = Callable[[str, str], Iterable[str]]
 KeyResolver = Callable[[str], str]
@@ -161,6 +181,10 @@ class TransportError(ConfigError):
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
+
+
+class TransportPolicyError(TransportError):
+    """The injected client cannot be pinned to manual redirect handling."""
 
 
 class ReplayError(ValueError):
@@ -373,7 +397,10 @@ def _header(headers: object, name: str) -> str | None:
 
 
 def _validate_redirect(
-    location: object, current_url: str, hosts: frozenset[str]
+    location: object,
+    current_url: str,
+    hosts: frozenset[str],
+    original_host: str | None = None,
 ) -> str:
     """Require the same allowlisted HTTPS host and an in-scope API path."""
     if not isinstance(location, str) or not location:
@@ -385,6 +412,8 @@ def _validate_redirect(
         raise TransportError("disallowed redirect target") from None
     current_host = urlsplit(current_url).hostname
     if host != (current_host.lower() if current_host else None):
+        raise TransportError("disallowed redirect target")
+    if original_host is not None and host != original_host.lower():
         raise TransportError("disallowed redirect target")
     if path != API_PATH_PREFIX and not path.startswith(API_PATH_PREFIX + "/"):
         raise TransportError("disallowed redirect target")
@@ -398,6 +427,120 @@ def _transport_reason(exc: object) -> str:
     if isinstance(exc, ConnectionError):
         return "connection failed"
     return "transport failure"
+
+
+def _signature_parameters(
+    callable_obj: object,
+) -> Mapping[str, inspect.Parameter]:
+    """Return inspectable parameters, or an empty mapping when unavailable."""
+    try:
+        return inspect.signature(callable_obj).parameters
+    except (TypeError, ValueError):
+        return {}
+
+
+def _has_attribute(client: object, name: str) -> bool:
+    """Return True only when an attribute can be read without side effects."""
+    try:
+        return getattr(client, name, _MISSING) is not _MISSING
+    except _CLIENT_ERRORS:
+        return False
+
+
+def _redirect_attribute_disabled(client: object, name: str) -> bool:
+    """Disable one auto-redirect flag and verify its resulting value."""
+    try:
+        current = getattr(client, name, _MISSING)
+    except _CLIENT_ERRORS:
+        return False
+    if current is _MISSING:
+        return False
+    if current is False:
+        return True
+    if current is not True:
+        return False
+    try:
+        setattr(client, name, False)
+        return getattr(client, name) is False
+    except _CLIENT_ERRORS:
+        return False
+
+
+def _max_redirects_disabled(client: object) -> bool:
+    """Disable a client redirect budget, leaving zero further hops."""
+    try:
+        client.max_redirects = 0
+        return client.max_redirects == 0
+    except _CLIENT_ERRORS:
+        return False
+
+
+def _redirect_parameter(get: object) -> str | None:
+    """Name the keyword that disables redirect following in a client call."""
+    parameters = _signature_parameters(get)
+    for name in REDIRECT_CONTROL_PARAMETERS:
+        parameter = parameters.get(name)
+        if parameter is not None and parameter.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ):
+            return name
+    if any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    ):
+        return "allow_redirects"
+    return None
+
+
+def enforce_transport_policy(http_client: object) -> str:
+    """Pin automatic redirects off before any token-bearing request.
+
+    The returned value names the call keyword that must be forced to False,
+    or ``MANUAL_REDIRECT_CONTROL`` when the client declares manual handling.
+    A client that advertises auto-following but cannot be configured, and a
+    client that exposes no redirect control at all, are rejected before a
+    token is sent.
+    """
+    get = getattr(http_client, "get", None)
+    if not callable(get):
+        raise ConfigError("http_client.get(url, headers) is required")
+    declared = False
+    for name in REDIRECT_CONTROL_ATTRIBUTES:
+        if _has_attribute(http_client, name):
+            declared = True
+            if not _redirect_attribute_disabled(http_client, name):
+                raise TransportPolicyError(TRANSPORT_POLICY_REASON)
+    if _has_attribute(http_client, "max_redirects"):
+        declared = True
+        if not _max_redirects_disabled(http_client):
+            raise TransportPolicyError(TRANSPORT_POLICY_REASON)
+    parameter = _redirect_parameter(get)
+    if parameter is not None:
+        return parameter
+    if declared:
+        return MANUAL_REDIRECT_CONTROL
+    raise TransportPolicyError(TRANSPORT_POLICY_REASON)
+
+
+# Explicit alias for callers that describe the step as a check.
+check_transport_policy = enforce_transport_policy
+
+
+def _check_no_auto_follow(requested_url: str, result: object) -> None:
+    """Reject a client result that already followed to a different URL."""
+    try:
+        history = getattr(result, "history", ())
+    except _CLIENT_ERRORS:
+        history = ()
+    if history:
+        raise TransportError(TRANSPORT_POLICY_REASON)
+    try:
+        final_url = getattr(result, "url", None)
+    except _CLIENT_ERRORS:
+        final_url = None
+    if final_url is not None and str(final_url) != requested_url:
+        raise TransportError(TRANSPORT_POLICY_REASON)
 
 
 def _check_declared_size(headers: object) -> None:
@@ -453,19 +596,30 @@ def _call_get(
     url: str,
     headers: dict[str, str],
     timeout: float,
+    redirect_control: str | None = None,
 ) -> object:
-    """Use a bounded timeout when the injected client accepts one."""
-    try:
-        parameters = inspect.signature(get).parameters
-    except (TypeError, ValueError):
-        parameters = {}
+    """Use bounded timeouts and force automatic redirects off when accepted."""
+    parameters = _signature_parameters(get)
     accepts_timeout = "timeout" in parameters or any(
         value.kind is inspect.Parameter.VAR_KEYWORD
         for value in parameters.values()
     )
+    options: dict[str, object] = {}
     if accepts_timeout:
-        return get(url, headers, timeout=timeout)
+        options["timeout"] = timeout
+    if redirect_control in REDIRECT_CONTROL_PARAMETERS:
+        options[redirect_control] = False
+    if options:
+        return get(url, headers, **options)
     return get(url, headers)
+
+
+def _auth_headers(secret: str) -> dict[str, str]:
+    """Build a fresh credential header set for one approved destination."""
+    return {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {secret}",
+    }
 
 
 def _validate_config(config: FetchConfig) -> FetchConfig:
@@ -592,6 +746,7 @@ def _request(
     token: str,
     hosts: frozenset[str] | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    redirect_control: str | None = None,
 ) -> HttpResponse:
     """Issue one authenticated GET with redirect and transport safeguards."""
     get = getattr(http_client, "get", None)
@@ -600,14 +755,19 @@ def _request(
     allowed = ALLOWED_HOSTS if hosts is None else hosts
     _parse_secure_url(url, allowed, "request url")
     secret = _validate_token(token)
-    headers = {
-        "Accept": "application/json",
-        "Authorization": f"Bearer {secret}",
-    }
+    control = (
+        enforce_transport_policy(http_client)
+        if redirect_control is None
+        else redirect_control
+    )
+    original_host = urlsplit(url).hostname or ""
     current = url
     for _ in range(MAX_REDIRECTS + 1):
         try:
-            result = _call_get(get, current, headers, timeout)
+            result = _call_get(
+                get, current, _auth_headers(secret), timeout, control
+            )
+            _check_no_auto_follow(current, result)
             response = _coerce_response(result)
         except TransportError:
             raise
@@ -615,14 +775,12 @@ def _request(
             # Suppress the original exception: its message may contain the
             # token or the Authorization header supplied by the caller.
             raise TransportError(_transport_reason(exc)) from None
-        location = (
-            _header(response.headers, "location")
-            if response.status in REDIRECT_STATUSES
-            else None
-        )
+        if not 300 <= response.status < 400:
+            return response
+        location = _header(response.headers, "location")
         if location is None:
             return response
-        current = _validate_redirect(location, current, allowed)
+        current = _validate_redirect(location, current, allowed, original_host)
     raise TransportError("too many redirects")
 
 
@@ -648,12 +806,15 @@ def _fetch_batch(
     hosts: frozenset[str],
     timeout: float,
     retries: int,
+    redirect_control: str,
 ) -> HttpResponse:
     """Fetch one URL with bounded, rate-limit-only retries."""
     attempts = 0
     while True:
         try:
-            response = _request(http_client, url, token, hosts, timeout)
+            response = _request(
+                http_client, url, token, hosts, timeout, redirect_control
+            )
         except TransportError as exc:
             return _transport_response(exc.reason)
         failure = _classify_response(response)
@@ -1109,8 +1270,10 @@ def _manifest_payload(
         "exchange_timezone": config.exchange_timezone,
         "require_midnight": config.require_midnight,
         "expected_sessions": stored_sessions,
+        SESSION_OMISSION_KEY: sessions is None,
         "max_requests": config.max_requests,
         "environment": config.environment,
+        REDIRECT_POLICY_KEY: True,
         "timeout_seconds": config.timeout_seconds,
         "max_rate_limit_retries": config.max_rate_limit_retries,
         "requested_start": start,
@@ -1149,6 +1312,7 @@ def fetch_daily(
         )
     cfg = _validate_config(config if config is not None else FetchConfig())
     secret = _validate_token(token)
+    control = enforce_transport_policy(http_client)
     batches = iter_batches(start, end, cfg.max_days_per_request)
     if len(batches) > cfg.max_requests:
         raise ConfigError("too many batches requested")
@@ -1163,6 +1327,7 @@ def fetch_daily(
             hosts,
             cfg.timeout_seconds,
             cfg.max_rate_limit_retries,
+            control,
         )
         if cfg.raw_dir is not None:
             cfg.raw_dir.mkdir(parents=True, exist_ok=True)
@@ -1203,7 +1368,9 @@ def _config_from_manifest(
             raise ReplayError("expected_sessions is required for this replay")
         resolved = expected_sessions
     elif stored is None:
-        resolved = None
+        # Omission is recorded as evidence; a caller-supplied calendar is
+        # honoured instead of silently disabling gap detection.
+        resolved = expected_sessions
     else:
         resolved = tuple(stored) if isinstance(stored, list) else None
     try:
