@@ -49,7 +49,6 @@ import json
 import os
 import re
 import shlex
-import subprocess
 import sys
 import tempfile
 import urllib.error
@@ -93,6 +92,7 @@ BUNDLE_PREFIX = "quant/"
 BUNDLE_SNAPSHOT_DIR = "evidence/instrument-master"
 MASTER_MODULE = "quant_instrument_master_fetcher"
 CAPTURE_MODULE = "quant_capture_provenance"
+GIT_MODULE = "quant_research_git"
 RETRIEVAL_ENVIRONMENT = "explicit-cli-update-provenance"
 COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 AUTHENTICITY_NOTE = (
@@ -161,6 +161,19 @@ def _capture_provenance() -> Any:
         raise RuntimeError(f"cannot load capture provenance: {path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[CAPTURE_MODULE] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@lru_cache(maxsize=1)
+def _shared_git() -> Any:
+    """Load the shared narrow-exception HEAD lookup by absolute path."""
+    path = ROOT / "python" / "research_git.py"
+    spec = importlib.util.spec_from_file_location(GIT_MODULE, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load git helper: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[GIT_MODULE] = module
     spec.loader.exec_module(module)
     return module
 
@@ -786,21 +799,8 @@ def fetch(
 def _fetcher_commit() -> str:
     """Return the checked-out HEAD SHA, or UNKNOWN when unavailable."""
     unknown = _capture_provenance().UNKNOWN
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return unknown
-    head = result.stdout.strip()
-    if result.returncode == 0 and COMMIT_RE.fullmatch(head):
-        return head
-    return unknown
+    head = _shared_git().head_commit(ROOT)
+    return head if head != unknown and COMMIT_RE.fullmatch(head) else unknown
 
 
 def update_provenance(
