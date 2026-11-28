@@ -270,6 +270,10 @@ required checks and response SHA-256
 `de633dabfe3016d17f2885c1179282d68736f50692cacd51e9cbdb31acf02356`;
 the prior captures are retained in `governance/branch-protection-capture.json`.
 
- Current source record — PR #86; release PR #67; W1 71 tests; 4 req
- uired checks; PORTABLE_RESEARCH; GATED_NOT_RUN; NOT_OBSERVED; CHECKED; R8.4.
- 3 COMPLETE.
+## Current source record
+
+ Current source record — PR #90; release PR #67; W1 71 tests;
+ 4 required checks; PORTABLE_RESEARCH;
+ GATED_NOT_RUN; NOT_OBSERVED;
+ CHECKED; R8.4.3 COMPLETE.
+ Research evidence quarantined; no live qualification.

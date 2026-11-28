@@ -1,4 +1,4 @@
-# QUANT release status — baseline PR #67 / source PR #86
+# QUANT release status — baseline PR #67 / source PR #90
 
 HISTORICAL records are retained below with explicit HISTORICAL labels.
 
@@ -386,6 +386,10 @@ PR #67 capture and the earlier PR #64 capture are retained under its
 the live GitHub configuration. The historical JSON exports do not establish
 the current zero-approval setting.
 
- Current source record — PR #86; release PR #67; W1 71 tests; 4 req
- uired checks; PORTABLE_RESEARCH; GATED_NOT_RUN; NOT_OBSERVED; CHECKED; R8.4.
- 3 COMPLETE.
+## Current source record
+
+ Current source record — PR #90; release PR #67; W1 71 tests;
+ 4 required checks; PORTABLE_RESEARCH;
+ GATED_NOT_RUN; NOT_OBSERVED;
+ CHECKED; R8.4.3 COMPLETE.
+ Research evidence quarantined; no live qualification.
