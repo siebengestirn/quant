@@ -46,7 +46,14 @@ IDENTIFIERS = (
     ),
     ("CI run ID", re.compile(r"(?<![0-9A-Za-z])\d{11}(?![0-9A-Za-z])")),
 )
-MARKERS = (*HISTORICAL_MARKERS, "at pr #", "at_pr_", "old")
+MARKERS = (
+    *HISTORICAL_MARKERS,
+    "at pr #",
+    "at_pr_",
+    "old",
+    "synthetic",
+    "pinned-reference",
+)
 CURRENT_KEY_RE = re.compile(
     r"(?<![\w])([a-z_]*current[a-z_0-9]*)\s*[\"']?\s*[:=]\s*(.+)",
     re.IGNORECASE,

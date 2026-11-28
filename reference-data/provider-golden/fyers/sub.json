@@ -1,0 +1,7 @@
+{
+  "code": 200,
+  "message": "SYNTHETIC subscription ack",
+  "s": "ok",
+  "symbol": "NSE:SBIN-EQ",
+  "type": "sub"
+}

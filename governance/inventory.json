@@ -237,6 +237,118 @@
       "path": "governance/w1d-architecture.md",
       "purpose": "W1-D bitemporal instrument registry architecture decision record",
       "retention": "current"
+    },
+    {
+      "class": "test-fixture",
+      "owner": "QA",
+      "path": "reference-data/provider-golden/fyers/cn.json",
+      "purpose": "Synthetic provider-schema golden fixture (NOT real provider data)",
+      "retention": "pinned-reference"
+    },
+    {
+      "class": "test-fixture",
+      "owner": "QA",
+      "path": "reference-data/provider-golden/fyers/dp.json",
+      "purpose": "Synthetic provider-schema golden fixture (NOT real provider data)",
+      "retention": "pinned-reference"
+    },
+    {
+      "class": "test-fixture",
+      "owner": "QA",
+      "path": "reference-data/provider-golden/fyers/error.json",
+      "purpose": "Synthetic provider-schema golden fixture (NOT real provider data)",
+      "retention": "pinned-reference"
+    },
+    {
+      "class": "test-fixture",
+      "owner": "QA",
+      "path": "reference-data/provider-golden/fyers/if.json",
+      "purpose": "Synthetic provider-schema golden fixture (NOT real provider data)",
+      "retention": "pinned-reference"
+    },
+    {
+      "class": "test-fixture",
+      "owner": "QA",
+      "path": "reference-data/provider-golden/fyers/malformed_sf_bad_timestamp.json",
+      "purpose": "Synthetic provider-schema golden fixture (NOT real provider data)",
+      "retention": "pinned-reference"
+    },
+    {
+      "class": "test-fixture",
+      "owner": "QA",
+      "path": "reference-data/provider-golden/fyers/malformed_sf_fractional_volume.json",
+      "purpose": "Synthetic provider-schema golden fixture (NOT real provider data)",
+      "retention": "pinned-reference"
+    },
+    {
+      "class": "test-fixture",
+      "owner": "QA",
+      "path": "reference-data/provider-golden/fyers/malformed_unknown_type.json",
+      "purpose": "Synthetic provider-schema golden fixture (NOT real provider data)",
+      "retention": "pinned-reference"
+    },
+    {
+      "class": "test-fixture",
+      "owner": "QA",
+      "path": "reference-data/provider-golden/fyers/manifest.json",
+      "purpose": "Synthetic provider-schema golden fixture (NOT real provider data)",
+      "retention": "pinned-reference"
+    },
+    {
+      "class": "test-fixture",
+      "owner": "QA",
+      "path": "reference-data/provider-golden/fyers/sf.json",
+      "purpose": "Synthetic provider-schema golden fixture (NOT real provider data)",
+      "retention": "pinned-reference"
+    },
+    {
+      "class": "test-fixture",
+      "owner": "QA",
+      "path": "reference-data/provider-golden/fyers/sub.json",
+      "purpose": "Synthetic provider-schema golden fixture (NOT real provider data)",
+      "retention": "pinned-reference"
+    },
+    {
+      "class": "test-fixture",
+      "owner": "QA",
+      "path": "reference-data/provider-golden/upstox/daily.json",
+      "purpose": "Synthetic provider-schema golden fixture (NOT real provider data)",
+      "retention": "pinned-reference"
+    },
+    {
+      "class": "test-fixture",
+      "owner": "QA",
+      "path": "reference-data/provider-golden/upstox/malformed_bad_timestamp.json",
+      "purpose": "Synthetic provider-schema golden fixture (NOT real provider data)",
+      "retention": "pinned-reference"
+    },
+    {
+      "class": "test-fixture",
+      "owner": "QA",
+      "path": "reference-data/provider-golden/upstox/malformed_fractional_volume.json",
+      "purpose": "Synthetic provider-schema golden fixture (NOT real provider data)",
+      "retention": "pinned-reference"
+    },
+    {
+      "class": "test-fixture",
+      "owner": "QA",
+      "path": "reference-data/provider-golden/upstox/malformed_oi_overflow.json",
+      "purpose": "Synthetic provider-schema golden fixture (NOT real provider data)",
+      "retention": "pinned-reference"
+    },
+    {
+      "class": "test-fixture",
+      "owner": "QA",
+      "path": "reference-data/provider-golden/upstox/malformed_oi_sentinel.json",
+      "purpose": "Synthetic provider-schema golden fixture (NOT real provider data)",
+      "retention": "pinned-reference"
+    },
+    {
+      "class": "test-fixture",
+      "owner": "QA",
+      "path": "reference-data/provider-golden/upstox/manifest.json",
+      "purpose": "Synthetic provider-schema golden fixture (NOT real provider data)",
+      "retention": "pinned-reference"
     }
   ],
   "policy": {

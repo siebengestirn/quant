@@ -1,0 +1,81 @@
+{
+  "digest_algorithm": "sha256",
+  "disclaimer": "NOT REAL PROVIDER DATA",
+  "label": "SYNTHETIC GOLDEN PAYLOADS",
+  "payloads": [
+    {
+      "expectation": "accept",
+      "file": "cn.json",
+      "label": "SYNTHETIC",
+      "message_type": "cn",
+      "source_digest": "eeb5bc9fc4a866c66afb3964174a0fe849831a9b4fcea865d10042c1d7f8153b",
+      "status": "VALID"
+    },
+    {
+      "expectation": "accept",
+      "file": "dp.json",
+      "label": "SYNTHETIC",
+      "message_type": "dp",
+      "source_digest": "6659bf3224bd49178e06c9b51e9e730b8720e9eb5f570d4404334ac3afaa96f9",
+      "status": "VALID"
+    },
+    {
+      "expectation": "accept",
+      "file": "error.json",
+      "label": "SYNTHETIC",
+      "message_type": "error",
+      "source_digest": "03a604f9cfad338952105202b6c3fa1b3ff84b8a5f5bfe724fad7250214915c2",
+      "status": "ERROR"
+    },
+    {
+      "expectation": "accept",
+      "file": "if.json",
+      "label": "SYNTHETIC",
+      "message_type": "if",
+      "source_digest": "c920d52579eac837b8a46207bb46ed4307dea8232e106dc46587fb373e0a7a38",
+      "status": "VALID"
+    },
+    {
+      "expectation": "reject",
+      "file": "malformed_sf_bad_timestamp.json",
+      "label": "SYNTHETIC",
+      "reason": "invalid integer representation",
+      "source_digest": "2e5acd1ca5c67f12a10461a273b6d56d433c43418bc007b5cf3943dd3ee16726"
+    },
+    {
+      "expectation": "reject",
+      "file": "malformed_sf_fractional_volume.json",
+      "label": "SYNTHETIC",
+      "reason": "value is not an exact integer",
+      "source_digest": "029686838c79bc723d0439bb6902fdd9546f92d4562f56d7cecfce9a3f0fe91a"
+    },
+    {
+      "expectation": "reject",
+      "file": "malformed_unknown_type.json",
+      "label": "SYNTHETIC",
+      "reason": "unsupported or missing message type",
+      "source_digest": "0d5313533c2bd60286108b36e307630233ba1ee583c7d2ee3b869f9ca4b8cae4"
+    },
+    {
+      "expectation": "accept",
+      "file": "sf.json",
+      "label": "SYNTHETIC",
+      "message_type": "sf",
+      "source_digest": "02ea5bfb634d3350a7807ef13012e26c775302c3bdb1d5b8331ba6a602f00a69",
+      "status": "VALID"
+    },
+    {
+      "expectation": "accept",
+      "file": "sub.json",
+      "label": "SYNTHETIC",
+      "message_type": "sub",
+      "source_digest": "d229e6c17c6c076bc488a198a283d04a2ba8210084d6b70620a6a3564f82d45b",
+      "status": "VALID"
+    }
+  ],
+  "provenance": "synthetic-documented-schema",
+  "provider": "fyers",
+  "schema": "documented FYERS Data Socket type-field frames",
+  "schema_version": 1,
+  "source": "hand-constructed from documented schema; no provider capture"
+}

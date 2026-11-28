@@ -1,0 +1,53 @@
+{
+  "digest_algorithm": "sha256",
+  "disclaimer": "NOT REAL PROVIDER DATA",
+  "exchange_timezone": "Asia/Kolkata",
+  "label": "SYNTHETIC GOLDEN PAYLOADS",
+  "payloads": [
+    {
+      "expectation": "accept",
+      "file": "daily.json",
+      "label": "SYNTHETIC",
+      "row_count": 2,
+      "source_digest": "383218ac939a3f60d3417676c506a1afab424ce83611002195389fbf0468ab50"
+    },
+    {
+      "expectation": "reject",
+      "file": "malformed_bad_timestamp.json",
+      "label": "SYNTHETIC",
+      "reason": "invalid timestamp",
+      "row_count": 0,
+      "source_digest": "6926e8c7d79f34658fab2a18a28d02922719761deb9df074bb6a8403a18ff468"
+    },
+    {
+      "expectation": "reject",
+      "file": "malformed_fractional_volume.json",
+      "label": "SYNTHETIC",
+      "reason": "invalid volume",
+      "row_count": 0,
+      "source_digest": "1d28c7ea386c8ff58f34e2c7347d7f22cc96d4efda2ae66d14241295250900ca"
+    },
+    {
+      "expectation": "reject",
+      "file": "malformed_oi_overflow.json",
+      "label": "SYNTHETIC",
+      "reason": "invalid open interest",
+      "row_count": 0,
+      "source_digest": "b6b4ebd024802709490c0d8d2c90b0d9c096b034456b7a5c8bca1e8f5add17c4"
+    },
+    {
+      "expectation": "reject",
+      "file": "malformed_oi_sentinel.json",
+      "label": "SYNTHETIC",
+      "reason": "invalid open interest",
+      "row_count": 0,
+      "source_digest": "b33f5cef66c2a2990ecf0c900e7e77bac303f2bf469b8a8d9655b4b4d0742037"
+    }
+  ],
+  "provenance": "synthetic-documented-schema",
+  "provider": "upstox",
+  "row_width": 7,
+  "schema": "documented Upstox V3 historical daily candle response",
+  "schema_version": 1,
+  "source": "hand-constructed from documented schema; no provider capture"
+}
