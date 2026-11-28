@@ -1,12 +1,20 @@
 """Point-in-time universe from effective-dated, published status history.
 
+Two questions are kept separate. Full-artifact integrity validates the complete
+dataset and digests every record, including records published or observed far
+in the future. A point-in-time decision uses only records visible at the
+requested observation time and digests only that visible history. A malformed
+future record can fail artifact qualification without altering any earlier
+historical decision.
+
 Identity is the canonical instrument ID established by the W1 master; a
 symbol is only a caller-facing alias resolved through an injected resolver at
-both the requested market date and observation time. Records published or
+both the requested market date and observation time. Within one event
+identity, a higher revision supersedes earlier revisions once it is visible
+and effective. A distinct event with a future effective date is a new event,
+not a revision, and cannot stale an earlier market date. Records published or
 observed after the observation time, records not yet effective, and
-conflicting or superseded revisions are excluded. Conflict, staleness and
-revision decisions see only the history visible at that observation
-time, never a later-known revision.
+conflicting or superseded revisions are excluded from the decision.
 
 The calendar is a digest-verified artifact supplied by the caller; weekdays
 are never inferred. All inputs are caller-supplied: this module contains no
@@ -126,6 +134,7 @@ class Decision(NamedTuple):
     symbols: tuple[str, ...]
     universe_digest: str = ""
     calendar_digest: str = ""
+    decision_digest: str = ""
 
 
 class UniverseResult(NamedTuple):
@@ -141,6 +150,18 @@ class UniverseResult(NamedTuple):
     digest: str
     universe_digest: str = ""
     calendar_digest: str = ""
+    artifact_digest: str = ""
+    decision_digest: str = ""
+    artifact_errors: tuple[str, ...] = ()
+    artifact_qualified: bool = True
+
+
+class ArtifactQualification(NamedTuple):
+    """Full-artifact integrity answer for the complete status dataset."""
+
+    artifact_digest: str
+    errors: tuple[str, ...]
+    qualified: bool
 
 
 def _text(value: object) -> str:
@@ -177,7 +198,8 @@ def _valid_event(event: StatusEvent) -> tuple[str, ...]:
     if event.effective_to is not None and not _is_date(event.effective_to):
         errors.append("invalid effective_to")
     if (
-        event.effective_to is not None
+        isinstance(event.effective_from, str)
+        and isinstance(event.effective_to, str)
         and event.effective_from >= event.effective_to
     ):
         errors.append("effective interval is empty")
@@ -239,7 +261,11 @@ def validate_status_history(
             errors.append(f"history is not a sequence: {identity!r}")
             continue
         for value in values:
-            event = coerce_event(value)
+            try:
+                event = coerce_event(value)
+            except ValueError:
+                errors.append(f"unsupported event type: {type(value).__name__}")
+                continue
             if event.canonical_instrument_id != identity:
                 errors.append(f"history key mismatch: {identity!r}")
             key = (event.canonical_instrument_id, event.status_event_id)
@@ -250,6 +276,50 @@ def validate_status_history(
             seen_events.add(key)
             errors.extend(_valid_event(event))
     return tuple(errors)
+
+
+def _artifact_digest(status_history: object) -> str:
+    """Digest the complete dataset, including records beyond any as-of time."""
+    if not isinstance(status_history, Mapping):
+        return _digest(
+            {"schema_version": SCHEMA_VERSION, "status_history": None}
+        )
+    histories: dict[str, list[str]] = {}
+    for identity in sorted(status_history, key=str):
+        values = status_history[identity]
+        if not isinstance(values, Sequence) or isinstance(
+            values, (str, bytes, bytearray)
+        ):
+            histories[str(identity)] = []
+            continue
+        entries = []
+        for value in values:
+            try:
+                payload: object = coerce_event(value)._asdict()
+            except ValueError:
+                payload = {"unsupported_event_type": type(value).__name__}
+            entries.append(
+                json.dumps(
+                    payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                )
+            )
+        histories[str(identity)] = sorted(entries)
+    return _digest(
+        {"schema_version": SCHEMA_VERSION, "status_history": histories}
+    )
+
+
+def qualify_status_artifact(
+    status_history: Mapping[str, Sequence[StatusEvent | Mapping[str, object]]],
+) -> ArtifactQualification:
+    """Answer full-artifact integrity without consulting an observation time."""
+    errors = validate_status_history(status_history)
+    return ArtifactQualification(
+        _artifact_digest(status_history), errors, not errors
+    )
 
 
 def _coerce_history(
@@ -316,20 +386,36 @@ def _conflict_or_stale(
     visible: Sequence[StatusEvent],
     market_date: str,
 ) -> tuple[StatusEvent | None, tuple[str, ...]]:
-    """Resolve covering events using only history visible at the as-of time."""
-    flags = {item.eligible for item in covering}
-    if len(flags) != 1:
+    """Resolve covering events using only history visible at the as-of time.
+
+    An event identity is its status_event_id. A higher revision of that same
+    identity supersedes earlier revisions; a distinct event is a new record
+    and never supersedes another identity. A higher revision that is already
+    in force but ended before the market date stales its own identity. A
+    revision that only becomes effective later does not stale earlier dates.
+    """
+    by_identity: dict[str, list[StatusEvent]] = {}
+    for item in covering:
+        by_identity.setdefault(item.status_event_id, []).append(item)
+    winners = []
+    for items in by_identity.values():
+        newest = max(item.revision for item in items)
+        current = [item for item in items if item.revision == newest]
+        if len({tuple(item._asdict().values()) for item in current}) != 1:
+            return None, (CONFLICTING_STATUS,)
+        winners.append(current[0])
+    if len(winners) != 1 or len({item.eligible for item in winners}) != 1:
         return None, (CONFLICTING_STATUS,)
-    newest = max(item.revision for item in covering)
-    current = [item for item in covering if item.revision == newest]
-    if len({item.status_event_id for item in current}) != 1:
-        return None, (CONFLICTING_STATUS,)
+    governing = winners[0]
     if any(
-        item.revision > newest and not _covers(item, market_date)
+        item.status_event_id == governing.status_event_id
+        and item.revision > governing.revision
+        and item.effective_from <= market_date
+        and not _covers(item, market_date)
         for item in visible
     ):
         return None, (STALE_STATUS_REVISION,)
-    return current[0], ()
+    return governing, ()
 
 
 def _evaluate_events(
@@ -342,14 +428,14 @@ def _evaluate_events(
     """Evaluate one canonical ID at one market date and observation time."""
     if not events:
         return _empty_decision(identity, symbols, (NO_STATUS_HISTORY,))
-    if any(_valid_event(item) for item in events):
-        return _empty_decision(identity, symbols, (INVALID_STATUS_EVENT,))
     timed_out = [
         item
         for item in events
         if _reasons_for_timing(item, as_of_observation_time)
     ]
     visible = [item for item in events if item not in timed_out]
+    if any(_valid_event(item) for item in visible):
+        return _empty_decision(identity, symbols, (INVALID_STATUS_EVENT,))
     covering = [item for item in visible if _covers(item, market_date)]
     if not covering:
         late_covering = next(
@@ -547,13 +633,20 @@ def _universe_digest(
     return _digest(material)
 
 
+def _decision_material(item: Decision) -> dict[str, object]:
+    """Return decision fields that depend only on the visible point in time."""
+    material = item._asdict()
+    material.pop("decision_digest", None)
+    return material
+
+
 def _result_digest(result: UniverseResult) -> str:
-    """Derive a deterministic digest over a universe result and its inputs."""
+    """Digest the point-in-time decision material, never the full artifact."""
     material = {
         "as_of_market_date": result.as_of_market_date,
         "as_of_observation_time": result.as_of_observation_time,
-        "eligible": [item._asdict() for item in result.eligible],
-        "ineligible": [item._asdict() for item in result.ineligible],
+        "eligible": [_decision_material(item) for item in result.eligible],
+        "ineligible": [_decision_material(item) for item in result.ineligible],
         "symbol_resolution": [
             item._asdict() for item in result.symbol_resolution
         ],
@@ -570,9 +663,13 @@ def _result_digest(result: UniverseResult) -> str:
 
 
 def _finalize(
-    result: UniverseResult, *, universe_digest: str, calendar_digest: str
+    result: UniverseResult,
+    *,
+    artifact: ArtifactQualification,
+    universe_digest: str,
+    calendar_digest: str,
 ) -> UniverseResult:
-    """Attach input digests to every decision and result, then digest."""
+    """Attach artifact provenance and the stable decision digest."""
     eligible = tuple(
         item._replace(
             universe_digest=universe_digest, calendar_digest=calendar_digest
@@ -590,8 +687,22 @@ def _finalize(
         ineligible=ineligible,
         universe_digest=universe_digest,
         calendar_digest=calendar_digest,
+        artifact_digest=artifact.artifact_digest,
+        artifact_errors=artifact.errors,
+        artifact_qualified=artifact.qualified,
     )
-    return enriched._replace(digest=_result_digest(enriched))
+    decision_digest = _result_digest(enriched)
+    return enriched._replace(
+        eligible=tuple(
+            item._replace(decision_digest=decision_digest) for item in eligible
+        ),
+        ineligible=tuple(
+            item._replace(decision_digest=decision_digest)
+            for item in ineligible
+        ),
+        decision_digest=decision_digest,
+        digest=decision_digest,
+    )
 
 
 def point_in_time_universe(
@@ -616,6 +727,7 @@ def point_in_time_universe(
     by the observation time and the date must be an explicit session.
     """
     labels = _alias_symbols(symbols, registry)
+    artifact = qualify_status_artifact(status_history)
     try:
         history = _coerce_history(status_history)
         structural: tuple[str, ...] = ()
@@ -641,6 +753,7 @@ def point_in_time_universe(
             {},
             resolutions,
             reasons=reasons,
+            artifact=artifact,
             universe_digest=universe_digest,
             calendar_digest=digest,
             provenance=None,
@@ -663,6 +776,7 @@ def point_in_time_universe(
             grouped,
             resolutions,
             reasons=(reasons + unresolved) or (INVALID_CALENDAR_ARTIFACT,),
+            artifact=artifact,
             universe_digest=universe_digest,
             calendar_digest=digest,
             provenance=None,
@@ -683,6 +797,7 @@ def point_in_time_universe(
             resolutions,
             query=query,
             unresolved=unresolved,
+            artifact=artifact,
             universe_digest=universe_digest,
             calendar_digest=digest,
         )
@@ -694,6 +809,7 @@ def point_in_time_universe(
         resolutions,
         query=query,
         unresolved=unresolved,
+        artifact=artifact,
         universe_digest=universe_digest,
         calendar_digest=digest,
     )
@@ -707,6 +823,7 @@ def _blocked_universe(
     resolutions: tuple[SymbolResolution, ...],
     *,
     reasons: tuple[str, ...],
+    artifact: ArtifactQualification,
     universe_digest: str,
     calendar_digest: str,
     provenance: SessionProvenance | None,
@@ -729,6 +846,7 @@ def _blocked_universe(
             universe_digest,
             calendar_digest,
         ),
+        artifact=artifact,
         universe_digest=universe_digest,
         calendar_digest=calendar_digest,
     )
@@ -743,6 +861,7 @@ def _calendar_blocked(
     *,
     query: CalendarQuery,
     unresolved: tuple[str, ...],
+    artifact: ArtifactQualification,
     universe_digest: str,
     calendar_digest: str,
 ) -> UniverseResult:
@@ -762,6 +881,7 @@ def _calendar_blocked(
         grouped,
         resolutions,
         reasons=reasons,
+        artifact=artifact,
         universe_digest=universe_digest,
         calendar_digest=calendar_digest,
         provenance=query.provenance,
@@ -777,6 +897,7 @@ def _decide(
     *,
     query: CalendarQuery,
     unresolved: tuple[str, ...],
+    artifact: ArtifactQualification,
     universe_digest: str,
     calendar_digest: str,
 ) -> UniverseResult:
@@ -806,6 +927,7 @@ def _decide(
             universe_digest,
             calendar_digest,
         ),
+        artifact=artifact,
         universe_digest=universe_digest,
         calendar_digest=calendar_digest,
     )
