@@ -69,7 +69,7 @@ DEFAULT_MAX_DAYS = 365
 DEFAULT_TIMEZONE = "Asia/Kolkata"
 DEFAULT_MAX_REQUESTS = 1000
 DEFAULT_ENVIRONMENT = "production"
-# Bounds are deliberately conservative and caller-inspectable.
+# Bounds are conservative and caller-inspectable.
 DEFAULT_TIMEOUT_SECONDS = 10.0
 MAX_TIMEOUT_SECONDS = 30.0
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
