@@ -40,13 +40,28 @@ interval requires `valid_to > valid_from`.
 | `KNOWN_INTERVAL` | Both bounds attested, date inside interval. | Yes |
 | `OPEN_ENDED` | Start attested, no end; date on or after start. | Yes |
 | `UNKNOWN_INTERVAL` | Start absent; no date inferred. | No |
+| `INVALID_INTERVAL` | Assembled effective dates are reversed or equal. | No |
 
 An observation whose known bounds exclude the market date is not selected at
 all. An unknown-interval observation is selected with `UNKNOWN_INTERVAL` and
 `proven_valid == False`; a state's `attribute_validity` reports the assessment
 per attribute. `as_of(..., proven_valid_only=True)` excludes unknown-interval
 rows. Reversed or equal bounds, naive timestamps and missing or malformed
-provenance are rejected before any row is stored.
+provenance are rejected before any row is stored. Assembling an
+`effective_from` that is not strictly before `effective_to` quarantines the
+state as `INVALID_INTERVAL`; no validity is inferred from either bound.
+
+### Observation precedence and conflicts
+Rows for one attribute are ordered by `(observed_at, ingested_at,
+provider_updated_at, source_digest)`. Only the latest precedence tier is
+eligible to supply a value. When several rows in that tier disagree, the
+registry preserves all of them: the state reports `CONFLICT` conformance,
+`AMBIGUOUS` conflict status, `NOT_ELIGIBLE` and the sorted `observation_id`
+values of every tied row under the reserved `__conflicts__` evidence key.
+`observation_id` is a hash of the row's content, so no selection depends on
+input order; permutation tests assert identical results for all input orders.
+An ambiguous alias claim is reported as `AMBIGUOUS` or `TOKEN_REUSE` with all
+claimants, never an arbitrary pick.
 
 ## 4. Provider coverage and conformance
 Coverage is its own dimension: SINGLE_SOURCE or MULTI_SOURCE. Agreement
@@ -64,10 +79,18 @@ Provider trading status (ACTIVE/INACTIVE/UNKNOWN), exchange status
 affirmative value in every dimension: VERIFIED identity, MULTI_SOURCE
 coverage, PASS conformance, ACTIVE provider trading, OPEN exchange,
 ALLOWED exchange eligibility and FRESH data. Unknown, stale, conflicting
-or single-source evidence returns NOT_ELIGIBLE. A `UNKNOWN_INTERVAL` state is
-never proven-valid: consumers that require attested bounds use
+or single-source evidence returns NOT_ELIGIBLE. Temporal validity is an
+additional, independent gate evaluated by `fail_closed_eligibility()`:
+`KNOWN_INTERVAL` may proceed; `OPEN_ENDED` has a known start but no end and so
+may proceed only while the FRESH data gate still holds; `UNKNOWN_INTERVAL`,
+`INVALID_INTERVAL` and any tied-value `CONFLICT` never proceed. A perfect
+instrument whose observations all lack a validity start is therefore
+`NOT_ELIGIBLE` even though identity resolution still returns its canonical ID
+and every other gate passes. Invalid intervals are quarantined before storage
+or as an `INVALID_INTERVAL` state. Consumers that require attested bounds use
 `proven_valid_only` or reject `proven_valid == False`. No alias status,
-knowledge time or ID collision can substitute for an affirmative gate.
+knowledge time, input order or ID collision can substitute for an affirmative
+gate.
 
 ## 6. Consumer API
 ```python

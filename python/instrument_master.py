@@ -27,500 +27,127 @@ import math
 import re
 import sys
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
-from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+_support = importlib.import_module("instrument_master_support")
+ACTIVE = _support.ACTIVE
+ALLOWED = _support.ALLOWED
+AMBIGUOUS = _support.AMBIGUOUS
+ATTR_CONFORMANCE_STATUS = _support.ATTR_CONFORMANCE_STATUS
+ATTR_DATA_FRESHNESS = _support.ATTR_DATA_FRESHNESS
+ATTR_EFFECTIVE_FROM = _support.ATTR_EFFECTIVE_FROM
+ATTR_EFFECTIVE_TO = _support.ATTR_EFFECTIVE_TO
+ATTR_EXCHANGE_ELIGIBILITY = _support.ATTR_EXCHANGE_ELIGIBILITY
+ATTR_EXCHANGE_STATUS = _support.ATTR_EXCHANGE_STATUS
+ATTR_IDENTITY_STATUS = _support.ATTR_IDENTITY_STATUS
+ATTR_PROVIDER_TRADING_STATUS = _support.ATTR_PROVIDER_TRADING_STATUS
+CASH_EQUITY = _support.CASH_EQUITY
+CONFLICT = _support.CONFLICT
+CONFLICT_EVIDENCE_KEY = _support.CONFLICT_EVIDENCE_KEY
+CONFORMANCE_FIELDS = _support.CONFORMANCE_FIELDS
+CONFORMANCE_STATUSES = _support.CONFORMANCE_STATUSES
+DATA_FRESHNESS_STATUSES = _support.DATA_FRESHNESS_STATUSES
+DIFF_FIELDS = _support.DIFF_FIELDS
+DISALLOWED = _support.DISALLOWED
+ELIGIBILITY_STATUSES = _support.ELIGIBILITY_STATUSES
+ELIGIBLE = _support.ELIGIBLE
+EXCHANGE_ELIGIBILITY_STATUSES = _support.EXCHANGE_ELIGIBILITY_STATUSES
+EXCHANGE_NSE = _support.EXCHANGE_NSE
+EXCHANGE_STATUSES = _support.EXCHANGE_STATUSES
+EXPIRED = _support.EXPIRED
+EXTENDED_PROVENANCE_FIELDS = _support.EXTENDED_PROVENANCE_FIELDS
+FRESH = _support.FRESH
+FUTURE = _support.FUTURE
+FYERS_EXCHANGE_SEGMENTS = _support.FYERS_EXCHANGE_SEGMENTS
+IDENTITY_COLLISION = _support.IDENTITY_COLLISION
+IDENTITY_STATUSES = _support.IDENTITY_STATUSES
+IDENTITY_VERSION = _support.IDENTITY_VERSION
+INACTIVE = _support.INACTIVE
+INCOMPLETE = _support.INCOMPLETE
+INDEX = _support.INDEX
+INVALID = _support.INVALID
+INVALID_INTERVAL = _support.INVALID_INTERVAL
+ISIN_RE = _support.ISIN_RE
+KNOWN_INTERVAL = _support.KNOWN_INTERVAL
+MISSING_ISIN = _support.MISSING_ISIN
+MISSING_PROVIDER_KEY = _support.MISSING_PROVIDER_KEY
+MISSING_SERIES = _support.MISSING_SERIES
+MULTI_SOURCE = _support.MULTI_SOURCE
+NOT_ELIGIBLE = _support.NOT_ELIGIBLE
+NOT_FOUND = _support.NOT_FOUND
+NOT_YET_VALID = _support.NOT_YET_VALID
+OPEN = _support.OPEN
+OPEN_ENDED = _support.OPEN_ENDED
+OPTION = _support.OPTION
+PASS = _support.PASS
+PREOPEN = _support.PREOPEN
+PROVEN_VALIDITY_STATES = _support.PROVEN_VALIDITY_STATES
+PROVIDER_COVERAGE_STATUSES = _support.PROVIDER_COVERAGE_STATUSES
+PROVIDER_FYERS = _support.PROVIDER_FYERS
+PROVIDER_KEY_ATTRIBUTE = _support.PROVIDER_KEY_ATTRIBUTE
+PROVIDER_PREFIX = _support.PROVIDER_PREFIX
+PROVIDER_UPSTOX = _support.PROVIDER_UPSTOX
+REGISTRY_VERSION = _support.REGISTRY_VERSION
+RESOLVED = _support.RESOLVED
+SCHEMA_VERSION = _support.SCHEMA_VERSION
+SEGMENT_CASH = _support.SEGMENT_CASH
+SINGLE_SOURCE = _support.SINGLE_SOURCE
+SNAPSHOT_FIELDS = _support.SNAPSHOT_FIELDS
+STALE = _support.STALE
+SUSPENDED = _support.SUSPENDED
+TOKEN_REUSE = _support.TOKEN_REUSE
+TRADING_STATUSES = _support.TRADING_STATUSES
+UNKNOWN = _support.UNKNOWN
+UNKNOWN_INTERVAL = _support.UNKNOWN_INTERVAL
+UNMAPPED = _support.UNMAPPED
+UNSUPPORTED = _support.UNSUPPORTED
+UNSUPPORTED_SEGMENT = _support.UNSUPPORTED_SEGMENT
+VALIDITY_STATES = _support.VALIDITY_STATES
+VERIFIED = _support.VERIFIED
+AliasResolution = _support.AliasResolution
+CanonicalInstrument = _support.CanonicalInstrument
+ConformanceReport = _support.ConformanceReport
+CrosswalkReport = _support.CrosswalkReport
+DiffReport = _support.DiffReport
+FieldChange = _support.FieldChange
+FieldConformance = _support.FieldConformance
+FyersSymbolRecord = _support.FyersSymbolRecord
+InstrumentState = _support.InstrumentState
+Observation = _support.Observation
+ParseResult = _support.ParseResult
+ProviderIdentifier = _support.ProviderIdentifier
+ProviderInstrument = _support.ProviderInstrument
+QuarantineEntry = _support.QuarantineEntry
+QuarantineReport = _support.QuarantineReport
+SnapshotContext = _support.SnapshotContext
+SnapshotMeta = _support.SnapshotMeta
+UpstoxRecord = _support.UpstoxRecord
+# These two typing helpers were visible at module scope before the extraction.
+NamedTuple = _support.NamedTuple
+dataclass = _support.dataclass
+
 reject_duplicate_keys = importlib.import_module(
     "json_support"
 ).reject_duplicate_keys
 
-SCHEMA_VERSION = "instrument-master-v1"
-IDENTITY_VERSION = "v1"
-REGISTRY_VERSION = "instrument-registry-v1"
-
-PROVIDER_UPSTOX = "upstox"
-PROVIDER_FYERS = "fyers"
-
-EXCHANGE_NSE = "NSE"
-SEGMENT_CASH = "NSE_EQ"
-CASH_EQUITY = "CASH_EQUITY"
-FUTURE = "FUTURE"
-OPTION = "OPTION"
-INDEX = "INDEX"
-UNSUPPORTED = "UNSUPPORTED"
-
-VERIFIED = "VERIFIED"
-UNMAPPED = "UNMAPPED"
-AMBIGUOUS = "AMBIGUOUS"
-PASS = "PASS"
-CONFLICT = "CONFLICT"
-INCOMPLETE = "INCOMPLETE"
-INACTIVE = "INACTIVE"
-SUSPENDED = "SUSPENDED"
-ACTIVE = "ACTIVE"
-UNKNOWN = "UNKNOWN"
-ELIGIBLE = "ELIGIBLE"
-NOT_ELIGIBLE = "NOT_ELIGIBLE"
-SINGLE_SOURCE = "SINGLE_SOURCE"
-MULTI_SOURCE = "MULTI_SOURCE"
-OPEN = "OPEN"
-PREOPEN = "PREOPEN"
-ALLOWED = "ALLOWED"
-DISALLOWED = "DISALLOWED"
-FRESH = "FRESH"
-STALE = "STALE"
-INVALID = "INVALID"
-
-IDENTITY_STATUSES = (VERIFIED, UNMAPPED, AMBIGUOUS)
-CONFORMANCE_STATUSES = (PASS, CONFLICT, INCOMPLETE)
-TRADING_STATUSES = (ACTIVE, INACTIVE, SUSPENDED, UNKNOWN)
-ELIGIBILITY_STATUSES = (ELIGIBLE, NOT_ELIGIBLE)
-PROVIDER_COVERAGE_STATUSES = (SINGLE_SOURCE, MULTI_SOURCE, UNKNOWN)
-EXCHANGE_STATUSES = (OPEN, PREOPEN, SUSPENDED, UNKNOWN)
-EXCHANGE_ELIGIBILITY_STATUSES = (ALLOWED, DISALLOWED, UNKNOWN)
-DATA_FRESHNESS_STATUSES = (FRESH, STALE, INVALID, UNKNOWN)
-
-KNOWN_INTERVAL = "KNOWN_INTERVAL"
-OPEN_ENDED = "OPEN_ENDED"
-UNKNOWN_INTERVAL = "UNKNOWN_INTERVAL"
-VALIDITY_STATES = (KNOWN_INTERVAL, OPEN_ENDED, UNKNOWN_INTERVAL)
-
-RESOLVED = "RESOLVED"
-NOT_FOUND = "NOT_FOUND"
-NOT_YET_VALID = "NOT_YET_VALID"
-EXPIRED = "EXPIRED"
-TOKEN_REUSE = "TOKEN_REUSE"
-
-MISSING_PROVIDER_KEY = "MISSING_PROVIDER_KEY"
-MISSING_ISIN = "MISSING_ISIN"
-MISSING_SERIES = "MISSING_SERIES"
-UNSUPPORTED_SEGMENT = "UNSUPPORTED_SEGMENT"
-IDENTITY_COLLISION = "IDENTITY_COLLISION"
-
-ISIN_RE = re.compile(r"^IN[0-9A-Z]{9}[0-9]$")
-FYERS_EXCHANGE_SEGMENTS = {
-    (10, 10): ("NSE", "NSE_EQ"),
-    (10, 11): ("NSE", "NSE_FO"),
-    (10, 12): ("NSE", "NSE_CD"),
-    (11, 20): ("MCX", "MCX_COM"),
-    (12, 10): ("BSE", "BSE_EQ"),
-    (12, 11): ("BSE", "BSE_FO"),
-}
-
-SNAPSHOT_FIELDS = frozenset(
-    {
-        "provider",
-        "captured_at_utc",
-        "url",
-        "market_date",
-        "decoded_bytes",
-        "decoded_sha256",
-        "original_filename",
-        "original_bytes",
-        "original_sha256",
-        "schema_version",
-        "provider_update_timestamp",
-        "status",
-    }
+# Status vocabulary retained for consumers even when the registry itself
+# never consults a value directly. Binding it here keeps this module's public
+# API unchanged after the contracts moved to the support module.
+_PUBLIC_VOCABULARY = (
+    PREOPEN,
+    DISALLOWED,
+    STALE,
+    INVALID,
+    IDENTITY_STATUSES,
+    ELIGIBILITY_STATUSES,
+    PROVIDER_COVERAGE_STATUSES,
+    EXCHANGE_STATUSES,
+    EXCHANGE_ELIGIBILITY_STATUSES,
+    DATA_FRESHNESS_STATUSES,
 )
-# Non-authoritative provenance additions accepted from the canonical record.
-EXTENDED_PROVENANCE_FIELDS = frozenset(
-    {
-        "source_class",
-        "reference_original_path",
-        "reference_decoded_path",
-        "reference_original_bytes",
-        "reference_decoded_bytes",
-        "reference_original_sha256",
-        "reference_decoded_sha256",
-    }
-)
-# Observation attribute names. Provider-scoped names use
-# ``provider:<provider>:<attribute>`` so one append-only stream can carry
-# independent evidence from each provider without extra record fields.
-PROVIDER_PREFIX = "provider:"
-PROVIDER_KEY_ATTRIBUTE = "provider_key"
-ATTR_EFFECTIVE_FROM = "effective_from"
-ATTR_EFFECTIVE_TO = "effective_to"
-ATTR_IDENTITY_STATUS = "identity_status"
-ATTR_CONFORMANCE_STATUS = "conformance_status"
-ATTR_PROVIDER_TRADING_STATUS = "provider_trading_status"
-ATTR_EXCHANGE_STATUS = "exchange_status"
-ATTR_EXCHANGE_ELIGIBILITY = "exchange_eligibility"
-ATTR_DATA_FRESHNESS = "data_freshness"
-DIFF_FIELDS = (
-    "exchange",
-    "segment",
-    "instrument_class",
-    "listing_id",
-    "isin",
-    "trading_series",
-    "underlying_instrument_id",
-    "provider_identifiers",
-    "tick_size",
-    "lot_size",
-    "contract_multiplier",
-    "expiry",
-    "strike",
-    "option_type",
-    "effective_from",
-    "effective_to",
-    "trading_status",
-    "crosswalk_status",
-    "conformance_status",
-    "eligibility_status",
-)
-# Provider-specific fields such as provider_symbol, listing tokens and
-# trading_status are excluded; these are the comparable contract terms.
-CONFORMANCE_FIELDS = (
-    "exchange",
-    "segment",
-    "instrument_class",
-    "trading_series",
-    "isin",
-    "listing_id",
-    "tick_size",
-    "lot_size",
-    "contract_multiplier",
-)
-
-
-class SnapshotMeta(NamedTuple):
-    """Verified provenance record for one captured provider file."""
-
-    provider: str
-    url: str
-    captured_at_utc: str
-    market_date: str
-    original_filename: str
-    original_bytes: int
-    original_sha256: str
-    decoded_bytes: int
-    decoded_sha256: str
-    schema_version: str
-    provider_update_timestamp: str
-    status: str
-
-
-class SnapshotContext(NamedTuple):
-    """Deterministic inputs supplied to a parser by a provenance record."""
-
-    market_date: str
-    observed_at_utc: str
-    source_digest: str
-    source_version: str
-    provider_update_timestamp: str
-
-
-class UpstoxRecord(NamedTuple):
-    """Fields observed in the official Upstox NSE BOD JSON master."""
-
-    segment: str = ""
-    name: str = ""
-    exchange: str = ""
-    isin: str = ""
-    instrument_type: str = ""
-    instrument_key: str = ""
-    lot_size: float | None = None
-    freeze_quantity: float | None = None
-    exchange_token: str = ""
-    tick_size: float | None = None
-    trading_symbol: str = ""
-    qty_multiplier: float | None = None
-    strike_price: float | None = None
-    expiry: float | None = None
-    asset_key: str = ""
-    underlying_key: str = ""
-    underlying_symbol: str = ""
-    security_type: str = ""
-    short_name: str = ""
-    cas_eligible: bool | None = None
-
-
-class FyersSymbolRecord(NamedTuple):
-    """Fields documented for the official FYERS NSE_CM symbol master."""
-
-    sym_ticker: str = ""
-    fy_token: str = ""
-    isin: str = ""
-    ex_symbol: str = ""
-    exchange: int | None = None
-    segment: int | None = None
-    ex_series: str = ""
-    ex_token: int | None = None
-    min_lot_size: int | None = None
-    tick_size: float | None = None
-    trading_session: str = ""
-    last_update: str = ""
-    trade_status: int | None = None
-    qty_multiplier: float | None = None
-    opt_type: str = ""
-    strike_price: float | None = None
-    expiry_date: str = ""
-    under_sym: str = ""
-    under_fy_tok: str = ""
-
-
-class ProviderInstrument(NamedTuple):
-    """Provider observation normalised to shared field names."""
-
-    provider: str
-    provider_key: str
-    provider_symbol: str
-    exchange: str
-    segment: str
-    trading_series: str
-    instrument_class: str
-    listing_id: str
-    isin: str
-    tick_size: float | None
-    lot_size: int | None
-    contract_multiplier: float | None
-    expiry: str | None
-    strike: float | None
-    option_type: str | None
-    underlying_provider_key: str
-    trading_status: str
-    market_date: str
-    observed_at_utc: str
-    provider_update_timestamp: str
-    source_digest: str
-
-
-class ProviderIdentifier(NamedTuple):
-    """External provider key and symbol carried on a canonical instrument."""
-
-    provider: str
-    key: str
-    symbol: str
-    exchange_token: str
-    provider_update_timestamp: str
-
-
-class QuarantineEntry(NamedTuple):
-    """Record withheld from the eligible universe and the reason why."""
-
-    provider: str
-    provider_key: str
-    reason: str
-    observed_at_utc: str
-    source_digest: str
-    instrument_class: str = UNKNOWN
-
-
-class CanonicalInstrument(NamedTuple):
-    """Identity-resolved instrument; all provider keys remain external."""
-
-    canonical_instrument_id: str
-    exchange: str
-    segment: str
-    instrument_class: str
-    listing_id: str
-    isin: str
-    trading_series: str
-    underlying_instrument_id: str | None
-    provider_identifiers: tuple[ProviderIdentifier, ...]
-    tick_size: float | None
-    lot_size: int | None
-    contract_multiplier: float | None
-    expiry: str | None
-    strike: float | None
-    option_type: str | None
-    effective_from: str
-    effective_to: str | None
-    first_observed_at: str
-    last_observed_at: str
-    trading_status: str
-    crosswalk_status: str
-    conformance_status: str
-    eligibility_status: str
-    source_digest: str
-    source_version: str
-    conformance_report: ConformanceReport | None = None
-    provider_coverage: str = MULTI_SOURCE
-    provider_trading_status: str = UNKNOWN
-    exchange_status: str = UNKNOWN
-    exchange_eligibility: str = UNKNOWN
-    data_freshness: str = UNKNOWN
-    quant_eligibility: str = NOT_ELIGIBLE
-
-    @property
-    def identity_status(self) -> str:
-        """Return the identity-only status held in crosswalk_status."""
-        return self.crosswalk_status
-
-
-class ParseResult(NamedTuple):
-    """Normalised records and quarantine entries from one snapshot."""
-
-    records: tuple[ProviderInstrument, ...]
-    quarantine: tuple[QuarantineEntry, ...]
-    total_records: int
-
-
-class FieldChange(NamedTuple):
-    """One field difference for a canonical ID between two snapshots."""
-
-    canonical_instrument_id: str
-    field: str
-    old_value: object
-    new_value: object
-
-
-class DiffReport(NamedTuple):
-    """Deterministic daily diff keyed by canonical instrument ID."""
-
-    added: tuple[str, ...]
-    removed: tuple[str, ...]
-    changed: tuple[FieldChange, ...]
-
-
-class FieldConformance(NamedTuple):
-    """One comparable field evaluated independently across providers."""
-
-    field: str
-    status: str
-    observed: tuple[tuple[str, object], ...]
-    missing: tuple[str, ...]
-
-
-class ConformanceReport(NamedTuple):
-    """Per-field contract conformance, separate from identity corroboration.
-
-    provider_coverage is an independent dimension: agreement within one
-    provider is never reported as cross-provider PASS.
-    """
-
-    status: str
-    fields: tuple[FieldConformance, ...]
-    provider_coverage: str = MULTI_SOURCE
-
-    @property
-    def conflicts(self) -> tuple[FieldConformance, ...]:
-        """Return fields on which providers disagree."""
-        return tuple(item for item in self.fields if item.status == CONFLICT)
-
-    @property
-    def incomplete(self) -> tuple[FieldConformance, ...]:
-        """Return fields with at least one missing provider value."""
-        return tuple(item for item in self.fields if item.status == INCOMPLETE)
-
-    @property
-    def passed(self) -> tuple[FieldConformance, ...]:
-        """Return fields on which every provider agrees."""
-        return tuple(item for item in self.fields if item.status == PASS)
-
-
-class QuarantineReport(NamedTuple):
-    """Counts of withheld records, never a claim that bytes are corrupt."""
-
-    total: int
-    by_reason: dict[str, int]
-    by_provider: dict[str, int]
-    by_instrument_class: dict[str, int]
-    by_reason_provider_class: dict[str, dict[str, dict[str, int]]]
-
-
-_EMPTY_COUNTS: Mapping[str, int] = MappingProxyType({})
-
-
-class CrosswalkReport(NamedTuple):
-    """Cross-provider result plus identities withheld from eligibility.
-
-    status_counts holds identity counts for VERIFIED/UNMAPPED/AMBIGUOUS and
-    trading counts for INACTIVE/SUSPENDED. conformance_counts and
-    trading_counts report the two independent classifications explicitly.
-    """
-
-    instruments: tuple[CanonicalInstrument, ...]
-    quarantine: tuple[QuarantineEntry, ...]
-    status_counts: dict[str, int]
-    conformance_counts: Mapping[str, int] = _EMPTY_COUNTS
-    trading_counts: Mapping[str, int] = _EMPTY_COUNTS
-    coverage_counts: Mapping[str, int] = _EMPTY_COUNTS
-
-
-class AliasResolution(NamedTuple):
-    """Alias outcome; ID is set only for a unique, unambiguous claim.
-
-    claimants preserves every distinct ID that ever claimed the alias.
-    """
-
-    identifier: str
-    status: str
-    canonical_instrument_id: str | None
-    validity: str
-    claimants: tuple[str, ...]
-
-
-class Observation(NamedTuple):
-    """One append-only observation; corrections are new rows, not edits."""
-
-    canonical_instrument_id: str
-    attribute_name: str
-    attribute_value: object
-    valid_from: str | None
-    valid_to: str | None
-    observed_at: str
-    ingested_at: str
-    provider_updated_at: str | None
-    source_digest: str
-    source_version: str
-    registry_version: str
-
-
-@dataclass(frozen=True)
-class InstrumentState:
-    """Bitemporal view at one market date and observation time."""
-
-    canonical_instrument_id: str
-    market_date: str
-    observed_at: str
-    effective_from: str | None
-    effective_to: str | None
-    provider_coverage: str
-    identity_status: str
-    conformance_status: str
-    provider_trading_status: str
-    exchange_status: str
-    exchange_eligibility: str
-    data_freshness: str
-    quant_eligibility: str
-    provider_keys: tuple[str, ...]
-    attributes: Mapping[str, object]
-    validity: str
-    attribute_validity: Mapping[str, str]
-    source_digest: str
-    source_version: str
-    registry_version: str
-
-    @property
-    def validity_assessment(self) -> str:
-        """Return the explicit validity state of the selected values."""
-        return self.validity
-
-    @property
-    def proven_valid(self) -> bool:
-        """Return True only when an established interval covers market_date."""
-        return self.validity in (KNOWN_INTERVAL, OPEN_ENDED)
-
-    def as_dict(self) -> dict[str, object]:
-        """Return a plain mapping, safe for JSON serialisation."""
-        return {**self.__dict__, "attributes": dict(self.attributes)}
-
-    def __getitem__(self, key: str) -> object:
-        """Allow mapping-style access to every state field."""
-        if key not in self.__dict__:
-            raise KeyError(key)
-        return getattr(self, key)
-
-    def get(self, key: str, default: object = None) -> object:
-        """Return a state field with a mapping-style default."""
-        return self.__dict__.get(key, default)
 
 
 class InstrumentRegistry:
@@ -562,7 +189,7 @@ class InstrumentRegistry:
         """
         day = _required_date(market_date, "market_date")
         moment = _timestamp(observed_at)
-        selected: dict[str, dict[str, Observation]] = {}
+        selected: dict[str, dict[str, list[Observation]]] = {}
         for row in self._observations:
             if _knowledge_time(row) > moment:
                 continue
@@ -572,13 +199,20 @@ class InstrumentRegistry:
             ):
                 continue
             bucket = selected.setdefault(row.canonical_instrument_id, {})
-            current = bucket.get(row.attribute_name)
-            if current is None or _order_key(row) > _order_key(current):
-                bucket[row.attribute_name] = row
-        return {
-            identity: self._state_for(identity, day, observed_at, bucket)
-            for identity, bucket in selected.items()
-        }
+            bucket.setdefault(row.attribute_name, []).append(row)
+        states: dict[str, InstrumentState] = {}
+        for identity, bucket in selected.items():
+            winners: dict[str, Observation] = {}
+            conflicts: dict[str, tuple[str, ...]] = {}
+            for name, rows in bucket.items():
+                winner, identifiers = _resolve_attribute_rows(rows)
+                winners[name] = winner
+                if identifiers:
+                    conflicts[name] = identifiers
+            states[identity] = self._state_for(
+                identity, day, observed_at, winners, conflicts
+            )
+        return states
 
     def resolve(
         self,
@@ -746,6 +380,7 @@ class InstrumentRegistry:
         day: str,
         observed_at: str,
         bucket: Mapping[str, Observation],
+        conflicts: Mapping[str, tuple[str, ...]],
     ) -> InstrumentState:
         """Build one state from the observations selected for a query."""
         values = {name: row.attribute_value for name, row in bucket.items()}
@@ -758,6 +393,14 @@ class InstrumentRegistry:
             key=VALIDITY_STATES.index,
             default=KNOWN_INTERVAL,
         )
+        effective_from = _state_date(values.get(ATTR_EFFECTIVE_FROM))
+        effective_to = _state_date(values.get(ATTR_EFFECTIVE_TO))
+        if (
+            effective_from is not None
+            and effective_to is not None
+            and effective_from >= effective_to
+        ):
+            validity = INVALID_INTERVAL
         providers = set()
         provider_keys = []
         for name, row in bucket.items():
@@ -776,6 +419,8 @@ class InstrumentRegistry:
         conformance = _state_conformance(values.get(ATTR_CONFORMANCE_STATUS))
         if conformance is None:
             conformance = conformance_from_observations(bucket, coverage)
+        if conflicts:
+            conformance = CONFLICT
         latest = max(bucket.values(), key=_order_key)
         provider_trading = _state_status(
             values.get(ATTR_PROVIDER_TRADING_STATUS)
@@ -792,13 +437,19 @@ class InstrumentRegistry:
             exchange_status=exchange,
             exchange_eligibility=eligibility,
             data_freshness=freshness,
+            validity=validity,
         )
+        attributes = dict(values)
+        if conflicts:
+            attributes[CONFLICT_EVIDENCE_KEY] = MappingProxyType(
+                dict(conflicts)
+            )
         return InstrumentState(
             canonical_instrument_id=identity,
             market_date=day,
             observed_at=observed_at,
-            effective_from=_state_date(values.get(ATTR_EFFECTIVE_FROM)),
-            effective_to=_state_date(values.get(ATTR_EFFECTIVE_TO)),
+            effective_from=effective_from,
+            effective_to=effective_to,
             provider_coverage=coverage,
             identity_status=identity_status,
             conformance_status=conformance,
@@ -808,7 +459,7 @@ class InstrumentRegistry:
             data_freshness=freshness,
             quant_eligibility=quant,
             provider_keys=tuple(sorted(provider_keys)),
-            attributes=MappingProxyType(dict(values)),
+            attributes=MappingProxyType(attributes),
             validity=validity,
             attribute_validity=MappingProxyType(validities),
             source_digest=latest.source_digest,
@@ -988,6 +639,61 @@ def _order_key(row: Observation) -> tuple:
     )
 
 
+def _value_key(value: object) -> str:
+    """Return a comparable representation of an observation value."""
+    try:
+        return json.dumps(value, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return repr(value)
+
+
+def observation_id(row: Observation) -> str:
+    """Return a stable identifier for an observation's evidence.
+
+    The identifier is derived from the row's content, never from its position
+    in an input sequence, so tied observations can be cited deterministically.
+    """
+    payload = json.dumps(
+        (
+            row.canonical_instrument_id,
+            row.attribute_name,
+            row.attribute_value,
+            row.valid_from,
+            row.valid_to,
+            row.observed_at,
+            row.ingested_at,
+            row.provider_updated_at,
+            row.source_digest,
+            row.source_version,
+            row.registry_version,
+        ),
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return sha256_hex(payload)[:16]
+
+
+def _resolve_attribute_rows(
+    rows: Sequence[Observation],
+) -> tuple[Observation, tuple[str, ...]]:
+    """Select the latest rows and report value conflicts among ties.
+
+    Only rows with equivalent precedence can conflict. Ties are broken by a
+    content-derived identifier rather than input order, and every tied
+    identifier is returned as evidence when the values disagree.
+    """
+    ordered = sorted(
+        rows, key=lambda row: (_order_key(row), observation_id(row))
+    )
+    latest = _order_key(ordered[-1])
+    tied = [row for row in ordered if _order_key(row) == latest]
+    if len({_value_key(row.attribute_value) for row in tied}) == 1:
+        return ordered[-1], ()
+    identifiers = tuple(sorted({observation_id(row) for row in tied}))
+    return ordered[-1], identifiers
+
+
 def _knowledge_time(row: Observation) -> datetime:
     """Return the first time QUANT could know this observation."""
     return max(_timestamp(row.observed_at), _timestamp(row.ingested_at))
@@ -1066,8 +772,19 @@ def fail_closed_eligibility(
     exchange_status: str,
     exchange_eligibility: str,
     data_freshness: str,
+    validity: str,
 ) -> str:
-    """Grant eligibility only when every independent dimension is affirmed."""
+    """Grant eligibility only when every independent dimension is affirmed.
+
+    Temporal validity is a gate of its own. KNOWN_INTERVAL may proceed.
+    OPEN_ENDED has a known start but no end, so it may proceed only while the
+    independent FRESH data gate still holds. UNKNOWN_INTERVAL and
+    INVALID_INTERVAL never pass; malformed intervals are rejected before an
+    observation enters the registry. Conflicts and unknown gates fail closed
+    through the other dimensions.
+    """
+    if validity not in PROVEN_VALIDITY_STATES:
+        return NOT_ELIGIBLE
     gates = (
         (identity_status, VERIFIED),
         (provider_coverage, MULTI_SOURCE),
