@@ -114,7 +114,7 @@ DEFAULT_DEDUPE_WINDOW = 4096
 DEFAULT_STALE_AFTER_NS = 30_000_000_000
 HEARTBEAT_FRAME = '{"action":"heartbeat"}'
 
-# Bounds are intentionally finite and enforced before any value is emitted.
+# Bounds are finite and enforced before any value is emitted.
 MAX_TOTAL_QUANTITY = 10**18
 MAX_ORDER_COUNT = 10**9
 MAX_PRICE = 10**9

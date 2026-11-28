@@ -5,7 +5,7 @@ symbol is only a caller-facing alias resolved through an injected resolver at
 both the requested market date and observation time. Records published or
 observed after the observation time, records not yet effective, and
 conflicting or superseded revisions are excluded. Conflict, staleness and
-revision decisions see only the history actually visible at that observation
+revision decisions see only the history visible at that observation
 time, never a later-known revision.
 
 The calendar is a digest-verified artifact supplied by the caller; weekdays
