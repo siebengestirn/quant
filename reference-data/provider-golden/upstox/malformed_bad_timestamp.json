@@ -1,0 +1,16 @@
+{
+  "data": {
+    "candles": [
+      [
+        "not-a-timestamp",
+        100,
+        110,
+        95,
+        105,
+        1000,
+        -1
+      ]
+    ]
+  },
+  "status": "success"
+}
