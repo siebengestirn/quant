@@ -5,6 +5,28 @@ are three separate objects. Events are never rewritten: a correction is
 appended with a higher revision and a new adjustment version, so an earlier
 derived dataset can always be rebuilt exactly. No real corporate action is
 embedded here; every event must be supplied with source provenance.
+
+Ratio semantics are explicit and action-specific (see ``RATIO_SEMANTICS``):
+
+* ``SPLIT``: ``ratio`` = new_shares_per_old_share; factor = ratio.
+* ``BONUS``: ``ratio`` = bonus_shares_per_held_share (incremental);
+  factor = 1 + ratio.
+* ``CONSOLIDATION``: ``ratio`` = old_shares_per_new_share;
+  factor = 1 / ratio.
+* ``DIVIDEND`` / ``CASH_DIVIDEND``: no ratio; ``cash_amount`` is cash per
+  share on the share basis immediately before the event.
+
+RIGHTS, MERGER and DEMERGER terms are retained in the ledger but are marked
+``UNAPPLIED_UNSUPPORTED_TERMS``: no generic ratio is ever applied to them.
+
+Back-adjustment divides a raw close by the product of all share-count
+factors with an ex-date strictly after that session. A cash entitlement is
+divided by the product of all share-count factors with an ex-date on or after
+the dividend, so cash and price use one consistent share basis. An applied
+event with an explicitly missing ex-date is ledgered but reported as
+``UNAPPLIED_MISSING_EX_DATE``; it never changes a price. With ``known_as_of``
+the ledger is read as it was knowable then: for each action the highest
+revision announced, observed and ingested by that instant is selected.
 """
 
 from __future__ import annotations
@@ -14,25 +36,15 @@ import json
 import math
 import re
 from collections.abc import Mapping, Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import NamedTuple
 
-try:
-    from exchange_calendar import parse_instant
-except ModuleNotFoundError:  # pragma: no cover - standalone spec loading
-    import sys
-    from pathlib import Path
-
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from exchange_calendar import (  # pylint: disable=import-outside-toplevel
-        parse_instant,
-    )
-
-SCHEMA_VERSION = "corporate-actions-v1"
+SCHEMA_VERSION = "corporate-actions-v2"
 
 SPLIT = "SPLIT"
 BONUS = "BONUS"
 DIVIDEND = "DIVIDEND"
+CASH_DIVIDEND = "CASH_DIVIDEND"
 RIGHTS = "RIGHTS"
 MERGER = "MERGER"
 DEMERGER = "DEMERGER"
@@ -42,6 +54,7 @@ RELISTING = "RELISTING"
 
 ACTION_TYPES = (
     BONUS,
+    CASH_DIVIDEND,
     CONSOLIDATION,
     DELISTING,
     DEMERGER,
@@ -51,24 +64,42 @@ ACTION_TYPES = (
     RIGHTS,
     SPLIT,
 )
-RATIO_ACTIONS = frozenset(
-    {
-        SPLIT,
-        BONUS,
-        RIGHTS,
-        MERGER,
-        DEMERGER,
-        CONSOLIDATION,
-    }
-)
-CASH_ACTIONS = frozenset({DIVIDEND})
+SHARE_ACTIONS = frozenset({SPLIT, BONUS, CONSOLIDATION})
+CASH_ACTIONS = frozenset({DIVIDEND, CASH_DIVIDEND})
+UNSUPPORTED_TERMS_ACTIONS = frozenset({RIGHTS, MERGER, DEMERGER})
+APPLIED_ACTIONS = SHARE_ACTIONS | CASH_ACTIONS
+RATIO_ACTIONS = SHARE_ACTIONS  # Rights, merger and demerger are not ratios.
 STATUS_ACTIONS = frozenset({DELISTING, RELISTING})
 SUCCESSOR_ACTIONS = frozenset({MERGER, DEMERGER})
+
+NEW_PER_OLD = "new_shares_per_old_share"
+BONUS_PER_HELD = "bonus_shares_per_held_share"
+OLD_PER_NEW = "old_shares_per_new_share"
+CASH_PER_SHARE = "cash_per_share"
+NOT_APPLICABLE = "not_applicable"
+UNAPPLIED_UNSUPPORTED_TERMS = "UNAPPLIED_UNSUPPORTED_TERMS"
+UNAPPLIED_MISSING_EX_DATE = "UNAPPLIED_MISSING_EX_DATE"
+UNAPPLIED_STATUS_ONLY = "UNAPPLIED_STATUS_ONLY"
+
+RATIO_SEMANTICS: dict[str, str] = {
+    SPLIT: NEW_PER_OLD,
+    BONUS: BONUS_PER_HELD,
+    CONSOLIDATION: OLD_PER_NEW,
+    DIVIDEND: CASH_PER_SHARE,
+    CASH_DIVIDEND: CASH_PER_SHARE,
+    RIGHTS: UNAPPLIED_UNSUPPORTED_TERMS,
+    MERGER: UNAPPLIED_UNSUPPORTED_TERMS,
+    DEMERGER: UNAPPLIED_UNSUPPORTED_TERMS,
+    DELISTING: NOT_APPLICABLE,
+    RELISTING: NOT_APPLICABLE,
+}
 
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _ID_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
 _CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 _VERSION_RE = re.compile(r"^(.*)-v(\d+)$")
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_INSTANT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
 _ACTION_FIELDS = (
     "corporate_action_id",
@@ -88,6 +119,7 @@ _ACTION_FIELDS = (
     "observed_at",
     "revision",
     "adjustment_version",
+    "ingested_at",
 )
 _REVISABLE_FIELDS = frozenset(
     {
@@ -104,6 +136,7 @@ _REVISABLE_FIELDS = frozenset(
         "source",
         "source_digest",
         "observed_at",
+        "ingested_at",
     }
 )
 
@@ -128,6 +161,12 @@ class ActionEvent(NamedTuple):
     observed_at: str
     revision: int
     adjustment_version: str
+    ingested_at: str | None = None
+
+    @property
+    def ratio_semantics(self) -> str:
+        """Return the declared meaning of ``ratio`` for this action type."""
+        return RATIO_SEMANTICS.get(self.action_type, NOT_APPLICABLE)
 
 
 class PriceBar(NamedTuple):
@@ -153,8 +192,9 @@ class AdjustedBar(NamedTuple):
 class AdjustedSeries(NamedTuple):
     """A deterministic derived dataset, immutable and version-tagged.
 
-    ledger_digest binds only the events selected for this adjustment
+    ``ledger_digest`` binds only the events selected for this adjustment
     version, so appending a correction never changes an older dataset.
+    ``unapplied_terms`` records why ledgered events were not applied.
     """
 
     canonical_instrument_id: str
@@ -165,6 +205,7 @@ class AdjustedSeries(NamedTuple):
     raw_series_digest: str
     ledger_digest: str
     digest: str
+    unapplied_terms: tuple[tuple[str, str], ...] = ()
 
 
 def _text(value: object) -> str:
@@ -178,15 +219,33 @@ def _optional_text(value: object) -> str | None:
 
 
 def _is_date(value: object) -> bool:
-    """Return True for a real ISO calendar date, not a merely shaped one."""
+    """Return True for a real, zero-padded ISO calendar date."""
     text = _text(value)
-    if not text:
+    if not _DATE_RE.fullmatch(text):
         return False
     try:
         datetime.strptime(text, "%Y-%m-%d")
     except ValueError:
         return False
     return True
+
+
+def _parse_instant(value: object) -> datetime | None:
+    """Parse a strict UTC `YYYY-MM-DDTHH:MM:SSZ` instant, else return None."""
+    text = _text(value)
+    if not _INSTANT_RE.fullmatch(text):
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+def _knowledge_cutoff(value: object) -> datetime | None:
+    """Parse an ISO8601 instant, treating a bare date as midnight UTC."""
+    if _is_date(value):
+        return _parse_instant(f"{_text(value)}T00:00:00Z")
+    return _parse_instant(value)
 
 
 def _is_number(value: object) -> bool:
@@ -225,52 +284,97 @@ def event_from_mapping(data: Mapping[str, object]) -> ActionEvent:
         observed_at=_text(data.get("observed_at")),
         revision=revision if isinstance(revision, int) else 0,
         adjustment_version=_text(data.get("adjustment_version")),
+        ingested_at=_optional_text(data.get("ingested_at")),
     )
 
 
-def _validate_dates(event: ActionEvent, errors: list[str]) -> None:
-    """Check optional dates and their chronological relationships."""
-    dates = {
-        "record_date": event.record_date,
-        "ex_date": event.ex_date,
-        "effective_date": event.effective_date,
-        "payment_date": event.payment_date,
-    }
-    for name, value in dates.items():
+def _validate_event_dates(event: ActionEvent, errors: list[str]) -> None:
+    """Check action-specific dates; the universal date chain is not assumed."""
+    values = (
+        event.record_date,
+        event.ex_date,
+        event.effective_date,
+        event.payment_date,
+    )
+    for name, value in zip(
+        ("record_date", "ex_date", "effective_date", "payment_date"),
+        values,
+        strict=True,
+    ):
         if value is not None and not _is_date(value):
             errors.append(f"invalid {name}")
-    ordered = ("record_date", "ex_date", "effective_date", "payment_date")
-    present = [dates[name] for name in ordered if dates[name] is not None]
-    if present != sorted(present):
-        errors.append("dates are not chronologically ordered")
+    if any(value is not None and not _is_date(value) for value in values):
+        return
 
+    if event.action_type in SHARE_ACTIONS:
+        if event.effective_date is None:
+            errors.append("effective_date required for share action")
+        if event.payment_date is not None:
+            errors.append("payment_date not supported for share action")
+        if (
+            event.ex_date is not None
+            and event.effective_date is not None
+            and event.ex_date > event.effective_date
+        ):
+            errors.append("ex_date must not follow effective_date")
+        return
 
-def _validate_terms(event: ActionEvent, errors: list[str]) -> None:
-    """Check action-specific ratio and cash terms without inventing values."""
-    if event.ratio is not None and (
-        event.ratio <= 0 or not math.isfinite(event.ratio)
-    ):
-        errors.append("ratio must be positive")
-    if event.cash_amount is not None and (
-        event.cash_amount < 0 or not math.isfinite(event.cash_amount)
-    ):
-        errors.append("cash_amount must be non-negative")
-    if event.action_type in RATIO_ACTIONS:
-        if event.ratio is None:
-            errors.append("ratio required for price action")
-        if event.cash_amount is not None:
-            errors.append("cash_amount not supported for price action")
     if event.action_type in CASH_ACTIONS:
-        if event.cash_amount is None:
+        if (
+            event.ex_date is not None
+            and event.payment_date is not None
+            and event.payment_date < event.ex_date
+        ):
+            errors.append("payment_date must not precede ex_date")
+        return
+
+    if event.action_type in STATUS_ACTIONS:
+        if event.effective_date is None:
+            errors.append("effective_date required for status action")
+        if (
+            event.ex_date is not None
+            and event.effective_date is not None
+            and event.ex_date > event.effective_date
+        ):
+            errors.append("ex_date must not follow effective_date")
+
+
+def _validate_value_terms(event: ActionEvent, errors: list[str]) -> None:
+    """Check that supplied numeric terms are finite and in range."""
+    ratio = event.ratio
+    cash = event.cash_amount
+    if ratio is not None and (ratio <= 0 or not math.isfinite(ratio)):
+        errors.append("ratio must be positive")
+    if cash is not None and (cash < 0 or not math.isfinite(cash)):
+        errors.append("cash_amount must be non-negative")
+
+
+def _validate_action_terms(event: ActionEvent, errors: list[str]) -> None:
+    """Check the ratio and cash fields required by this action type."""
+    ratio = event.ratio
+    cash = event.cash_amount
+    if event.action_type in SHARE_ACTIONS:
+        if ratio is None:
+            errors.append("ratio required for share action")
+        elif event.action_type in {SPLIT, CONSOLIDATION} and ratio <= 1:
+            errors.append(f"{event.action_type.lower()} ratio must exceed one")
+        if cash is not None:
+            errors.append("cash_amount not supported for share action")
+    elif event.action_type in CASH_ACTIONS:
+        if cash is None:
             errors.append("cash_amount required for dividend")
-        if event.ratio is not None:
+        if ratio is not None:
             errors.append("ratio not supported for dividend")
         if event.currency is None or not _CURRENCY_RE.fullmatch(event.currency):
             errors.append("invalid dividend currency")
-    if event.action_type in STATUS_ACTIONS and (
-        event.ratio is not None or event.cash_amount is not None
+    elif event.action_type in STATUS_ACTIONS and (
+        ratio is not None or cash is not None
     ):
         errors.append("status action cannot carry ratio or cash")
+
+
+def _validate_successor(event: ActionEvent, errors: list[str]) -> None:
+    """Check successor presence only for successor actions."""
     if (
         event.action_type in SUCCESSOR_ACTIONS
         and not event.successor_instrument_id
@@ -283,6 +387,24 @@ def _validate_terms(event: ActionEvent, errors: list[str]) -> None:
         errors.append("unexpected successor_instrument_id")
 
 
+def _validate_knowledge_times(event: ActionEvent, errors: list[str]) -> None:
+    """Check that announcement, observation and ingestion are ordered."""
+    announced = _parse_instant(event.announcement_timestamp)
+    observed = _parse_instant(event.observed_at)
+    if announced is None:
+        errors.append("invalid announcement_timestamp")
+    if observed is None:
+        errors.append("invalid observed_at")
+    elif announced is not None and observed < announced:
+        errors.append("observed_at precedes announcement_timestamp")
+    if event.ingested_at is not None:
+        ingested = _parse_instant(event.ingested_at)
+        if ingested is None:
+            errors.append("invalid ingested_at")
+        elif observed is not None and ingested < observed:
+            errors.append("ingested_at precedes observed_at")
+
+
 def validate_event(event: ActionEvent) -> tuple[str, ...]:
     """Return all contract violations for one corporate action event."""
     errors: list[str] = []
@@ -291,12 +413,11 @@ def validate_event(event: ActionEvent) -> tuple[str, ...]:
             errors.append(f"invalid {name}")
     if event.action_type not in ACTION_TYPES:
         errors.append("unsupported action_type")
-    if parse_instant(event.announcement_timestamp) is None:
-        errors.append("invalid announcement_timestamp")
-    if parse_instant(event.observed_at) is None:
-        errors.append("invalid observed_at")
-    _validate_dates(event, errors)
-    _validate_terms(event, errors)
+    _validate_knowledge_times(event, errors)
+    _validate_event_dates(event, errors)
+    _validate_value_terms(event, errors)
+    _validate_action_terms(event, errors)
+    _validate_successor(event, errors)
     if not event.source:
         errors.append("missing source")
     if not _DIGEST_RE.fullmatch(event.source_digest):
@@ -340,6 +461,25 @@ def ledger_digest(events: Sequence[ActionEvent]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def knowledge_time(event: ActionEvent) -> datetime:
+    """Return the first instant at which all knowledge gates are satisfied."""
+    instants = [
+        _parse_instant(event.announcement_timestamp),
+        _parse_instant(event.observed_at),
+    ]
+    if event.ingested_at is not None:
+        instants.append(_parse_instant(event.ingested_at))
+    known = [item for item in instants if item is not None]
+    if not known:
+        raise ValueError("event has no knowledge timestamp")
+    return max(known)
+
+
+def _event_sort_key(event: ActionEvent) -> tuple[str, str, int]:
+    """Order events deterministically for adjustment."""
+    return (event.ex_date or "", event.corporate_action_id, event.revision)
+
+
 class ActionLedger:
     """Immutable append-only ledger; append returns a new ledger."""
 
@@ -378,6 +518,24 @@ class ActionLedger:
                 or item.adjustment_version == adjustment_version
             )
         )
+
+    def as_known(
+        self, canonical_instrument_id: str, known_as_of: object
+    ) -> tuple[ActionEvent, ...]:
+        """Select the latest revisions knowable at ``known_as_of``."""
+        cutoff = _knowledge_cutoff(known_as_of)
+        if cutoff is None:
+            raise ValueError("invalid known_as_of")
+        latest: dict[str, ActionEvent] = {}
+        for item in self._events:
+            if item.canonical_instrument_id != canonical_instrument_id:
+                continue
+            if knowledge_time(item) > cutoff:
+                continue
+            current = latest.get(item.corporate_action_id)
+            if current is None or item.revision > current.revision:
+                latest[item.corporate_action_id] = item
+        return tuple(sorted(latest.values(), key=_event_sort_key))
 
     def versions(self, canonical_instrument_id: str) -> tuple[str, ...]:
         """Return sorted distinct adjustment versions for an instrument."""
@@ -459,38 +617,63 @@ def raw_series_digest(bars: Sequence[PriceBar]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _event_sort_key(event: ActionEvent) -> tuple[str, str, int]:
-    """Order events deterministically for adjustment."""
-    return (event.ex_date or "", event.corporate_action_id, event.revision)
+def share_factor(event: ActionEvent) -> float:
+    """Return the back-adjustment factor for one share-count action.
+
+    The action type fixes the ratio meaning; no generic ratio multiplier is
+    used for rights, mergers or demergers.
+    """
+    ratio = event.ratio
+    if ratio is None:
+        raise ValueError("share action without ratio")
+    if event.action_type == SPLIT:
+        return ratio
+    if event.action_type == BONUS:
+        return 1.0 + ratio
+    if event.action_type == CONSOLIDATION:
+        return 1.0 / ratio
+    raise ValueError("not a share-count action")
+
+
+def _price_factor(date: str, share_events: Sequence[ActionEvent]) -> float:
+    """Return the cumulative factor for all splits after ``date``."""
+    return math.prod(
+        share_factor(event)
+        for event in share_events
+        if event.ex_date is not None and event.ex_date > date
+    )
+
+
+def _cash_factor(date: str, share_events: Sequence[ActionEvent]) -> float:
+    """Return the factor that puts cash on the previous bar's share basis."""
+    return math.prod(
+        share_factor(event)
+        for event in share_events
+        if event.ex_date is not None and event.ex_date >= date
+    )
 
 
 def _cash_by_date(
-    events: Sequence[ActionEvent],
+    cash_events: Sequence[ActionEvent], share_events: Sequence[ActionEvent]
 ) -> dict[str, tuple[float | None, tuple[str, ...]]]:
-    """Aggregate dividend cash entitlement per ex-date."""
+    """Aggregate basis-consistent dividend entitlement per ex-date."""
     result: dict[str, tuple[float | None, tuple[str, ...]]] = {}
-    for event in events:
-        assert event.ex_date is not None
+    for event in cash_events:
+        if event.ex_date is None:
+            continue
+        factor = _cash_factor(event.ex_date, share_events)
+        amount = (
+            None if event.cash_amount is None else event.cash_amount / factor
+        )
         total, missing = result.get(event.ex_date, (0.0, ()))
-        if event.cash_amount is None:
+        if amount is None:
             result[event.ex_date] = (
                 None,
                 missing + (event.corporate_action_id,),
             )
         elif total is not None:
-            result[event.ex_date] = (total + event.cash_amount, missing)
+            result[event.ex_date] = (total + amount, missing)
     return result
-
-
-def _factor_for(date: str, ratio_events: Sequence[ActionEvent]) -> float:
-    """Return the cumulative back-adjustment factor after a date."""
-    return math.prod(
-        event.ratio
-        for event in ratio_events
-        if event.ex_date is not None
-        and event.ex_date > date
-        and event.ratio is not None
-    )
 
 
 def _bar_returns(
@@ -510,15 +693,16 @@ def _bar_returns(
 
 def _build_adjusted_bars(
     bars: Sequence[PriceBar],
-    ratio_events: Sequence[ActionEvent],
+    share_events: Sequence[ActionEvent],
     cash_events: Sequence[ActionEvent],
 ) -> tuple[AdjustedBar, ...]:
     """Build back-adjusted bars from raw closes and validated events."""
-    cash = _cash_by_date(cash_events)
+    cash = _cash_by_date(cash_events, share_events)
     result = []
     previous = None
+    all_applied = (*share_events, *cash_events)
     for row in bars:
-        factor = _factor_for(row.session_date, ratio_events)
+        factor = _price_factor(row.session_date, share_events)
         adjusted = row.close / factor if row.close is not None else None
         entitlement, missing = cash.get(row.session_date, (None, ()))
         price_return, total_return = _bar_returns(
@@ -526,7 +710,7 @@ def _build_adjusted_bars(
         )
         applied = tuple(
             event.corporate_action_id
-            for event in (*ratio_events, *cash_events)
+            for event in all_applied
             if event.ex_date == row.session_date
         )
         result.append(
@@ -545,6 +729,24 @@ def _build_adjusted_bars(
     return tuple(result)
 
 
+def _unapplied_terms(
+    events: Sequence[ActionEvent],
+) -> tuple[tuple[str, str], ...]:
+    """Return (event id, reason) for every ledgered but unused event."""
+    terms: list[tuple[str, str]] = []
+    for event in events:
+        if event.action_type in UNSUPPORTED_TERMS_ACTIONS:
+            reason = UNAPPLIED_UNSUPPORTED_TERMS
+        elif event.action_type in STATUS_ACTIONS:
+            reason = UNAPPLIED_STATUS_ONLY
+        elif event.ex_date is None and event.action_type in APPLIED_ACTIONS:
+            reason = UNAPPLIED_MISSING_EX_DATE
+        else:
+            continue
+        terms.append((event.corporate_action_id, reason))
+    return tuple(sorted(terms))
+
+
 def _series_digest(result: AdjustedSeries) -> str:
     """Derive the digest of a derived dataset, excluding the digest itself."""
     payload = {
@@ -553,6 +755,7 @@ def _series_digest(result: AdjustedSeries) -> str:
         "bars": [item._asdict() for item in result.bars],
         "event_ids": list(result.event_ids),
         "unapplied_event_ids": list(result.unapplied_event_ids),
+        "unapplied_terms": [list(pair) for pair in result.unapplied_terms],
         "raw_series_digest": result.raw_series_digest,
         "ledger_digest": result.ledger_digest,
     }
@@ -567,39 +770,52 @@ def adjust_series(
     ledger: ActionLedger,
     adjustment_version: str,
     canonical_instrument_id: str,
+    *,
+    known_as_of: object = None,
 ) -> AdjustedSeries:
-    """Derive one deterministic adjusted series for one event version."""
+    """Derive one deterministic adjusted series for one event version.
+
+    Without ``known_as_of`` events are selected by exact adjustment version
+    (the latest corrected dataset). With an ISO8601 ``known_as_of`` the ledger
+    is read point-in-time: the latest revision announced, observed and
+    ingested by then is used for each action, regardless of version label.
+    """
     errors = validate_series(raw_bars)
     if errors:
         raise ValueError("; ".join(errors))
-    events = tuple(
-        sorted(
-            ledger.select(canonical_instrument_id, adjustment_version),
-            key=_event_sort_key,
+    if known_as_of is None:
+        events = tuple(
+            sorted(
+                ledger.select(canonical_instrument_id, adjustment_version),
+                key=_event_sort_key,
+            )
         )
-    )
-    ids = [item.corporate_action_id for item in events]
-    if len(set(ids)) != len(ids):
-        raise ValueError("duplicate action in one adjustment version")
-    dated = [item for item in events if item.ex_date is not None]
-    ratio_events = [item for item in dated if item.action_type in RATIO_ACTIONS]
-    cash_events = [item for item in dated if item.action_type in CASH_ACTIONS]
-    ratio_dates = {item.ex_date for item in ratio_events}
-    cash_dates = {item.ex_date for item in cash_events}
-    if ratio_dates & cash_dates:
-        raise ValueError("ratio and cash events collide on an ex-date")
+        ids = [item.corporate_action_id for item in events]
+        if len(set(ids)) != len(ids):
+            raise ValueError("duplicate action in one adjustment version")
+    else:
+        events = ledger.as_known(canonical_instrument_id, known_as_of)
+
+    share_events = [
+        item
+        for item in events
+        if item.action_type in SHARE_ACTIONS and item.ex_date is not None
+    ]
+    cash_events = [
+        item
+        for item in events
+        if item.action_type in CASH_ACTIONS and item.ex_date is not None
+    ]
+    terms = _unapplied_terms(events)
     result = AdjustedSeries(
         canonical_instrument_id,
         adjustment_version,
-        _build_adjusted_bars(tuple(raw_bars), ratio_events, cash_events),
-        tuple(ids),
-        tuple(
-            sorted(
-                item.corporate_action_id for item in events if item not in dated
-            )
-        ),
+        _build_adjusted_bars(tuple(raw_bars), share_events, cash_events),
+        tuple(item.corporate_action_id for item in events),
+        tuple(sorted(event_id for event_id, _ in terms)),
         raw_series_digest(raw_bars),
         ledger_digest(events),
         "",
+        terms,
     )
     return result._replace(digest=_series_digest(result))
