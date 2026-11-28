@@ -8,6 +8,9 @@ diagnostics, then invokes `quant research` for authoritative simulated P&L.
 Labels: VERIFIED = observed, ESTIMATED = modelled, SIMULATED = no real orders,
 INCONCLUSIVE = insufficient evidence, NOT IMPLEMENTED = absent.
 
+An optional offline W1 resolver annotates dataset/feature records; no live
+qualification is claimed and C++/q/journal integration is FUTURE WORK.
+
 Usage:
     python3 python/research.py [--data data/cache/history] [--out data/reports]
     python3 python/research.py --self-test
@@ -34,6 +37,9 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+_registry_service = importlib.import_module("instrument_registry_service")
 
 # Research constants (ESTIMATED). They are not trading parameters.
 KDBX_WHITELIST = (
@@ -305,6 +311,9 @@ def load_history_validated(
     calendar_errors: list[str] | None = None,
     diagnostic: bool = False,
     manifest: bool = True,
+    *,
+    resolver: Callable[[str, str, str], object] | None = None,
+    observed_at: str = "",
 ) -> ValidatedDataset:
     """Fail-closed dataset contract with mandatory PIT and calendar gates."""
     raw_history, parse_errors, _detail = load_history_with_errors(directory)
@@ -331,10 +340,16 @@ def load_history_validated(
             for symbol, rows in raw_history.items()
             if symbol in verified_files
         }
+    coverage_gaps: list[str] = []
+    if resolver is not None:
+        resolved = _registry_service.resolve_history(
+            raw_history, resolver, observed_at
+        )
+        raw_history = resolved.history
+        coverage_gaps.extend(resolved.gaps)
     for symbol, rows in raw_history.items():
         quality[symbol] = dataset_quality(rows, expected)
     eligible_dates: dict[str, list[str]] = {}
-    coverage_gaps: list[str] = []
     for session_date in expected:
         eligible_dates[session_date] = point_in_time_universe(
             instrument_status or [], session_date
@@ -475,11 +490,17 @@ def features(rows: list[dict[str, float]], index: int) -> dict[str, float]:
     }
 
 
-def feature_history(rows: list[dict[str, float]]) -> list[dict[str, float]]:
+def feature_history(
+    rows: list[dict[str, float]], resolver=None, symbol="", observed_at=""
+) -> list[dict[str, float]]:
     """Point-in-time features with availability at the next observed session."""
     result = []
     for index, _row in enumerate(rows):
         item = features(rows, index)
+        if resolver is not None:
+            item = _registry_service.annotate_record(
+                item, resolver, symbol, str(rows[index]["date"]), observed_at
+            )
         item["index"] = index
         # The final observed session has no known subsequent exchange
         # boundary in this dataset, so its availability is explicitly
