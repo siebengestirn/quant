@@ -3,20 +3,16 @@
 from __future__ import annotations
 
 import csv
-import importlib.util
 import json
 import math
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+
+from test_loader_support import load_test_module
 
 ROOT = Path(__file__).resolve().parent.parent
-SPEC = importlib.util.spec_from_file_location(
-    "quant_research", ROOT / "python" / "research.py"
-)
-assert SPEC is not None and SPEC.loader is not None
-research = importlib.util.module_from_spec(SPEC)
-sys.modules["quant_research"] = research
-SPEC.loader.exec_module(research)
+research = load_test_module("quant_research", ROOT / "python" / "research.py")
 
 
 def test_synthetic_history_is_deterministic():
@@ -185,22 +181,9 @@ def _write_pit_fixtures(tmp_path: Path, dates: list[str]) -> tuple[Path, Path]:
     return status, calendar
 
 
-def _load_dataset_contract():
-    name = "quant_dataset_contract_test"
-    if name in sys.modules:
-        return sys.modules[name]
-    import importlib.util
-
-    path = ROOT / "python" / "dataset_contract.py"
-    spec = importlib.util.spec_from_file_location(name, path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-DATASET_CONTRACT = _load_dataset_contract()
+DATASET_CONTRACT = load_test_module(
+    "quant_dataset_contract_test", ROOT / "python" / "dataset_contract.py"
+)
 
 
 def _write_manifest(directory: Path) -> None:
@@ -803,3 +786,253 @@ def test_report_separates_development_and_outer_test_scopes():
         assert field in stats["development_descriptive"]
         assert field not in oos
     assert report["methodology"]["holdout_status"] == "SEALED_NOT_EVALUATED"
+
+
+RESEARCH_OBSERVED_AT = "2026-01-03T00:00:00Z"
+
+
+def _identity_resolution(
+    identity: str = "CID-AAA",
+    status: str = "RESOLVED",
+    validity: str = "KNOWN_INTERVAL",
+) -> dict:
+    """Return a resolver-shaped canonical identity result."""
+    return {
+        "status": status,
+        "canonical_instrument_id": identity,
+        "validity": validity,
+        "eligibility": "ELIGIBLE",
+    }
+
+
+def _resolver_for(status: str, validity: str):
+    """Return a resolver producing one fixed, explicit resolution outcome."""
+
+    def resolver(*_args):
+        """Return the configured identity outcome for any query."""
+        return _identity_resolution(status=status, validity=validity)
+
+    return resolver
+
+
+def _fixed_resolution(*_args):
+    """Return a stable canonical identity for any resolver query."""
+    return _identity_resolution()
+
+
+def _attribute_resolver(*_args):
+    """Return an attribute-bearing canonical identity result."""
+    return SimpleNamespace(**_identity_resolution())
+
+
+def _expired_attribute_resolver(*_args):
+    """Return an attribute-bearing result with a past validity bound."""
+    result = _identity_resolution()
+    result["valid_to"] = "2026-01-01"
+    return SimpleNamespace(**result)
+
+
+def _missing_resolver(*_args):
+    """Return no resolution at all."""
+    return None
+
+
+def _write_research_dataset(tmp_path: Path) -> tuple[Path, Path, list, list]:
+    """Write a minimal manifest-backed dataset for resolver tests."""
+    (tmp_path / "AAA.csv").write_text(
+        "date,open,high,low,close,volume\n"
+        "2026-01-01,100,102,99,101,1000\n"
+        "2026-01-02,101,103,100,102,1000\n"
+    )
+    _write_manifest(tmp_path)
+    status, calendar = _write_pit_fixtures(
+        tmp_path, ["2026-01-01", "2026-01-02"]
+    )
+    records, errors = research.load_universe_status(status)
+    sessions, calendar_errors = research.load_session_calendar(calendar)
+    assert not errors and not calendar_errors
+    return status, calendar, records, sessions
+
+
+def test_dataset_resolver_records_identity_and_default_is_unchanged(tmp_path):
+    """A supplied resolver annotates bars; symbol-keyed default stays as-is."""
+    _status, _calendar, records, sessions = _write_research_dataset(tmp_path)
+    calls: list[tuple[str, str, str]] = []
+
+    def resolver(identifier, market_date, observed_at):
+        """Resolve every bar to one canonical identity."""
+        calls.append((identifier, market_date, observed_at))
+        return _identity_resolution()
+
+    dataset = research.load_history_validated(
+        tmp_path,
+        records,
+        "TEST",
+        sessions,
+        [],
+        [],
+        resolver=resolver,
+        observed_at=RESEARCH_OBSERVED_AT,
+    )
+    assert dataset.status == "COMPLETE"
+    assert not dataset.coverage_gaps
+    assert len(dataset.history["AAA"]) == 2
+    assert all(
+        row["canonical_instrument_id"] == "CID-AAA" and row["symbol"] == "AAA"
+        for row in dataset.history["AAA"]
+    )
+    assert calls == [
+        ("AAA", "2026-01-01", RESEARCH_OBSERVED_AT),
+        ("AAA", "2026-01-02", RESEARCH_OBSERVED_AT),
+    ]
+    default = research.load_history_validated(
+        tmp_path, records, "TEST", sessions, [], []
+    )
+    assert all(
+        "canonical_instrument_id" not in row for row in default.history["AAA"]
+    )
+
+
+def test_dataset_resolver_refuses_records_without_established_validity(
+    tmp_path,
+):
+    """Unknown validity and expired aliases never enter accepted history."""
+    _status, _calendar, records, sessions = _write_research_dataset(tmp_path)
+    for validity, status in (
+        ("UNKNOWN_INTERVAL", "UNKNOWN_INTERVAL"),
+        ("KNOWN_INTERVAL", "EXPIRED"),
+    ):
+        candidate = tmp_path / "candidate"
+        candidate.mkdir(exist_ok=True)
+        (candidate / "AAA.csv").write_text((tmp_path / "AAA.csv").read_text())
+        for name in ("contract.json", "manifest.json"):
+            (candidate / name).write_text((tmp_path / name).read_text())
+        dataset = research.load_history_validated(
+            candidate,
+            records,
+            "TEST",
+            sessions,
+            [],
+            [],
+            resolver=_resolver_for(status, validity),
+            observed_at=RESEARCH_OBSERVED_AT,
+        )
+        assert not dataset.history
+        assert len(dataset.coverage_gaps) == 2
+        assert all(
+            "unresolved identity" in gap for gap in dataset.coverage_gaps
+        )
+
+
+def test_feature_path_records_identity_without_changing_math():
+    """Feature values stay identical while canonical metadata is attached."""
+    rows = research.synthetic_history()["AAA"]
+    plain = research.features(rows, 100)
+    history = research.feature_history(
+        rows,
+        resolver=_fixed_resolution,
+        symbol="AAA",
+        observed_at=RESEARCH_OBSERVED_AT,
+    )
+    enriched = history[100]
+    assert enriched["symbol"] == "AAA"
+    assert enriched["canonical_instrument_id"] == "CID-AAA"
+    assert enriched["resolution_status"] == "RESOLVED"
+    for key, value in plain.items():
+        assert enriched[key] == value
+    assert "canonical_instrument_id" not in research.feature_history(rows)[0]
+    assert research.score_momentum(enriched) == research.score_momentum(plain)
+
+
+def test_feature_path_refuses_unresolved_identity():
+    """A refused resolution leaves no canonical ID on any feature record."""
+    rows = research.synthetic_history()["AAA"]
+    history = research.feature_history(
+        rows,
+        resolver=_resolver_for("EXPIRED", "KNOWN_INTERVAL"),
+        symbol="AAA",
+        observed_at=RESEARCH_OBSERVED_AT,
+    )
+    assert all(item["canonical_instrument_id"] is None for item in history)
+    assert all(item["resolution_status"] == "EXPIRED" for item in history)
+
+
+def test_feature_path_accepts_attribute_results_and_rejects_missing():
+    """Mapping and attribute results work; unknown axis bounds are refused."""
+    rows = research.synthetic_history()["AAA"][:1]
+    accepted = research.feature_history(
+        rows,
+        resolver=_attribute_resolver,
+        symbol="AAA",
+        observed_at=RESEARCH_OBSERVED_AT,
+    )
+    assert accepted[0]["canonical_instrument_id"] == "CID-AAA"
+    for resolver in (_expired_attribute_resolver, _missing_resolver):
+        refused = research.feature_history(
+            rows,
+            resolver=resolver,
+            symbol="AAA",
+            observed_at=RESEARCH_OBSERVED_AT,
+        )
+        assert refused[0]["canonical_instrument_id"] is None
+
+
+def test_service_bound_resolver_integrates_with_dataset_path(tmp_path):
+    """The optional resolver accepts a provider-bound registry service."""
+    im = load_test_module(
+        "quant_instrument_master_research_test",
+        ROOT / "python" / "instrument_master.py",
+    )
+    svc = load_test_module(
+        "quant_registry_service_research_test",
+        ROOT / "python" / "instrument_registry_service.py",
+    )
+    identity = "NSE-CASH-RESEARCH-TEST"
+    observed_at = "2025-12-31T09:00:00Z"
+
+    def row(name, value, *, provider=""):
+        """Build one observation with an attested interval."""
+        attribute = im.provider_attribute(provider, name) if provider else name
+        return im.observation(
+            identity,
+            attribute,
+            value,
+            observed_at=observed_at,
+            valid_from="2026-01-01",
+            valid_to="2026-02-01",
+            source_digest="a" * 64,
+        )
+
+    rows = [
+        row(im.ATTR_IDENTITY_STATUS, im.VERIFIED),
+        row(im.ATTR_CONFORMANCE_STATUS, im.PASS),
+        row(im.ATTR_PROVIDER_TRADING_STATUS, im.ACTIVE),
+        row(im.ATTR_EXCHANGE_STATUS, im.OPEN),
+        row(im.ATTR_EXCHANGE_ELIGIBILITY, im.ALLOWED),
+        row(im.ATTR_DATA_FRESHNESS, im.FRESH),
+        row(
+            im.PROVIDER_KEY_ATTRIBUTE,
+            im.provider_alias("upstox", "AAA"),
+            provider="upstox",
+        ),
+    ]
+    resolver = svc.InstrumentRegistryService(
+        im.build_registry(rows)
+    ).for_provider("upstox")
+    _status, _calendar, records, sessions = _write_research_dataset(tmp_path)
+    dataset = research.load_history_validated(
+        tmp_path,
+        records,
+        "TEST",
+        sessions,
+        [],
+        [],
+        resolver=resolver,
+        observed_at=observed_at,
+    )
+    assert dataset.status == "COMPLETE"
+    assert not dataset.coverage_gaps
+    assert all(
+        entry["canonical_instrument_id"] == identity
+        for entry in dataset.history["AAA"]
+    )
