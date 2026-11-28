@@ -5,7 +5,7 @@ Usage:
   python3 scripts/fetch_instrument_snapshots.py verify [--reference-root DIR]
   python3 scripts/fetch_instrument_snapshots.py fetch [--output DIR]
   python3 scripts/fetch_instrument_snapshots.py update-provenance \\
-      --output PATH
+      --output PATH [--attestation-output PATH]
   python3 scripts/fetch_instrument_snapshots.py extract \\
       --from-bundle PATH [--output DIR]
   python3 scripts/fetch_instrument_snapshots.py evidence-report \\
@@ -26,7 +26,9 @@ time, in a test, or in a CI gate. ``fetch`` never edits governance provenance;
 ``update-provenance`` writes a candidate record only to an explicitly named
 output file for human review and re-pinning. All URLs, byte counts and
 digests come from the pinned provenance record. Downloads use HTTPS without
-credentials or headers.
+credentials or headers. An optional attestation records observed response
+metadata; SHA-256 proves integrity, not origin, and digest-pinned public
+snapshots are not independently authenticated.
 
 Gate wiring (exact command, no network):
   python3 scripts/fetch_instrument_snapshots.py verify
@@ -89,6 +91,16 @@ CONTENT_TYPES = {
 BUNDLE_PREFIX = "quant/"
 BUNDLE_SNAPSHOT_DIR = "evidence/instrument-master"
 MASTER_MODULE = "quant_instrument_master_fetcher"
+CAPTURE_MODULE = "quant_capture_provenance"
+GIT_MODULE = "quant_research_git"
+RETRIEVAL_ENVIRONMENT = "explicit-cli-update-provenance"
+COMMIT_RE = re.compile(r"[0-9a-f]{40}")
+AUTHENTICITY_NOTE = (
+    "Digest-pinned public snapshots are integrity-checked against governance "
+    "pins; their origin is not independently authenticated. No live provider "
+    "qualification is claimed."
+)
+DATA_CLASSIFICATION = "OFFICIAL_PUBLIC_REFERENCE_SNAPSHOT"
 DEFAULT_EVIDENCE_ROOT = ROOT / BUNDLE_SNAPSHOT_DIR
 DEFAULT_EVIDENCE_REPORT = (
     ROOT / "data" / "assurance" / "instrument-evidence.json"
@@ -136,6 +148,32 @@ def _master() -> Any:
         raise RuntimeError(f"cannot load instrument master: {path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[MASTER_MODULE] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@lru_cache(maxsize=1)
+def _capture_provenance() -> Any:
+    """Load the capture attestation module by absolute path."""
+    path = ROOT / "python" / "capture_provenance.py"
+    spec = importlib.util.spec_from_file_location(CAPTURE_MODULE, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load capture provenance: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[CAPTURE_MODULE] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@lru_cache(maxsize=1)
+def _shared_git() -> Any:
+    """Load the shared narrow-exception HEAD lookup by absolute path."""
+    path = ROOT / "python" / "research_git.py"
+    spec = importlib.util.spec_from_file_location(GIT_MODULE, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load git helper: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[GIT_MODULE] = module
     spec.loader.exec_module(module)
     return module
 
@@ -542,6 +580,63 @@ def _check_json_payload(payload: bytes, url: str) -> None:
         raise ValueError(f"{url}: payload is not valid JSON: {exc}") from exc
 
 
+def _response_metadata(response: Any, url: str, timestamp: str) -> dict:
+    """Record only response metadata actually observed on this request."""
+    unknown = _capture_provenance().UNKNOWN
+    headers = response.headers
+    status = getattr(response, "status", unknown)
+    declared = headers.get("Content-Length", "")
+    declared_type = headers.get("Content-Type", "")
+    query = urllib.parse.urlsplit(url).query
+    return {
+        "source_url": url,
+        "capture_timestamp_utc": timestamp,
+        "request_parameters": query or unknown,
+        "http_status": (
+            status
+            if isinstance(status, int) and not isinstance(status, bool)
+            else unknown
+        ),
+        "content_type": (
+            headers.get_content_type().lower() if declared_type else unknown
+        ),
+        "content_length": (int(declared) if declared.isdigit() else unknown),
+        "etag": headers.get("ETag") or unknown,
+        "last_modified": headers.get("Last-Modified") or unknown,
+    }
+
+
+def download_with_metadata(
+    url: str,
+    max_bytes: int = MAX_ORIGINAL_BYTES,
+    suffix: str = ".json",
+) -> tuple[bytes, dict]:
+    """Stream one pinned URL and retain observed response metadata.
+
+    Validation is identical to ``download``; metadata is captured before the
+    body is read and missing headers stay UNKNOWN.
+    """
+    validate_url(url)
+    opener = urllib.request.build_opener(AllowlistedRedirect())
+    timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        with opener.open(url, timeout=TIMEOUT_SECONDS) as response:
+            status = getattr(response, "status", 200)
+            if status != 200:
+                raise ValueError(f"{url}: unexpected HTTP status {status}")
+            metadata = _response_metadata(response, url, timestamp)
+            _check_content_length(response, url, max_bytes)
+            _check_content_type(response, url, suffix)
+            payload = read_limited(response, url, max_bytes)
+            if suffix == ".json":
+                _check_json_payload(payload, url)
+            return payload, metadata
+    except urllib.error.HTTPError as exc:
+        raise ValueError(f"{url}: HTTP status {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        raise ValueError(f"{url}: network error: {exc.reason}") from exc
+
+
 def download(
     url: str,
     max_bytes: int = MAX_ORIGINAL_BYTES,
@@ -552,23 +647,7 @@ def download(
     A ``.json`` snapshot must also parse as JSON, independently of its
     declared content type; the header is never trusted for validity.
     """
-    validate_url(url)
-    opener = urllib.request.build_opener(AllowlistedRedirect())
-    try:
-        with opener.open(url, timeout=TIMEOUT_SECONDS) as response:
-            status = getattr(response, "status", 200)
-            if status != 200:
-                raise ValueError(f"{url}: unexpected HTTP status {status}")
-            _check_content_length(response, url, max_bytes)
-            _check_content_type(response, url, suffix)
-            payload = read_limited(response, url, max_bytes)
-            if suffix == ".json":
-                _check_json_payload(payload, url)
-            return payload
-    except urllib.error.HTTPError as exc:
-        raise ValueError(f"{url}: HTTP status {exc.code}") from exc
-    except urllib.error.URLError as exc:
-        raise ValueError(f"{url}: network error: {exc.reason}") from exc
+    return download_with_metadata(url, max_bytes, suffix)[0]
 
 
 def _gzip_isize(payload: bytes) -> int:
@@ -717,30 +796,57 @@ def fetch(
     return tuple(pending)
 
 
-def update_provenance(provenance: Path, output: Path) -> dict:
+def _fetcher_commit() -> str:
+    """Return the checked-out HEAD SHA, or UNKNOWN when unavailable."""
+    unknown = _capture_provenance().UNKNOWN
+    head = _shared_git().head_commit(ROOT)
+    return head if head != unknown and COMMIT_RE.fullmatch(head) else unknown
+
+
+def update_provenance(
+    provenance: Path,
+    output: Path,
+    attestation_output: Path | str | None = None,
+) -> dict:
     """Fetch live bytes into a candidate provenance record for human review.
 
     This is the only operation that recomputes digests, and it writes only
-    to an explicitly named output file; the pinned record is never edited
-    in place. The candidate has no reference-data fields because new
-    immutable bytes must be captured and reviewed in a separate commit.
+    to explicitly named output files; the pinned record is never edited in
+    place. The candidate has no reference-data fields and no attestation
+    fields because new immutable bytes must be captured and reviewed in a
+    separate commit. With ``attestation_output``, a separate canonical
+    document records observed capture metadata, validated before any write.
     """
     if output.resolve() == provenance.resolve():
         raise ValueError(
             "update-provenance must not overwrite pinned provenance"
         )
+    requested = bool(attestation_output) and str(attestation_output) != "."
+    if requested and (
+        Path(attestation_output).resolve() == provenance.resolve()
+    ):
+        raise ValueError(
+            "update-provenance must not overwrite pinned provenance"
+        )
+    capture = _capture_provenance()
     fields = _master().SNAPSHOT_FIELDS
     entries = []
+    attestations = []
+    commit = _fetcher_commit() if requested else capture.UNKNOWN
     for entry in _provenance_entries(provenance):
         meta = _master().SnapshotMeta(
             **{key: entry[key] for key in sorted(fields) if key in entry}
         )
         validate_meta(meta)
         suffix = Path(meta.original_filename).suffix
-        original = download(meta.url, MAX_ORIGINAL_BYTES, suffix)
+        original, metadata = download_with_metadata(
+            meta.url, MAX_ORIGINAL_BYTES, suffix
+        )
         decoded = decode_original(
             original, meta.original_filename, MAX_DECODED_BYTES
         )
+        raw_digest = hashlib.sha256(original).hexdigest()
+        decoded_digest = hashlib.sha256(decoded).hexdigest()
         candidate = {
             key: value
             for key, value in entry.items()
@@ -750,15 +856,66 @@ def update_provenance(provenance: Path, output: Path) -> dict:
             "%Y-%m-%dT%H:%M:%SZ"
         )
         candidate["original_bytes"] = len(original)
-        candidate["original_sha256"] = hashlib.sha256(original).hexdigest()
+        candidate["original_sha256"] = raw_digest
         candidate["decoded_bytes"] = len(decoded)
-        candidate["decoded_sha256"] = hashlib.sha256(decoded).hexdigest()
+        candidate["decoded_sha256"] = decoded_digest
         candidate["source_class"] = "candidate-provenance-update"
         entries.append(candidate)
+        if requested:
+            record = capture.build_capture_attestation(
+                data_classification=DATA_CLASSIFICATION,
+                provider_or_exchange=meta.provider,
+                source_url=metadata["source_url"],
+                capture_timestamp_utc=metadata["capture_timestamp_utc"],
+                provider_updated_timestamp=entry.get(
+                    "provider_update_timestamp"
+                ),
+                market_date=meta.market_date,
+                request_parameters=metadata["request_parameters"],
+                http_status=metadata["http_status"],
+                content_type=metadata["content_type"],
+                content_length=metadata["content_length"],
+                etag=metadata["etag"],
+                last_modified=metadata["last_modified"],
+                raw_sha256=raw_digest,
+                decoded_sha256=decoded_digest,
+                schema_version=meta.schema_version,
+                fetcher_commit=commit,
+                # Transformation, parent digests and retention are not
+                # observed here, so the builder leaves them UNKNOWN.
+            )
+            record.update(
+                provider=meta.provider,
+                market_date=meta.market_date,
+                provider_update_timestamp=record["provider_updated_timestamp"],
+                origin_authenticated=False,
+                retrieval_environment=RETRIEVAL_ENVIRONMENT,
+            )
+            errors = capture.validate_attestation(record)
+            if errors:
+                raise ValueError(
+                    f"{meta.provider}: invalid capture attestation: "
+                    + "; ".join(errors)
+                )
+            attestations.append(record)
     document = {"snapshots": entries}
     _write_atomic(
         output, (json.dumps(document, indent=2, sort_keys=True) + "\n").encode()
     )
+    if requested:
+        attestation_document = {
+            "schema_version": capture.SCHEMA_VERSION,
+            "origin_authenticated": False,
+            "retrieval_environment": RETRIEVAL_ENVIRONMENT,
+            "attestations": attestations,
+        }
+        _write_atomic(
+            Path(attestation_output),
+            (
+                json.dumps(attestation_document, indent=2, sort_keys=True)
+                + "\n"
+            ).encode("utf-8"),
+        )
     return document
 
 
@@ -1088,6 +1245,9 @@ def build_evidence_report(source: EvidenceSource, provenance: Path) -> dict:
         "provenance_source": source.source,
         "source_root": _relative(source.root) or source.source,
         "extraction_command": source.extraction_command,
+        "data_classification": DATA_CLASSIFICATION,
+        "origin_authenticated": False,
+        "authenticity_note": AUTHENTICITY_NOTE,
         "verification_status": status,
         "snapshot_count": len(snapshots),
         "snapshots": snapshots,
@@ -1145,6 +1305,12 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     update_parser.add_argument(
         "--output", type=Path, required=True, help="new candidate record path"
+    )
+    update_parser.add_argument(
+        "--attestation-output",
+        type=Path,
+        default="",
+        help="optional capture attestation path (empty writes no file)",
     )
     extract_parser = subparsers.add_parser(
         "extract", help="extract pinned bytes from a release ZIP, offline"
@@ -1221,7 +1387,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "verify":
             return _verify_command(args)
         if args.command == "update-provenance":
-            update_provenance(args.provenance, args.output)
+            update_provenance(
+                args.provenance, args.output, args.attestation_output
+            )
             print(f"candidate provenance written to {args.output}")
             print("review, capture immutable bytes and re-pin before use")
             return 0

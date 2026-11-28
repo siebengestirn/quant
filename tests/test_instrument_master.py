@@ -13,9 +13,9 @@ import sys
 import zipfile
 from email.message import Message
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
+from fetcher_test_support import stub_retrieval
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -63,6 +63,18 @@ APR = "2026-04-01"
 EARLY = "2025-12-31T09:00:00Z"
 MID = "2026-03-01T09:00:00Z"
 LATER = "2026-04-02T09:00:00Z"
+
+
+def _stub_retrieval(
+    monkeypatch: pytest.MonkeyPatch,
+    content_type: str,
+    body: bytes,
+    status: int = 200,
+) -> list[tuple[str, int]]:
+    """Restore real retrieval and serve one synthetic response offline."""
+    return stub_retrieval(
+        fetcher, REAL_DOWNLOAD, monkeypatch, content_type, body, status
+    )
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -144,8 +156,8 @@ def _eligible_rows(
 ) -> list[im.Observation]:
     """Return observations affirming every independent eligibility gate.
 
-    Attested validity is itself a gate. Passing None builds the otherwise-valid-but
-    unknown-validity shape used by the fail-closed regression test.
+    Attested validity is itself a gate. Passing None builds the
+    otherwise-valid-but-unknown-validity shape used by the regression test.
     """
     return [
         _obs(im.ATTR_IDENTITY_STATUS, im.VERIFIED, valid_from=valid_from),
@@ -963,52 +975,6 @@ def test_download_rejects_bad_status_and_streams_with_limits(monkeypatch):
     with pytest.raises(ValueError, match="unexpected HTTP status 404"):
         fetcher.download(f"{url}?bad", 100, ".json")
     assert fetcher.download(url, 100, ".json") == b'{"ok":true}'
-
-
-class _StubResponse:
-    """In-memory response with declared headers and a synthetic body."""
-
-    def __init__(
-        self, content_type: str, body: bytes, status: int = 200
-    ) -> None:
-        self.status = status
-        self.headers = Message()
-        self.headers["Content-Type"] = content_type
-        self.headers["Content-Length"] = str(len(body))
-        self._body = io.BytesIO(body)
-
-    def read(self, count: int) -> bytes:
-        """Return the next body chunk."""
-        return self._body.read(count)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args) -> bool:
-        return False
-
-
-def _stub_retrieval(
-    monkeypatch: pytest.MonkeyPatch,
-    content_type: str,
-    body: bytes,
-    status: int = 200,
-) -> list[tuple[str, int]]:
-    """Restore real retrieval and serve one synthetic response offline."""
-    response = _StubResponse(content_type, body, status)
-    calls: list[tuple[str, int]] = []
-
-    def open_stub(url: str, timeout: int) -> _StubResponse:
-        """Record the URL and timeout, then return the prepared response."""
-        calls.append((url, timeout))
-        return response
-
-    opener = SimpleNamespace(open=open_stub)
-    monkeypatch.setattr(
-        fetcher.urllib.request, "build_opener", lambda *args: opener
-    )
-    monkeypatch.setattr(fetcher, "download", REAL_DOWNLOAD)
-    return calls
 
 
 def test_content_type_allowlist_is_explicit_and_provider_scoped() -> None:
