@@ -1,9 +1,13 @@
 """Offline tests for the W3-A FYERS read-only Data Socket adapter.
 
-Every frame comes from an in-memory fake transport and every timestamp from a
-fake clock. No network is contacted, no credential is used and no live API is
-called. LIVE ENTITLEMENT AND QUALIFICATION REMAIN PENDING: these tests verify
-adapter behaviour only; they are not feed certification evidence.
+All frames are SYNTHETIC GOLDEN payloads modelled on the documented FYERS
+Data Socket schema (``cn``/``sub``/``sf``/``if``/``dp`` and errors). They are
+not captured from a live feed. Every frame comes from an in-memory fake
+transport and every timestamp from a fake clock; no network is contacted, no
+credential is used and no live API is called.
+
+LIVE ENTITLEMENT AND QUALIFICATION REMAIN PENDING: these tests verify adapter
+behaviour only; they are not feed certification evidence.
 """
 
 from __future__ import annotations
@@ -11,9 +15,11 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import socket
 import sys
 from collections import deque
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -48,6 +54,98 @@ CANONICAL_FIELDS = {
     "completeness",
     "gap",
 }
+
+# SYNTHETIC GOLDEN PAYLOADS — schema-shaped examples only, never live data.
+GOLDEN_CN: dict[str, object] = {
+    "type": "cn",
+    "code": 200,
+    "message": "Connected",
+}
+GOLDEN_SUB: dict[str, object] = {
+    "type": "sub",
+    "symbol": SYMBOL,
+    "code": 200,
+    "s": "ok",
+    "message": "Subscribed",
+}
+GOLDEN_ERROR: dict[str, object] = {
+    "type": "error",
+    "code": 403,
+    "message": "synthetic error",
+}
+GOLDEN_SF: dict[str, object] = {
+    "symbol": SYMBOL,
+    "ltp": 606.4,
+    "prev_close_price": 620.2,
+    "high_price": 610.5,
+    "low_price": 605.85,
+    "open_price": 609.85,
+    "ch": -13.8,
+    "chp": -2.23,
+    "vol_traded_today": 3_045_212,
+    "last_traded_time": 1_690_953_622,
+    "exch_feed_time": 1_690_953_622,
+    "bid_size": 2081,
+    "ask_size": 903,
+    "bid_price": 606.4,
+    "ask_price": 606.45,
+    "last_traded_qty": 5,
+    "tot_buy_qty": 749_960,
+    "tot_sell_qty": 1_092_063,
+    "avg_trade_price": 608.2,
+    "type": "sf",
+}
+GOLDEN_IF: dict[str, object] = {
+    "symbol": INDEX,
+    "ch": "-27.95",
+    "high_price": "26277.35",
+    "ltp": "26188.1",
+    "exch_feed_time": "1727428424",
+    "chp": "-0.11",
+    "low_price": "26166.95",
+    "open_price": "26248.25",
+    "type": "if",
+    "prev_close_price": "26216.05",
+}
+GOLDEN_DP: dict[str, object] = {
+    "bid_price1": 606.25,
+    "bid_price2": 606.2,
+    "bid_price3": 606.15,
+    "bid_price4": 606.1,
+    "bid_price5": 606.05,
+    "ask_price1": 606.3,
+    "ask_price2": 606.35,
+    "ask_price3": 606.4,
+    "ask_price4": 606.45,
+    "ask_price5": 606.5,
+    "bid_size1": 20,
+    "bid_size2": 902,
+    "bid_size3": 111,
+    "bid_size4": 110,
+    "bid_size5": 979,
+    "ask_size1": 282,
+    "ask_size2": 568,
+    "ask_size3": 2910,
+    "ask_size4": 1676,
+    "ask_size5": 2981,
+    "bid_order1": 1,
+    "bid_order2": 3,
+    "bid_order3": 2,
+    "bid_order4": 2,
+    "bid_order5": 9,
+    "ask_order1": 4,
+    "ask_order2": 2,
+    "ask_order3": 12,
+    "ask_order4": 9,
+    "ask_order5": 17,
+    "type": "dp",
+    "symbol": SYMBOL,
+}
+
+
+def _frame(payload: dict[str, object]) -> bytes:
+    """Encode one synthetic golden payload as a raw socket frame."""
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
 
 class FakeClock:
@@ -125,21 +223,6 @@ class NetworkFakeTransport(FakeTransport):
     requires_network = True
 
 
-def _frame(symbol: str, ltp: float) -> bytes:
-    """Build one schema-valid FYERS-style tick frame."""
-    payload = {
-        "symbol": symbol,
-        "ltp": ltp,
-        "open_price": ltp - 1.0,
-        "high_price": ltp + 1.0,
-        "low_price": ltp - 2.0,
-        "prev_price": ltp - 0.5,
-        "volume": 1200,
-        "timestamp": 1769000000.0,
-    }
-    return json.dumps(payload, separators=(",", ":")).encode("utf-8")
-
-
 def _resolver(symbol: str, kind: str) -> str | None:
     """Resolve a canonical instrument id without any external lookup."""
     return f"ID::{kind}::{symbol}"
@@ -172,66 +255,214 @@ def _connected(
     return adapter
 
 
-def test_valid_symbol_and_index_updates():
-    """Symbol and index ticks emit complete canonical events."""
+def test_golden_symbol_update_maps_documented_fields():
+    """The synthetic sf golden maps documented fields and emits cleanly."""
     clock = FakeClock()
     transport = FakeTransport()
     events: list[fyers_socket.CanonicalEvent] = []
     adapter = _connected(transport, _options(clock, events))
 
     assert adapter.subscribe(SYMBOL) is True
-    assert adapter.subscribe(INDEX) is True
-    raw_symbol = _frame(SYMBOL, 100.5)
-    raw_index = _frame(INDEX, 24000.25)
-    first = adapter.process_payload(raw_symbol)
-    second = adapter.process_payload(raw_index)
+    raw = _frame(GOLDEN_SF)
+    event = adapter.process_payload(raw)
 
-    assert [first.kind, second.kind] == ["symbol", "index"]
-    assert first.validation_status == fyers_socket.VALID
-    assert first.canonical_instrument_id == f"ID::symbol::{SYMBOL}"
-    assert second.canonical_instrument_id == f"ID::index::{INDEX}"
-    assert first.fields["ltp"] == 100.5
-    assert "sequence" not in first.fields
-    assert first.raw_sha256 == hashlib.sha256(raw_symbol).hexdigest()
-    assert first.raw_payload == raw_symbol
-    assert first.receive_wall_clock_ns == clock.wall_clock_ns()
-    assert first.receive_monotonic_ns == clock.monotonic_ns()
-    assert first.completeness == fyers_socket.COMPLETE
-    assert first.gap is None
-    assert first.duplicate is False
+    assert event.event_type == fyers_socket.TYPE_SYMBOL_UPDATE == "sf"
+    assert event.kind == fyers_socket.KIND_SYMBOL
+    assert event.validation_status == fyers_socket.VALID
+    assert event.completeness == fyers_socket.COMPLETE
+    assert event.canonical_instrument_id == f"ID::symbol::{SYMBOL}"
+    assert event.fields["prev_close_price"] == 620.2
+    assert event.fields["vol_traded_today"] == 3_045_212
+    assert isinstance(event.fields["vol_traded_today"], int)
+    assert not isinstance(event.fields["vol_traded_today"], bool)
+    assert event.fields["last_traded_time"] == 1_690_953_622
+    assert event.fields["bid_price"] == 606.4
+    assert event.fields["ask_size"] == 903
+    assert "volume" not in event.fields
+    assert event.raw_payload == raw
+    assert event.raw_sha256 == hashlib.sha256(raw).hexdigest()
+    assert event.gap is None
+    assert event.duplicate is False
+    assert set(events[0].as_dict()) == CANONICAL_FIELDS
 
-    emitted = [event.as_dict() for event in events]
-    assert set(emitted[0]) == CANONICAL_FIELDS
-    assert emitted[0]["provider"] == fyers_socket.PROVIDER
-    assert emitted[0]["connection_id"] == adapter.status()["connection_id"]
-
-    transport.queued.append(_frame(SYMBOL, 101.0))
+    transport.queued.append(raw)
     polled = adapter.poll(0)
     assert len(polled) == 1
-    assert polled[0].fields["ltp"] == 101.0
+    assert polled[0].fields["ltp"] == 606.4
     assert adapter.poll(0) == ()
 
 
-def test_malformed_message_is_retained_and_incomplete():
-    """Malformed bytes are retained, hashed and never treated as a tick."""
+def test_golden_index_update_maps_documented_fields():
+    """The synthetic if golden is an index with no volume or bid/ask."""
+    clock = FakeClock()
+    adapter = _connected(FakeTransport(), _options(clock))
+    adapter.subscribe(INDEX)
+
+    event = adapter.process_payload(_frame(GOLDEN_IF))
+
+    assert event.event_type == fyers_socket.TYPE_INDEX_UPDATE == "if"
+    assert event.kind == fyers_socket.KIND_INDEX
+    assert event.validation_status == fyers_socket.VALID
+    assert event.fields["ltp"] == 26188.1
+    assert event.fields["prev_close_price"] == 26216.05
+    assert "last_traded_time" not in event.fields
+    assert "vol_traded_today" not in event.fields
+    assert "bid_price" not in event.fields
+    assert event.fields["exch_feed_time"] == 1_727_428_424
+
+
+def test_golden_depth_update_maps_five_levels():
+    """The synthetic dp golden carries all five documented levels."""
+    clock = FakeClock()
+    adapter = _connected(FakeTransport(), _options(clock))
+    adapter.subscribe(SYMBOL)
+
+    event = adapter.process_payload(_frame(GOLDEN_DP))
+
+    assert event.event_type == fyers_socket.TYPE_DEPTH_UPDATE == "dp"
+    assert event.kind == fyers_socket.KIND_SYMBOL
+    assert event.validation_status == fyers_socket.VALID
+    for level in range(1, 6):
+        for side in ("bid", "ask"):
+            price = f"{side}_price{level}"
+            size = f"{side}_size{level}"
+            orders = f"{side}_order{level}"
+            assert event.fields[price] == GOLDEN_DP[price]
+            assert event.fields[size] == GOLDEN_DP[size]
+            assert isinstance(event.fields[size], int)
+            assert not isinstance(event.fields[size], bool)
+            assert event.fields[orders] == GOLDEN_DP[orders]
+    assert "ltp" not in event.fields
+
+
+def test_control_frames_do_not_require_symbol_or_ltp():
+    """cn, symbol-less sub and error frames are handled without a tick."""
+    clock = FakeClock()
+    transport = FakeTransport()
+    adapter = _connected(transport, _options(clock))
+    bare_sub = {"type": "sub", "code": 200, "s": "ok"}
+    untyped_error = {"code": 403, "message": "synthetic", "s": "error"}
+
+    connection = adapter.process_payload(_frame(GOLDEN_CN))
+    subscription = adapter.process_payload(_frame(bare_sub))
+    error = adapter.process_payload(_frame(GOLDEN_ERROR))
+    untyped = adapter.process_payload(_frame(untyped_error))
+    transport.queued.append(_frame(GOLDEN_CN))
+    polled = adapter.poll(0)[0]
+
+    assert [connection.event_type, subscription.event_type] == ["cn", "sub"]
+    assert [error.event_type, untyped.event_type] == ["error", "error"]
+    assert [connection.validation_status, subscription.validation_status] == [
+        fyers_socket.VALID,
+        fyers_socket.VALID,
+    ]
+    assert error.validation_status == fyers_socket.ERROR
+    assert untyped.validation_status == fyers_socket.ERROR
+    assert untyped.completeness == fyers_socket.INCOMPLETE
+    assert all(event.symbol == "" for event in (connection, subscription))
+    assert all("ltp" not in event.fields for event in (connection, error))
+    assert polled.event_type == fyers_socket.TYPE_CONNECTION
+    assert adapter.status()["heartbeat_fresh"] is True
+
+
+def test_subscription_ack_marks_subscription_fresh():
+    """A sub ack establishes subscription freshness, not event freshness."""
+    clock = FakeClock()
+    adapter = _connected(FakeTransport(), _options(clock))
+    adapter.subscribe(SYMBOL)
+    assert adapter.is_subscription_fresh(SYMBOL) is False
+
+    adapter.process_payload(_frame(GOLDEN_SUB))
+
+    freshness = adapter.symbol_freshness(SYMBOL)
+    assert adapter.is_subscription_fresh(SYMBOL) is True
+    assert freshness.ack_monotonic_ns == clock.monotonic_ns()
+    assert freshness.last_receive_monotonic_ns == clock.monotonic_ns()
+    assert freshness.last_valid_event_monotonic_ns is None
+    assert adapter.is_symbol_fresh(SYMBOL) is False
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        1.5,
+        100.0,
+        True,
+        False,
+        "3045212",
+        "3.0",
+        -1,
+        2**63,
+        10**30,
+    ],
+)
+def test_exact_integer_volume_rejects_invalid_representations(invalid):
+    """Volume accepts exact bounded ints only; nothing is int()-truncated."""
     clock = FakeClock()
     events: list[fyers_socket.CanonicalEvent] = []
     adapter = _connected(FakeTransport(), _options(clock, events))
-    bad = b'{"symbol": "NSE:SBIN-EQ", "ltp": "not-a-number"}'
+    adapter.subscribe(SYMBOL)
+    frame = _frame({**GOLDEN_SF, "vol_traded_today": invalid})
 
-    event = adapter.process_payload(bad)
+    event = adapter.process_payload(frame)
 
     assert event.validation_status == fyers_socket.MALFORMED
     assert event.completeness == fyers_socket.INCOMPLETE
-    assert event.raw_payload == bad
-    assert event.raw_sha256 == hashlib.sha256(bad).hexdigest()
-    assert event.canonical_instrument_id is None
     assert event.fields == {}
-    assert events[0].as_dict()["raw_payload"] == bad.decode("utf-8")
+    assert event.raw_payload == frame
+    assert event.raw_sha256 == hashlib.sha256(frame).hexdigest()
+    assert adapter.is_symbol_fresh(SYMBOL) is False
+    assert events[0].validation_status == fyers_socket.MALFORMED
 
-    duplicate_key = b'{"symbol":"A","symbol":"B","ltp":1.0}'
-    rejected = adapter.process_payload(duplicate_key)
-    assert rejected.validation_status == fyers_socket.MALFORMED
+
+def test_exact_integer_bounds_apply_to_all_quantity_fields():
+    """Depth sizes, order counts and timestamps share the integer gate."""
+    clock = FakeClock()
+    adapter = _connected(FakeTransport(), _options(clock))
+    adapter.subscribe(SYMBOL)
+
+    valid = adapter.process_payload(
+        _frame({**GOLDEN_SF, "vol_traded_today": 10**12})
+    )
+    assert valid.validation_status == fyers_socket.VALID
+    assert valid.fields["vol_traded_today"] == 10**12
+
+    bad_size = adapter.process_payload(_frame({**GOLDEN_DP, "bid_size1": 20.5}))
+    bad_order = adapter.process_payload(
+        _frame({**GOLDEN_DP, "ask_order1": "4"})
+    )
+    bad_bool = adapter.process_payload(
+        _frame({**GOLDEN_DP, "bid_order2": True})
+    )
+    bad_time = adapter.process_payload(
+        _frame({**GOLDEN_SF, "last_traded_time": -1})
+    )
+    assert all(
+        event.validation_status == fyers_socket.MALFORMED
+        for event in (bad_size, bad_order, bad_bool, bad_time)
+    )
+
+
+def test_malformed_frame_is_retained_and_attributed():
+    """Bad frames stay raw and update receive time but not valid-event time."""
+    clock = FakeClock()
+    adapter = _connected(FakeTransport(), _options(clock))
+    adapter.subscribe(SYMBOL)
+    malformed = b'{"type":"sf","symbol":"NSE:SBIN-EQ","ltp":"not-a-number"}'
+
+    event = adapter.process_payload(malformed)
+    duplicate_keys = adapter.process_payload(
+        b'{"symbol":"A","symbol":"B","ltp":1.0}'
+    )
+    bad_utf8 = adapter.process_payload(b"\xff\xfe")
+
+    assert event.validation_status == fyers_socket.MALFORMED
+    assert duplicate_keys.validation_status == fyers_socket.MALFORMED
+    assert bad_utf8.validation_status == fyers_socket.MALFORMED
+    assert event.raw_payload == malformed
+    freshness = adapter.symbol_freshness(SYMBOL)
+    assert freshness.last_receive_monotonic_ns == clock.monotonic_ns()
+    assert freshness.last_valid_event_monotonic_ns is None
 
 
 def test_duplicate_event_detected():
@@ -239,79 +470,220 @@ def test_duplicate_event_detected():
     clock = FakeClock()
     events: list[fyers_socket.CanonicalEvent] = []
     adapter = _connected(FakeTransport(), _options(clock, events))
-    frame = _frame(SYMBOL, 100.5)
+    frame = _frame(GOLDEN_SF)
 
     first = adapter.process_payload(frame)
     second = adapter.process_payload(frame)
-    third = adapter.process_payload(_frame(SYMBOL, 100.75))
+    third = adapter.process_payload(_frame({**GOLDEN_SF, "ltp": 607.0}))
 
-    assert first.duplicate is False
-    assert second.duplicate is True
-    assert third.duplicate is False
+    assert [first.duplicate, second.duplicate, third.duplicate] == [
+        False,
+        True,
+        False,
+    ]
     assert first.raw_sha256 == second.raw_sha256
-    assert [e.as_dict()["duplicate"] for e in events] == [
+    assert [item.as_dict()["duplicate"] for item in events] == [
         False,
         True,
         False,
     ]
 
 
-def test_stale_feed_detected():
-    """Quiet feeds are marked stale from the monotonic clock."""
+def test_feed_health_never_implies_instrument_freshness():
+    """A healthy feed does not make quiet instruments fresh."""
     clock = FakeClock()
     adapter = _connected(FakeTransport(), _options(clock, stale_after_ns=100))
+    adapter.subscribe(SYMBOL)
+    adapter.subscribe(INDEX)
 
-    first = adapter.process_payload(_frame(SYMBOL, 100.0))
-    assert first.stale is False
-    assert adapter.is_stale() is False
+    assert adapter.is_heartbeat_fresh() is False
+    assert adapter.heartbeat() is True
+    assert adapter.feed_healthy() is True
+    assert adapter.feed_health() == adapter.feed_healthy()
+    assert adapter.is_symbol_fresh(SYMBOL) is False
+    assert adapter.is_symbol_fresh(INDEX) is False
+
+    adapter.process_payload(_frame(GOLDEN_SF))
+    assert adapter.feed_healthy() is True
+    assert adapter.is_symbol_fresh(SYMBOL) is True
+    assert adapter.is_symbol_fresh(INDEX) is False
+
+    adapter.process_payload(_frame({**GOLDEN_SUB, "symbol": INDEX}))
+    assert adapter.is_subscription_fresh(INDEX) is True
+    assert adapter.is_symbol_fresh(INDEX) is False
+    adapter.process_payload(_frame(GOLDEN_IF))
+    assert adapter.is_symbol_fresh(INDEX) is True
 
     clock.advance(101)
     assert adapter.is_stale() is True
-    late = adapter.process_payload(_frame(SYMBOL, 101.0))
-    assert late.stale is True
+    assert adapter.feed_healthy() is False
+    assert adapter.is_heartbeat_fresh() is False
+    assert adapter.is_symbol_fresh(SYMBOL) is False
+    assert adapter.is_subscription_fresh(INDEX) is False
 
 
-def test_reconnect_with_gap_and_recovery_snapshot():
-    """Reconnect records a gap and recovery reconciles a current snapshot."""
+def test_subscription_freshness_resets_across_reconnect():
+    """Reconnection invalidates old acks until a new ack arrives."""
+    clock = FakeClock()
+    adapter = _connected(FakeTransport(), _options(clock))
+    adapter.subscribe(SYMBOL)
+    adapter.process_payload(_frame(GOLDEN_SUB))
+    assert adapter.is_subscription_fresh(SYMBOL) is True
+
+    adapter.reconnect(TOKEN)
+
+    assert adapter.is_subscription_fresh(SYMBOL) is False
+    adapter.process_payload(_frame(GOLDEN_SUB))
+    assert adapter.is_subscription_fresh(SYMBOL) is True
+
+
+def test_failed_reconnect_attempts_preserve_gap_and_allow_retry():
+    """REGRESSION: three failed attempts leave the gap open for a retry."""
     clock = FakeClock()
     transport = FakeTransport()
-    events: list[fyers_socket.CanonicalEvent] = []
-    adapter = _connected(transport, _options(clock, events))
+    adapter = _connected(transport, _options(clock, max_retries=1))
+    transport.open_failures = 3
     adapter.subscribe(SYMBOL)
-    adapter.subscribe(INDEX)
     before = adapter.status()["connection_id"]
+
+    for _ in range(3):
+        with pytest.raises(fyers_socket.ConnectionFailedError):
+            adapter.reconnect(TOKEN)
+        state = adapter.status()
+        assert state["open_gap"] is True
+        assert state["connected"] is False
+        assert state["gaps"] == ()
+        assert state["unresolved_gap"].gap_id == "gap-2"
+        assert state["connection_id"] == before
 
     gap = adapter.reconnect(TOKEN)
 
-    assert gap.classification == fyers_socket.UNRECOVERABLE
+    assert gap.gap_id == "gap-2"
     assert gap.connection_id_before == before
     assert gap.connection_id_after == adapter.status()["connection_id"]
-    assert before != adapter.status()["connection_id"]
-    assert transport.closed == 1
-    assert adapter.status()["open_gap"] is True
-    assert adapter.status()["subscriptions"] == {SYMBOL: True, INDEX: True}
+    assert len(transport.opens) == 5
+    assert adapter.status()["subscriptions"] == {SYMBOL: True}
 
-    live = adapter.process_payload(_frame(SYMBOL, 102.0))
+    live = adapter.process_payload(_frame(GOLDEN_SF))
     assert live.gap is gap
     assert live.completeness == fyers_socket.INCOMPLETE
 
-    recovered = adapter.reconcile_snapshot(
-        {SYMBOL: {"ltp": 103.0}, INDEX: {"ltp": 24010.0}}
+    adapter.reconcile_snapshot({SYMBOL: {"ltp": 610.0}})
+    assert adapter.status()["gaps"][0].classification == (
+        fyers_socket.STATE_RECONCILED
     )
-    assert len(recovered) == 2
-    assert all(e.event_type == fyers_socket.EVENT_SNAPSHOT for e in recovered)
-    assert all(e.completeness == fyers_socket.COMPLETE for e in recovered)
-    assert all(e.gap is not None for e in recovered)
 
-    closed = adapter.status()["gaps"][0]
-    assert closed.classification == fyers_socket.RECOVERABLE
-    assert closed.covered_symbols == (SYMBOL, INDEX)
-    assert closed.missing_symbols == ()
+
+def test_close_gap_without_active_connection():
+    """Closing an open gap needs no live transport or connection."""
+    clock = FakeClock()
+    transport = FakeTransport()
+    adapter = _connected(transport, _options(clock, max_retries=1))
+    transport.open_failures = 1
+    adapter.subscribe(SYMBOL)
+    with pytest.raises(fyers_socket.ConnectionFailedError):
+        adapter.reconnect(TOKEN)
+    assert adapter.status()["connected"] is False
+
+    markers = adapter.mark_unrecoverable()
+
+    assert [event.event_type for event in markers] == [
+        fyers_socket.EVENT_GAP_MARKER
+    ]
+    assert markers[0].completeness == fyers_socket.INCOMPLETE
+    assert adapter.status()["gaps"][0].classification == (
+        fyers_socket.UNRECOVERABLE
+    )
     assert adapter.status()["open_gap"] is False
 
 
-def test_unrecoverable_gap_marked_incomplete():
-    """With no snapshot every missed symbol is an explicit gap marker."""
+def test_snapshot_cannot_claim_history_recovery():
+    """A fresh snapshot establishes state reconciliation only."""
+    clock = FakeClock()
+    adapter = _connected(FakeTransport(), _options(clock))
+    adapter.subscribe(SYMBOL)
+    adapter.subscribe(INDEX)
+
+    adapter.reconnect(TOKEN)
+    events = adapter.reconcile_snapshot(
+        {SYMBOL: {"ltp": 610.0}, INDEX: {"ltp": 26200.0}}
+    )
+    closed = adapter.status()["gaps"][0]
+
+    assert closed.classification == fyers_socket.STATE_RECONCILED
+    assert closed.classification != fyers_socket.HISTORY_RECOVERED
+    assert closed.source == "SNAPSHOT"
+    assert closed.authoritative is False
+    assert all(
+        event.event_type == fyers_socket.EVENT_SNAPSHOT for event in events
+    )
+    assert all(event.completeness == fyers_socket.COMPLETE for event in events)
+    assert adapter.symbol_freshness(SYMBOL).reconciliation_status == (
+        fyers_socket.STATE_RECONCILED
+    )
+
+    adapter.reconnect(TOKEN)
+    adapter.reconcile_snapshot(
+        {SYMBOL: {"ltp": 611.0}, INDEX: {"ltp": 26201.0}}
+    )
+    assert fyers_socket.HISTORY_RECOVERED not in {
+        gap.classification for gap in adapter.status()["gaps"]
+    }
+
+
+def test_authoritative_backfill_establishes_history_recovery():
+    """Only an authoritative backfill can close a gap as history recovered."""
+    clock = FakeClock()
+    adapter = _connected(FakeTransport(), _options(clock))
+    adapter.subscribe(SYMBOL)
+    adapter.subscribe(INDEX)
+
+    adapter.reconnect(TOKEN)
+    adapter.recover_history({SYMBOL: {"ltp": 610.0}, INDEX: {"ltp": 26200.0}})
+    recovered = adapter.status()["gaps"][0]
+    assert recovered.classification == fyers_socket.HISTORY_RECOVERED
+    assert recovered.source == "BACKFILL"
+    assert recovered.authoritative is True
+    assert adapter.symbol_freshness(INDEX).reconciliation_status == (
+        fyers_socket.HISTORY_RECOVERED
+    )
+
+    adapter.reconnect(TOKEN)
+    partial = adapter.recover_history({SYMBOL: {"ltp": 611.0}})
+    incomplete = adapter.status()["gaps"][1]
+    assert incomplete.classification == fyers_socket.HISTORY_INCOMPLETE
+    assert incomplete.missing_symbols == (INDEX,)
+    assert any(
+        event.event_type == fyers_socket.EVENT_GAP_MARKER for event in partial
+    )
+
+    adapter.reconnect(TOKEN)
+    gap = adapter.status()["unresolved_gap"]
+    adapter.recover_history(
+        {SYMBOL: {"ltp": 612.0}, INDEX: {"ltp": 26202.0}},
+        covered_from_ns=gap.started_monotonic_ns + 1,
+    )
+    assert adapter.status()["gaps"][2].classification == (
+        fyers_socket.HISTORY_INCOMPLETE
+    )
+
+
+def test_non_authoritative_backfill_is_only_state_reconciled():
+    """A backfill without authority cannot assert recovered history."""
+    clock = FakeClock()
+    adapter = _connected(FakeTransport(), _options(clock))
+    adapter.subscribe(SYMBOL)
+    adapter.reconnect(TOKEN)
+
+    adapter.apply_backfill({SYMBOL: {"ltp": 610.0}}, authoritative=False)
+
+    closed = adapter.status()["gaps"][0]
+    assert closed.classification == fyers_socket.STATE_RECONCILED
+    assert closed.authoritative is False
+
+
+def test_unrecoverable_gap_marks_all_symbols_incomplete():
+    """With no data every missed symbol is an explicit gap marker."""
     clock = FakeClock()
     events: list[fyers_socket.CanonicalEvent] = []
     adapter = _connected(FakeTransport(), _options(clock, events))
@@ -321,23 +693,26 @@ def test_unrecoverable_gap_marked_incomplete():
     adapter.reconnect(TOKEN)
     markers = adapter.mark_unrecoverable()
 
-    assert [e.event_type for e in markers] == [
+    assert [event.event_type for event in markers] == [
         fyers_socket.EVENT_GAP_MARKER,
         fyers_socket.EVENT_GAP_MARKER,
     ]
-    assert all(e.completeness == fyers_socket.INCOMPLETE for e in markers)
+    assert all(
+        event.completeness == fyers_socket.INCOMPLETE for event in markers
+    )
     closed = adapter.status()["gaps"][0]
     assert closed.classification == fyers_socket.UNRECOVERABLE
     assert closed.covered_symbols == ()
     assert closed.missing_symbols == (SYMBOL, INDEX)
-    assert [e.event_type for e in events] == [
-        fyers_socket.EVENT_GAP_MARKER,
-        fyers_socket.EVENT_GAP_MARKER,
-    ]
+    assert all(
+        adapter.symbol_freshness(symbol).reconciliation_status
+        == fyers_socket.UNRECOVERABLE
+        for symbol in (SYMBOL, INDEX)
+    )
 
 
 def test_consecutive_reconnects_preserve_each_gap():
-    """A second reconnect cannot overwrite an unreconciled earlier gap."""
+    """A second reconnect cannot overwrite an unresolved earlier gap."""
     clock = FakeClock()
     events: list[fyers_socket.CanonicalEvent] = []
     adapter = _connected(FakeTransport(), _options(clock, events))
@@ -357,42 +732,37 @@ def test_consecutive_reconnects_preserve_each_gap():
     ]
 
 
-def test_partial_recovery_marks_missing_symbol_incomplete():
-    """A partial snapshot only recovers the symbols it actually covers."""
+def test_shutdown_preserves_unresolved_gap_evidence():
+    """Shutdown closes the transport but retains an unresolved gap."""
     clock = FakeClock()
-    adapter = _connected(FakeTransport(), _options(clock))
+    transport = FakeTransport()
+    adapter = _connected(transport, _options(clock))
     adapter.subscribe(SYMBOL)
-    adapter.subscribe(INDEX)
+    gap = adapter.reconnect(TOKEN)
+    closes_before_shutdown = transport.closed
 
-    adapter.reconnect(TOKEN)
-    recovered = adapter.reconcile_snapshot({SYMBOL: {"ltp": 103.0}})
+    adapter.shutdown()
+    adapter.shutdown()
 
-    by_symbol = {event.symbol: event for event in recovered}
-    assert by_symbol[SYMBOL].completeness == fyers_socket.COMPLETE
-    assert by_symbol[INDEX].completeness == fyers_socket.INCOMPLETE
-    assert by_symbol[INDEX].event_type == fyers_socket.EVENT_GAP_MARKER
-    assert adapter.status()["gaps"][0].classification == fyers_socket.PARTIAL
-
-
-def test_invalid_snapshot_entry_stays_incomplete():
-    """An invalid recovery snapshot cannot convert a gap into continuity."""
-    clock = FakeClock()
-    adapter = _connected(FakeTransport(), _options(clock))
-    adapter.subscribe(SYMBOL)
-    adapter.subscribe(INDEX)
-
-    adapter.reconnect(TOKEN)
-    recovered = adapter.reconcile_snapshot({SYMBOL: {}})
-
-    assert recovered[0].validation_status == fyers_socket.MALFORMED
-    assert recovered[0].completeness == fyers_socket.INCOMPLETE
-    closed = adapter.status()["gaps"][0]
-    assert closed.classification == fyers_socket.UNRECOVERABLE
-    assert closed.missing_symbols == (SYMBOL, INDEX)
+    state = adapter.status()
+    assert transport.closed == closes_before_shutdown + 1
+    assert state["closed"] is True
+    assert state["connected"] is False
+    assert state["open_gap"] is True
+    assert state["unresolved_gap"] is gap
+    assert gap in state["gap_evidence"]
+    assert state["gaps"] == ()
+    assert state["subscriptions"] == {SYMBOL: False}
+    with pytest.raises(fyers_socket.ShutdownError):
+        adapter.heartbeat()
+    with pytest.raises(fyers_socket.ShutdownError):
+        adapter.process_payload(_frame(GOLDEN_SF))
+    with pytest.raises(fyers_socket.ShutdownError):
+        adapter.connect(TOKEN)
 
 
 def test_subscription_limits_and_tracking():
-    """Subscriptions are bounded, deduplicated and explicitly tracked."""
+    """Subscriptions are bounded and deduplicated."""
     clock = FakeClock()
     transport = FakeTransport()
     adapter = _connected(transport, _options(clock, max_subscriptions=2))
@@ -404,34 +774,11 @@ def test_subscription_limits_and_tracking():
         adapter.subscribe("NSE:RELIANCE-EQ")
     with pytest.raises(fyers_socket.SubscriptionError):
         adapter.subscribe("NSE:TEST-EQ", kind="future")
-    assert adapter.status()["subscriptions"] == {SYMBOL: True, INDEX: True}
 
     assert adapter.unsubscribe(SYMBOL) is True
     assert adapter.unsubscribe(SYMBOL) is False
     assert adapter.subscribe("NSE:RELIANCE-EQ") is True
     assert any('"unsubscribe"' in frame for frame in transport.frames)
-
-
-def test_controlled_shutdown_is_idempotent():
-    """Shutdown closes once and makes all later operations fail."""
-    clock = FakeClock()
-    transport = FakeTransport()
-    adapter = _connected(transport, _options(clock))
-    adapter.subscribe(SYMBOL)
-
-    adapter.shutdown()
-    adapter.shutdown()
-
-    assert transport.closed == 1
-    assert adapter.status()["closed"] is True
-    assert adapter.status()["connected"] is False
-    assert adapter.status()["subscriptions"] == {SYMBOL: False}
-    with pytest.raises(fyers_socket.ShutdownError):
-        adapter.heartbeat()
-    with pytest.raises(fyers_socket.ShutdownError):
-        adapter.process_payload(_frame(SYMBOL, 1.0))
-    with pytest.raises(fyers_socket.ShutdownError):
-        adapter.connect(TOKEN)
 
 
 def test_network_disabled_unless_opted_in():
@@ -486,17 +833,31 @@ def test_general_websocket_is_forbidden():
     adapter.validate_endpoint(fyers_socket.DATA_SOCKET_ENDPOINT)
 
 
+def test_import_performs_no_network_io():
+    """Importing the adapter never touches a socket."""
+    probe_spec = importlib.util.spec_from_file_location(
+        "quant_fyers_socket_probe", ROOT / "python" / "fyers_socket.py"
+    )
+    assert probe_spec is not None and probe_spec.loader is not None
+    probe = importlib.util.module_from_spec(probe_spec)
+    with patch.object(socket, "socket", side_effect=AssertionError("network")):
+        probe_spec.loader.exec_module(probe)
+    assert probe.GENERAL_WEBSOCKET_ENABLED is False
+    assert probe.DATA_SOCKET_ENDPOINT.startswith("wss://datastream.fyers.in")
+
+
 def test_caller_token_is_not_retained():
     """The read-only token stays with the caller and never enters events."""
     clock = FakeClock()
     events: list[fyers_socket.CanonicalEvent] = []
-    adapter = _connected(FakeTransport(), _options(clock, events))
+    transport = FakeTransport()
+    adapter = _connected(transport, _options(clock, events))
     adapter.subscribe(SYMBOL)
-
     adapter.reconnect(TOKEN)
-    adapter.process_payload(_frame(SYMBOL, 104.0))
+    adapter.process_payload(_frame(GOLDEN_SF))
     adapter.mark_unrecoverable()
 
     assert all(TOKEN not in str(value) for value in vars(adapter).values())
     assert TOKEN not in str(adapter.status())
     assert all(TOKEN not in str(event.as_dict()) for event in events)
+    assert all(TOKEN not in frame for frame in transport.frames)
