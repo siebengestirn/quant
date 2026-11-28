@@ -20,8 +20,8 @@ status and eligibility stay separate; one never implies another.
 
 ## 3. Valid time and observation time
 Each observation carries a half-open validity interval
-`[valid_from, valid_to)`: start inclusive, end exclusive. A null bound means
-UNKNOWN, never a date inferred from the earliest snapshot. The legacy
+`[valid_from, valid_to)`: start inclusive, end exclusive. A null bound is
+never inferred from a snapshot or from an observation timestamp. The legacy
 crosswalk keeps its snapshot-derived `effective_from` field for backwards
 compatibility; that value is an observation date, not a validity start.
 Observation time is `observed_at` (source report) plus `ingested_at` (when
@@ -29,8 +29,24 @@ QUANT saw it). A correction is a new row; earlier queries still return the
 original fact.
 
 ```text
-market_date in [valid_from, valid_to) AND knowledge_time <= as_of
+market_date in [valid_from, valid_to) AND knowledge_time <= observed_at
 ```
+
+Every selected value carries an explicit validity assessment. A known
+interval requires `valid_to > valid_from`.
+
+| State | Meaning | Proven |
+| --- | --- | --- |
+| `KNOWN_INTERVAL` | Both bounds attested, date inside interval. | Yes |
+| `OPEN_ENDED` | Start attested, no end; date on or after start. | Yes |
+| `UNKNOWN_INTERVAL` | Start absent; no date inferred. | No |
+
+An observation whose known bounds exclude the market date is not selected at
+all. An unknown-interval observation is selected with `UNKNOWN_INTERVAL` and
+`proven_valid == False`; a state's `attribute_validity` reports the assessment
+per attribute. `as_of(..., proven_valid_only=True)` excludes unknown-interval
+rows. Reversed or equal bounds, naive timestamps and missing or malformed
+provenance are rejected before any row is stored.
 
 ## 4. Provider coverage and conformance
 Coverage is its own dimension: SINGLE_SOURCE or MULTI_SOURCE. Agreement
@@ -48,21 +64,51 @@ Provider trading status (ACTIVE/INACTIVE/UNKNOWN), exchange status
 affirmative value in every dimension: VERIFIED identity, MULTI_SOURCE
 coverage, PASS conformance, ACTIVE provider trading, OPEN exchange,
 ALLOWED exchange eligibility and FRESH data. Unknown, stale, conflicting
-or single-source evidence returns NOT_ELIGIBLE.
+or single-source evidence returns NOT_ELIGIBLE. A `UNKNOWN_INTERVAL` state is
+never proven-valid: consumers that require attested bounds use
+`proven_valid_only` or reject `proven_valid == False`. No alias status,
+knowledge time or ID collision can substitute for an affirmative gate.
 
 ## 6. Consumer API
 ```python
 registry = im.build_registry(observations)
 states = registry.as_of("2026-11-26", "2026-11-27T14:00:00Z")
-state = registry.resolve(canonical_id_or_provider_alias, as_of)
+proven = registry.as_of("2026-11-26", "2026-11-27T14:00:00Z",
+                        proven_valid_only=True)
+state = registry.resolve(canonical_id_or_provider_alias,
+                         market_date="2026-11-26",
+                         observed_at="2026-11-27T14:00:00Z")
+resolution = registry.resolve_alias(alias, "2026-11-26",
+                                    "2026-11-27T14:00:00Z")
 coverage = registry.provider_coverage(canonical_id)
 ```
-`resolve` accepts a stable canonical ID or provider alias and returns the
-state known at that timestamp. `as_of` returns the whole universe at one
-market date and observation time, including unknown effective dates.
-Module-level forms of all three calls delegate to the registry.
+`resolve` takes market date and observation time as independent axes; the
+market date is never derived from the observation timestamp. A lone timestamp
+call is a legacy wrapper that derives the market date from it and is not a
+bitemporal query. `as_of` returns the whole universe with each value's
+validity assessment. Module-level forms of the queries delegate to the
+registry.
 
-## 7. Evidence hygiene
+Alias resolution is fail-closed and reports `RESOLVED`, `NOT_FOUND`,
+`NOT_YET_VALID`, `EXPIRED`, `AMBIGUOUS` or `TOKEN_REUSE` with the claimant IDs.
+Only `RESOLVED` yields a canonical ID:
+
+- an expired or not-yet-valid alias cannot resolve at that market date;
+- overlapping claimants return `AMBIGUOUS` and no arbitrary selection;
+- sequential claimants return `TOKEN_REUSE`, also listed by
+  `detect_token_reuse()`;
+- unknown validity is preserved as `UNKNOWN_INTERVAL` and never converted
+  into an asserted bound.
+
+## 7. Snapshot conversion
+`observations_from_snapshots()` parses the digest-pinned reference snapshots
+into append-only observations. The snapshot `market_date` is recorded as a
+provider-scoped observation attribute (evidence of what was observed when),
+not as `valid_from`: no source establishes an effective date, so both validity
+bounds remain unknown. Every row carries the snapshot digest, version and
+observation timestamp; unknown effective dates stay unknown in the registry.
+
+## 8. Evidence hygiene
 The report from `scripts/fetch_instrument_snapshots.py` uses tracked
 reference-data bytes when present, stores only relative paths and never
 embeds machine-local directories. `scripts/release_bundle.py` stages one
@@ -71,10 +117,10 @@ pre-bundle historical input, excluded from staging and rejected by verify.
 Tests in `tests/test_instrument_master.py` and `tests/test_release_bundle.py`
 cover both behaviours.
 
-## 8. Explicit limitations
-No captured source establishes a validity start or end, so effective dates
-are unknown and snapshots cover one market date only. No source feeds
-exchange status, exchange eligibility or data freshness; those stay UNKNOWN
-and nothing is eligible. Live consistency, historical backfill, durable
-storage, cross-language consumers and full W1 exit are NOT IMPLEMENTED.
-Nothing here authorises trading.
+## 9. Explicit limitations
+No captured source establishes a validity start or end, so converted
+effective dates are unknown and snapshots cover one market date only. No
+source feeds exchange status, exchange eligibility or data freshness; those
+stay UNKNOWN and nothing is eligible. Live consistency, historical backfill,
+durable storage, cross-language consumers and full W1 exit are NOT
+IMPLEMENTED. Nothing here authorises trading.

@@ -13,7 +13,9 @@ implies that comparable contract fields agree. The legacy crosswalk reports
 the snapshot market_date as a partial, snapshot-derived observation date; the
 bitemporal registry never infers a validity date from it and keeps unknown
 effective_from and effective_to values unknown until a source establishes
-them.
+them. Each value carries a validity assessment; unknown intervals are never
+proven-valid. Queries separate market date and observation time, and aliases
+obey their own market validity intervals.
 """
 
 from __future__ import annotations
@@ -81,6 +83,17 @@ PROVIDER_COVERAGE_STATUSES = (SINGLE_SOURCE, MULTI_SOURCE, UNKNOWN)
 EXCHANGE_STATUSES = (OPEN, PREOPEN, SUSPENDED, UNKNOWN)
 EXCHANGE_ELIGIBILITY_STATUSES = (ALLOWED, DISALLOWED, UNKNOWN)
 DATA_FRESHNESS_STATUSES = (FRESH, STALE, INVALID, UNKNOWN)
+
+KNOWN_INTERVAL = "KNOWN_INTERVAL"
+OPEN_ENDED = "OPEN_ENDED"
+UNKNOWN_INTERVAL = "UNKNOWN_INTERVAL"
+VALIDITY_STATES = (KNOWN_INTERVAL, OPEN_ENDED, UNKNOWN_INTERVAL)
+
+RESOLVED = "RESOLVED"
+NOT_FOUND = "NOT_FOUND"
+NOT_YET_VALID = "NOT_YET_VALID"
+EXPIRED = "EXPIRED"
+TOKEN_REUSE = "TOKEN_REUSE"
 
 MISSING_PROVIDER_KEY = "MISSING_PROVIDER_KEY"
 MISSING_ISIN = "MISSING_ISIN"
@@ -431,6 +444,19 @@ class CrosswalkReport(NamedTuple):
     coverage_counts: Mapping[str, int] = _EMPTY_COUNTS
 
 
+class AliasResolution(NamedTuple):
+    """Alias outcome; ID is set only for a unique, unambiguous claim.
+
+    claimants preserves every distinct ID that ever claimed the alias.
+    """
+
+    identifier: str
+    status: str
+    canonical_instrument_id: str | None
+    validity: str
+    claimants: tuple[str, ...]
+
+
 class Observation(NamedTuple):
     """One append-only observation; corrections are new rows, not edits."""
 
@@ -466,9 +492,21 @@ class InstrumentState:
     quant_eligibility: str
     provider_keys: tuple[str, ...]
     attributes: Mapping[str, object]
+    validity: str
+    attribute_validity: Mapping[str, str]
     source_digest: str
     source_version: str
     registry_version: str
+
+    @property
+    def validity_assessment(self) -> str:
+        """Return the explicit validity state of the selected values."""
+        return self.validity
+
+    @property
+    def proven_valid(self) -> bool:
+        """Return True only when an established interval covers market_date."""
+        return self.validity in (KNOWN_INTERVAL, OPEN_ENDED)
 
     def as_dict(self) -> dict[str, object]:
         """Return a plain mapping, safe for JSON serialisation."""
@@ -493,12 +531,7 @@ class InstrumentRegistry:
         for item in observations:
             if not isinstance(item, Observation):
                 raise ValueError("registry requires Observation records")
-            if not item.canonical_instrument_id or not item.attribute_name:
-                raise ValueError("observation requires identity and attribute")
-            _date(item.valid_from, "valid_from")
-            _date(item.valid_to, "valid_to")
-            _timestamp(item.observed_at)
-            _timestamp(item.ingested_at)
+            _validate_observation(item)
             rows.append(item)
         self._observations = tuple(sorted(rows, key=_order_key))
         self._ids = tuple(
@@ -516,18 +549,27 @@ class InstrumentRegistry:
         return self._ids
 
     def as_of(
-        self, market_date: str, observed_at: str
+        self,
+        market_date: str,
+        observed_at: str,
+        *,
+        proven_valid_only: bool = False,
     ) -> dict[str, InstrumentState]:
-        """Return states valid on a date and known by an observation time."""
-        day = _date(market_date, "market_date")
+        """Return states valid on a date and known by an observation time.
+
+        Unknown intervals carry UNKNOWN_INTERVAL and are never proven-valid;
+        proven_valid_only excludes them.
+        """
+        day = _required_date(market_date, "market_date")
         moment = _timestamp(observed_at)
         selected: dict[str, dict[str, Observation]] = {}
         for row in self._observations:
             if _knowledge_time(row) > moment:
                 continue
-            if row.valid_from is not None and row.valid_from > day:
-                continue
-            if row.valid_to is not None and day >= row.valid_to:
+            validity = validity_status(row, day)
+            if validity is None or (
+                proven_valid_only and validity == UNKNOWN_INTERVAL
+            ):
                 continue
             bucket = selected.setdefault(row.canonical_instrument_id, {})
             current = bucket.get(row.attribute_name)
@@ -538,37 +580,137 @@ class InstrumentRegistry:
             for identity, bucket in selected.items()
         }
 
-    def resolve(self, identifier: str, as_of: str) -> InstrumentState | None:
-        """Resolve a canonical ID or provider key to its historical state."""
-        moment = _timestamp(as_of)
-        identity = self.canonical_id_for(identifier, as_of=as_of)
-        if identity is None:
+    def resolve(
+        self,
+        identifier: str,
+        market_date: str,
+        observed_at: str | None = None,
+    ) -> InstrumentState | None:
+        """Resolve an ID or alias at a market date and observation time.
+
+        Both axes are independent; a lone timestamp is the legacy wrapper.
+        """
+        if observed_at is None:
+            moment = _timestamp(market_date)
+            return self.resolve(
+                identifier, moment.date().isoformat(), market_date
+            )
+        day = _required_date(market_date, "market_date")
+        _timestamp(observed_at)
+        if identifier in self._ids:
+            return self.as_of(day, observed_at).get(identifier)
+        resolution = self.resolve_alias(identifier, day, observed_at)
+        if resolution.canonical_instrument_id is None:
             return None
-        day = moment.date().isoformat()
-        return self.as_of(day, as_of).get(identity)
+        return self.as_of(day, observed_at).get(
+            resolution.canonical_instrument_id
+        )
 
     def canonical_id_for(
-        self, identifier: str, *, as_of: str | None = None
+        self,
+        identifier: str,
+        *,
+        as_of: str | None = None,
+        market_date: str | None = None,
+        observed_at: str | None = None,
     ) -> str | None:
-        """Map a canonical ID or provider alias to its canonical ID."""
-        moment = _timestamp(as_of) if as_of is not None else None
-        known = [
-            row
-            for row in self._observations
-            if moment is None or _knowledge_time(row) <= moment
-        ]
-        known_ids = {row.canonical_instrument_id for row in known}
-        if identifier in known_ids:
+        """Map an ID or alias to a canonical ID using both explicit axes."""
+        if identifier in self._ids:
             return identifier
-        for row in reversed(known):
+        if market_date is None and as_of is None:
+            claimants = {
+                row.canonical_instrument_id
+                for row in self._alias_rows(identifier, None)
+            }
+            return next(iter(claimants)) if len(claimants) == 1 else None
+        if as_of is not None and market_date is None:
+            moment = _timestamp(as_of)
+            market_date = moment.date().isoformat()
+            observed_at = as_of
+        return self.resolve_alias(
+            identifier, market_date or "", observed_at
+        ).canonical_instrument_id
+
+    def resolve_alias(
+        self,
+        identifier: str,
+        market_date: str,
+        observed_at: str | None = None,
+    ) -> AliasResolution:
+        """Resolve an alias with explicit status, validity and claimants."""
+        day = _required_date(market_date, "market_date")
+        moment = _timestamp(observed_at) if observed_at is not None else None
+        rows = self._alias_rows(identifier, moment)
+        claimants = tuple(sorted({row.canonical_instrument_id for row in rows}))
+        if not rows:
+            return AliasResolution(
+                identifier, NOT_FOUND, None, UNKNOWN_INTERVAL, claimants
+            )
+        covering = [
+            (row, validity_status(row, day))
+            for row in rows
+            if validity_status(row, day) is not None
+        ]
+        if not covering:
+            ended = any(
+                row.valid_to is not None and day >= row.valid_to for row in rows
+            )
+            status = EXPIRED if ended else NOT_YET_VALID
+            return AliasResolution(
+                identifier, status, None, UNKNOWN_INTERVAL, claimants
+            )
+        covered = tuple(
+            sorted({row.canonical_instrument_id for row, _ in covering})
+        )
+        if len(covered) > 1:
+            return AliasResolution(
+                identifier, AMBIGUOUS, None, UNKNOWN_INTERVAL, covered
+            )
+        if len(claimants) > 1:
+            return AliasResolution(
+                identifier, TOKEN_REUSE, None, UNKNOWN_INTERVAL, claimants
+            )
+        states = [validity for _, validity in covering]
+        validity = max(states, key=VALIDITY_STATES.index)
+        return AliasResolution(
+            identifier, RESOLVED, covered[0], validity, claimants
+        )
+
+    def detect_token_reuse(
+        self, *, observed_at: str | None = None
+    ) -> tuple[str, ...]:
+        """List aliases claimed by more than one canonical ID."""
+        moment = _timestamp(observed_at) if observed_at is not None else None
+        claims: dict[str, set[str]] = {}
+        for row in self._observations:
+            if moment is not None and _knowledge_time(row) > moment:
+                continue
             parsed = split_provider_attribute(row.attribute_name)
             if parsed is None or parsed[1] != PROVIDER_KEY_ATTRIBUTE:
                 continue
-            provider, _attribute = parsed
+            alias = str(row.attribute_value)
+            if ":" not in alias:
+                alias = provider_alias(parsed[0], alias)
+            claims.setdefault(alias, set()).add(row.canonical_instrument_id)
+        return tuple(
+            sorted(alias for alias, ids in claims.items() if len(ids) > 1)
+        )
+
+    def _alias_rows(
+        self, identifier: str, moment: datetime | None
+    ) -> list[Observation]:
+        """Return known alias rows matching an ID, key or qualified alias."""
+        rows = []
+        for row in self._observations:
+            if moment is not None and _knowledge_time(row) > moment:
+                continue
+            parsed = split_provider_attribute(row.attribute_name)
+            if parsed is None or parsed[1] != PROVIDER_KEY_ATTRIBUTE:
+                continue
             key = str(row.attribute_value)
-            if identifier in (key, provider_alias(provider, key)):
-                return row.canonical_instrument_id
-        return None
+            if identifier in (key, provider_alias(parsed[0], key)):
+                rows.append(row)
+        return rows
 
     def provider_coverage(
         self,
@@ -607,6 +749,15 @@ class InstrumentRegistry:
     ) -> InstrumentState:
         """Build one state from the observations selected for a query."""
         values = {name: row.attribute_value for name, row in bucket.items()}
+        validities = {
+            name: validity_status(row, day) or UNKNOWN_INTERVAL
+            for name, row in bucket.items()
+        }
+        validity = max(
+            validities.values(),
+            key=VALIDITY_STATES.index,
+            default=KNOWN_INTERVAL,
+        )
         providers = set()
         provider_keys = []
         for name, row in bucket.items():
@@ -658,6 +809,8 @@ class InstrumentRegistry:
             quant_eligibility=quant,
             provider_keys=tuple(sorted(provider_keys)),
             attributes=MappingProxyType(dict(values)),
+            validity=validity,
+            attribute_validity=MappingProxyType(validities),
             source_digest=latest.source_digest,
             source_version=latest.source_version,
             registry_version=latest.registry_version,
@@ -714,6 +867,61 @@ def _timestamp(value: object) -> datetime:
     return moment.astimezone(UTC)
 
 
+def _required_date(value: object, label: str) -> str:
+    """Require a real ISO date rather than an inferred or empty value."""
+    if (day := _date(value, label)) is None:
+        raise ValueError(f"{label} is required")
+    return day
+
+
+def validity_status(row: Observation, day: str) -> str | None:
+    """Assess an observation on a market date; None means not applicable."""
+    if row.valid_from is None:
+        if row.valid_to is not None and day >= row.valid_to:
+            return None
+        return UNKNOWN_INTERVAL
+    if day < row.valid_from:
+        return None
+    if row.valid_to is not None and day >= row.valid_to:
+        return None
+    return OPEN_ENDED if row.valid_to is None else KNOWN_INTERVAL
+
+
+_DIGEST_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def _validate_observation(row: Observation) -> None:
+    """Reject malformed identity, intervals, timestamps or provenance."""
+    required = (
+        ("canonical instrument ID", row.canonical_instrument_id),
+        ("attribute name", row.attribute_name),
+        ("source_version", row.source_version),
+        ("registry_version", row.registry_version),
+    )
+    for label, value in required:
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"invalid {label}: {value!r}")
+    start = _date(row.valid_from, "valid_from")
+    end = _date(row.valid_to, "valid_to")
+    if start is not None and end is not None and start >= end:
+        raise ValueError("valid_from must precede valid_to")
+    _timestamp(row.observed_at)
+    _timestamp(row.ingested_at)
+    if row.provider_updated_at not in (None, ""):
+        try:
+            _timestamp(row.provider_updated_at)
+        except ValueError:
+            _date(row.provider_updated_at, "provider_updated_at")
+    if not isinstance(row.source_digest, str) or not _DIGEST_RE.fullmatch(
+        row.source_digest
+    ):
+        raise ValueError(f"invalid source_digest: {row.source_digest!r}")
+    parsed = split_provider_attribute(row.attribute_name)
+    if parsed is not None and parsed[1] == PROVIDER_KEY_ATTRIBUTE:
+        if not isinstance(row.attribute_value, str) or not row.attribute_value:
+            raise ValueError("provider key observation requires a key")
+
+
 def provider_attribute(provider: str, attribute: str) -> str:
     """Return the provider-scoped observation attribute name."""
     if not provider or ":" in provider or not attribute:
@@ -753,12 +961,7 @@ def observation(
     registry_version: str = REGISTRY_VERSION,
 ) -> Observation:
     """Build one observation with explicit validity and observation times."""
-    _date(valid_from, "valid_from")
-    _date(valid_to, "valid_to")
-    if valid_from is not None and valid_to is not None:
-        if valid_from >= valid_to:
-            raise ValueError("valid_from must precede valid_to")
-    return Observation(
+    row = Observation(
         canonical_instrument_id,
         attribute_name,
         attribute_value,
@@ -771,6 +974,8 @@ def observation(
         source_version,
         registry_version,
     )
+    _validate_observation(row)
+    return row
 
 
 def _order_key(row: Observation) -> tuple:
@@ -892,10 +1097,13 @@ def _as_of(
 
 
 def resolve(
-    registry: InstrumentRegistry, identifier: str, observed_at: str
+    registry: InstrumentRegistry,
+    identifier: str,
+    market_date: str,
+    observed_at: str | None = None,
 ) -> InstrumentState | None:
-    """Module-level form of canonical-ID or provider-key resolution."""
-    return registry.resolve(identifier, observed_at)
+    """Module-level two-axis resolution, with a legacy timestamp form."""
+    return registry.resolve(identifier, market_date, observed_at)
 
 
 def _provider_coverage(
@@ -1731,3 +1939,61 @@ def parse_snapshot(
     if provider == PROVIDER_FYERS:
         return parse_fyers(payload, context)
     raise ValueError(f"unsupported provider: {provider}")
+
+
+def observations_from_snapshots(
+    provenance: Path | None = None,
+    reference_root: Path | None = None,
+    payloads: Mapping[str, bytes] | None = None,
+) -> tuple[Observation, ...]:
+    """Convert pinned snapshots to append-only observations.
+
+    market_date is recorded as observation evidence only. No validity bound
+    is inferred from it: effective dates stay unknown until a source asserts
+    them.
+    """
+    root = Path(__file__).resolve().parent.parent
+    provenance = provenance or (
+        root / "governance" / "instrument-master-snapshots.json"
+    )
+    metas = load_provenance(provenance)
+    rows: list[Observation] = []
+    for provider, meta in sorted(metas.items()):
+        context = snapshot_context(meta)
+        if payloads is None:
+            sys.path.insert(0, str(root / "scripts"))
+            fetcher = importlib.import_module("fetch_instrument_snapshots")
+            reference = reference_root or (
+                root / "reference-data" / "instrument-master"
+            )
+            payload = fetcher.decoded_payload(
+                meta, reference, provenance, reference=True
+            )
+        else:
+            payload = payloads[provider]
+        parser = parse_upstox if provider == PROVIDER_UPSTOX else parse_fyers
+        for record in parser(payload, context).records:
+            identity = canonical_id(record)
+            if identity is None:
+                continue
+            fields = {
+                provider_attribute(
+                    provider, PROVIDER_KEY_ATTRIBUTE
+                ): provider_alias(provider, record.provider_key),
+                provider_attribute(provider, "market_date"): record.market_date,
+                ATTR_EFFECTIVE_FROM: None,
+                ATTR_EFFECTIVE_TO: None,
+            }
+            for name, value in fields.items():
+                rows.append(
+                    observation(
+                        identity,
+                        name,
+                        value,
+                        observed_at=context.observed_at_utc,
+                        provider_updated_at=record.provider_update_timestamp,
+                        source_digest=context.source_digest,
+                        source_version=context.source_version,
+                    )
+                )
+    return tuple(rows)
