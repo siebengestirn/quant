@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import inspect
 import json
 import socket
 import sys
@@ -226,6 +227,49 @@ class NetworkFakeTransport(FakeTransport):
 def _resolver(symbol: str, kind: str) -> str | None:
     """Resolve a canonical instrument id without any external lookup."""
     return f"ID::{kind}::{symbol}"
+
+
+def _canonical(symbol: str, kind: str = fyers_socket.KIND_SYMBOL) -> str:
+    """Return the canonical id the test resolver assigns to an instrument."""
+    result = _resolver(symbol, kind)
+    assert result is not None
+    return result
+
+
+def _digest(text: str) -> str:
+    """Return a synthetic SHA-256 digest for one backfill record."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _backfill_records(
+    canonical_id: str,
+    start_ns: int,
+    end_ns: int,
+    *,
+    step_ns: int = 1_000_000_000,
+    source: str = "BACKFILL",
+    with_sequences: bool = True,
+) -> tuple[fyers_socket.BackfillRecord, ...]:
+    """Build synthetic typed history spanning the interval inclusively."""
+    records: list[fyers_socket.BackfillRecord] = []
+    event_ns = start_ns
+    sequence = 1
+    while event_ns <= end_ns:
+        records.append(
+            fyers_socket.BackfillRecord(
+                canonical_instrument_id=canonical_id,
+                event_timestamp=event_ns,
+                receive_timestamp=event_ns + 1,
+                source=source,
+                payload_digest=_digest(f"{canonical_id}:{event_ns}"),
+                provider_sequence_if_available=(
+                    sequence if with_sequences else None
+                ),
+            )
+        )
+        event_ns += step_ns
+        sequence += 1
+    return tuple(records)
 
 
 def _options(
@@ -497,14 +541,23 @@ def test_feed_health_never_implies_instrument_freshness():
     adapter.subscribe(INDEX)
 
     assert adapter.is_heartbeat_fresh() is False
+    assert adapter.inbound_live() is False
+    assert adapter.feed_healthy() is False
     assert adapter.heartbeat() is True
-    assert adapter.feed_healthy() is True
+    assert adapter.is_heartbeat_fresh() is True
+    assert adapter.inbound_live() is False
+    assert adapter.feed_healthy() is False
     assert adapter.feed_health() == adapter.feed_healthy()
     assert adapter.is_symbol_fresh(SYMBOL) is False
     assert adapter.is_symbol_fresh(INDEX) is False
 
+    adapter.process_payload(_frame(GOLDEN_CN))
+    assert adapter.feed_healthy() is True
+    assert adapter.market_active() is False
+
     adapter.process_payload(_frame(GOLDEN_SF))
     assert adapter.feed_healthy() is True
+    assert adapter.market_active() is True
     assert adapter.is_symbol_fresh(SYMBOL) is True
     assert adapter.is_symbol_fresh(INDEX) is False
 
@@ -568,7 +621,7 @@ def test_failed_reconnect_attempts_preserve_gap_and_allow_retry():
     assert live.gap is gap
     assert live.completeness == fyers_socket.INCOMPLETE
 
-    adapter.reconcile_snapshot({SYMBOL: {"ltp": 610.0}})
+    adapter.recover_current_state({SYMBOL: {"ltp": 610.0}})
     assert adapter.status()["gaps"][0].classification == (
         fyers_socket.STATE_RECONCILED
     )
@@ -605,7 +658,7 @@ def test_snapshot_cannot_claim_history_recovery():
     adapter.subscribe(INDEX)
 
     adapter.reconnect(TOKEN)
-    events = adapter.reconcile_snapshot(
+    events = adapter.recover_current_state(
         {SYMBOL: {"ltp": 610.0}, INDEX: {"ltp": 26200.0}}
     )
     closed = adapter.status()["gaps"][0]
@@ -614,6 +667,7 @@ def test_snapshot_cannot_claim_history_recovery():
     assert closed.classification != fyers_socket.HISTORY_RECOVERED
     assert closed.source == "SNAPSHOT"
     assert closed.authoritative is False
+    assert closed.backfill_records == ()
     assert all(
         event.event_type == fyers_socket.EVENT_SNAPSHOT for event in events
     )
@@ -623,7 +677,7 @@ def test_snapshot_cannot_claim_history_recovery():
     )
 
     adapter.reconnect(TOKEN)
-    adapter.reconcile_snapshot(
+    adapter.recover_current_state(
         {SYMBOL: {"ltp": 611.0}, INDEX: {"ltp": 26201.0}}
     )
     assert fyers_socket.HISTORY_RECOVERED not in {
@@ -632,24 +686,59 @@ def test_snapshot_cannot_claim_history_recovery():
 
 
 def test_authoritative_backfill_establishes_history_recovery():
-    """Only an authoritative backfill can close a gap as history recovered."""
+    """Only complete typed history can close a gap as history recovered."""
     clock = FakeClock()
-    adapter = _connected(FakeTransport(), _options(clock))
+    events: list[fyers_socket.CanonicalEvent] = []
+    transport = FakeTransport()
+    adapter = _connected(transport, _options(clock, events))
     adapter.subscribe(SYMBOL)
     adapter.subscribe(INDEX)
 
-    adapter.reconnect(TOKEN)
-    adapter.recover_history({SYMBOL: {"ltp": 610.0}, INDEX: {"ltp": 26200.0}})
+    gap = _reconnect_with_gap(adapter, transport, clock)
+    start_ns = gap.started_wall_clock_ns
+    end_ns = gap.ended_wall_clock_ns
+    symbol_records = _backfill_records(_canonical(SYMBOL), start_ns, end_ns)
+    index_records = _backfill_records(
+        _canonical(INDEX, fyers_socket.KIND_INDEX), start_ns, end_ns
+    )
+    emitted = adapter.recover_event_history(
+        symbol_records + index_records, authoritative=True
+    )
     recovered = adapter.status()["gaps"][0]
+
     assert recovered.classification == fyers_socket.HISTORY_RECOVERED
     assert recovered.source == "BACKFILL"
     assert recovered.authoritative is True
+    assert recovered.covered_symbols == (SYMBOL, INDEX)
+    assert recovered.missing_symbols == ()
+    assert recovered.backfill_records == symbol_records + index_records
+    assert recovered.validation_reasons == ()
+    assert all(
+        event.event_type == fyers_socket.EVENT_BACKFILL for event in emitted
+    )
+    assert len(emitted) == len(symbol_records) + len(index_records)
+    assert {event.raw_sha256 for event in emitted} == {
+        record.payload_digest for record in symbol_records + index_records
+    }
+    assert all(
+        event.canonical_instrument_id is not None
+        and event.canonical_instrument_id.startswith("ID::")
+        for event in emitted
+    )
+    assert all("backfill" in event.fields for event in emitted)
     assert adapter.symbol_freshness(INDEX).reconciliation_status == (
         fyers_socket.HISTORY_RECOVERED
     )
 
-    adapter.reconnect(TOKEN)
-    partial = adapter.recover_history({SYMBOL: {"ltp": 611.0}})
+    partial_gap = _reconnect_with_gap(adapter, transport, clock)
+    partial = adapter.recover_event_history(
+        _backfill_records(
+            _canonical(SYMBOL),
+            partial_gap.started_wall_clock_ns,
+            partial_gap.ended_wall_clock_ns,
+        ),
+        authoritative=True,
+    )
     incomplete = adapter.status()["gaps"][1]
     assert incomplete.classification == fyers_socket.HISTORY_INCOMPLETE
     assert incomplete.missing_symbols == (INDEX,)
@@ -657,11 +746,20 @@ def test_authoritative_backfill_establishes_history_recovery():
         event.event_type == fyers_socket.EVENT_GAP_MARKER for event in partial
     )
 
-    adapter.reconnect(TOKEN)
-    gap = adapter.status()["unresolved_gap"]
-    adapter.recover_history(
-        {SYMBOL: {"ltp": 612.0}, INDEX: {"ltp": 26202.0}},
-        covered_from_ns=gap.started_monotonic_ns + 1,
+    gap = _reconnect_with_gap(adapter, transport, clock)
+    adapter.recover_event_history(
+        _backfill_records(
+            _canonical(SYMBOL),
+            gap.started_wall_clock_ns,
+            gap.ended_wall_clock_ns,
+        )
+        + _backfill_records(
+            _canonical(INDEX, fyers_socket.KIND_INDEX),
+            gap.started_wall_clock_ns,
+            gap.ended_wall_clock_ns,
+        ),
+        authoritative=True,
+        covered_from_ns=gap.started_wall_clock_ns - 1,
     )
     assert adapter.status()["gaps"][2].classification == (
         fyers_socket.HISTORY_INCOMPLETE
@@ -669,17 +767,29 @@ def test_authoritative_backfill_establishes_history_recovery():
 
 
 def test_non_authoritative_backfill_is_only_state_reconciled():
-    """A backfill without authority cannot assert recovered history."""
+    """Authority is explicit and never assumed from a backfill."""
     clock = FakeClock()
-    adapter = _connected(FakeTransport(), _options(clock))
+    transport = FakeTransport()
+    adapter = _connected(transport, _options(clock))
     adapter.subscribe(SYMBOL)
-    adapter.reconnect(TOKEN)
+    gap = _reconnect_with_gap(adapter, transport, clock)
+    parameters = inspect.signature(adapter.recover_event_history).parameters
 
-    adapter.apply_backfill({SYMBOL: {"ltp": 610.0}}, authoritative=False)
+    assert parameters["authoritative"].default is False
+    emitted = adapter.recover_event_history(
+        _backfill_records(
+            _canonical(SYMBOL),
+            gap.started_wall_clock_ns,
+            gap.ended_wall_clock_ns,
+        )
+    )
 
     closed = adapter.status()["gaps"][0]
     assert closed.classification == fyers_socket.STATE_RECONCILED
     assert closed.authoritative is False
+    assert all(
+        event.event_type == fyers_socket.EVENT_BACKFILL for event in emitted
+    )
 
 
 def test_unrecoverable_gap_marks_all_symbols_incomplete():
@@ -835,15 +945,26 @@ def test_general_websocket_is_forbidden():
 
 def test_import_performs_no_network_io():
     """Importing the adapter never touches a socket."""
+    probe_name = "quant_fyers_socket_probe"
     probe_spec = importlib.util.spec_from_file_location(
-        "quant_fyers_socket_probe", ROOT / "python" / "fyers_socket.py"
+        probe_name, ROOT / "python" / "fyers_socket.py"
     )
     assert probe_spec is not None and probe_spec.loader is not None
     probe = importlib.util.module_from_spec(probe_spec)
-    with patch.object(socket, "socket", side_effect=AssertionError("network")):
-        probe_spec.loader.exec_module(probe)
+    # Python 3.13 dataclass processing resolves annotations through
+    # sys.modules; register before exec_module and remove afterwards.
+    sys.modules[probe_name] = probe
+    try:
+        with patch.object(
+            socket, "socket", side_effect=AssertionError("network")
+        ):
+            probe_spec.loader.exec_module(probe)
+    finally:
+        sys.modules.pop(probe_name, None)
+
     assert probe.GENERAL_WEBSOCKET_ENABLED is False
     assert probe.DATA_SOCKET_ENDPOINT.startswith("wss://datastream.fyers.in")
+    assert probe_name not in sys.modules
 
 
 def test_caller_token_is_not_retained():
@@ -861,3 +982,330 @@ def test_caller_token_is_not_retained():
     assert TOKEN not in str(adapter.status())
     assert all(TOKEN not in str(event.as_dict()) for event in events)
     assert all(TOKEN not in frame for frame in transport.frames)
+
+
+def _reconnect_with_gap(
+    adapter: fyers_socket.FyersDataSocket,
+    transport: FakeTransport,
+    clock: FakeClock,
+    duration_ns: int = 10_000_000_000,
+) -> fyers_socket.GapRecord:
+    """Open a gap, leave it unresolved, then restore connectivity later."""
+    transport.open_failures = 3
+    with pytest.raises(fyers_socket.ConnectionFailedError):
+        adapter.reconnect(TOKEN)
+    clock.advance(duration_ns)
+    gap = adapter.reconnect(TOKEN)
+    assert gap.connection_id_after
+    return gap
+
+
+def test_one_snapshot_returns_state_reconciled_only():
+    """REGRESSION: one LTP snapshot cannot claim recovered history."""
+    clock = FakeClock()
+    events: list[fyers_socket.CanonicalEvent] = []
+    transport = FakeTransport()
+    adapter = _connected(transport, _options(clock, events))
+    adapter.subscribe(SYMBOL)
+    gap = _reconnect_with_gap(adapter, transport, clock)
+
+    emitted = adapter.recover_current_state({SYMBOL: {"ltp": 610.0}})
+    closed = adapter.status()["gaps"][0]
+
+    assert len(emitted) == 1
+    assert emitted[0].event_type == fyers_socket.EVENT_SNAPSHOT
+    assert emitted[0].fields["ltp"] == 610.0
+    assert emitted[0].gap is closed
+    assert closed.gap_id == gap.gap_id
+    assert closed.classification == fyers_socket.STATE_RECONCILED
+    assert closed.classification != fyers_socket.HISTORY_RECOVERED
+    assert closed.source == "SNAPSHOT"
+    assert closed.authoritative is False
+    assert all(
+        gap_record.classification != fyers_socket.HISTORY_RECOVERED
+        for gap_record in adapter.status()["gaps"]
+    )
+
+
+def test_snapshot_never_qualifies_as_event_history():
+    """REGRESSION: snapshots passed to history recovery are rejected."""
+    clock = FakeClock()
+    transport = FakeTransport()
+    adapter = _connected(transport, _options(clock))
+    adapter.subscribe(SYMBOL)
+    _reconnect_with_gap(adapter, transport, clock)
+
+    emitted = adapter.recover_event_history(
+        {SYMBOL: {"ltp": 610.0}}, authoritative=True
+    )
+    closed = adapter.status()["gaps"][0]
+
+    assert closed.classification in (
+        fyers_socket.HISTORY_INCOMPLETE,
+        fyers_socket.UNRECOVERABLE,
+    )
+    assert closed.classification != fyers_socket.HISTORY_RECOVERED
+    assert closed.backfill_records == ()
+    assert any(
+        "typed BackfillRecord" in reason for reason in closed.validation_reasons
+    )
+    assert any(
+        event.event_type == fyers_socket.EVENT_GAP_MARKER for event in emitted
+    )
+    assert not any(
+        event.event_type == fyers_socket.EVENT_BACKFILL for event in emitted
+    )
+
+
+def test_partial_backfill_is_history_incomplete():
+    """REGRESSION: history for only one instrument is incomplete."""
+    clock = FakeClock()
+    transport = FakeTransport()
+    adapter = _connected(transport, _options(clock))
+    adapter.subscribe(SYMBOL)
+    adapter.subscribe(INDEX)
+    gap = _reconnect_with_gap(adapter, transport, clock)
+    records = _backfill_records(
+        _canonical(SYMBOL),
+        gap.started_wall_clock_ns,
+        gap.ended_wall_clock_ns,
+    )
+
+    emitted = adapter.recover_event_history(records, authoritative=True)
+    closed = adapter.status()["gaps"][0]
+
+    assert closed.classification == fyers_socket.HISTORY_INCOMPLETE
+    assert closed.covered_symbols == (SYMBOL,)
+    assert closed.missing_symbols == (INDEX,)
+    assert closed.authoritative is False
+    assert any(
+        event.event_type == fyers_socket.EVENT_GAP_MARKER
+        and event.symbol == INDEX
+        for event in emitted
+    )
+    assert any(
+        event.event_type == fyers_socket.EVENT_BACKFILL
+        and event.symbol == SYMBOL
+        and event.completeness == fyers_socket.INCOMPLETE
+        for event in emitted
+    )
+
+
+def test_full_backfill_preserves_every_record():
+    """REGRESSION: full backfill evidence is never collapsed to one point."""
+    clock = FakeClock()
+    transport = FakeTransport()
+    adapter = _connected(transport, _options(clock))
+    adapter.subscribe(SYMBOL)
+    gap = _reconnect_with_gap(adapter, transport, clock)
+    records = _backfill_records(
+        _canonical(SYMBOL),
+        gap.started_wall_clock_ns,
+        gap.ended_wall_clock_ns,
+    )
+
+    emitted = adapter.recover_event_history(records, authoritative=True)
+    closed = adapter.status()["gaps"][0]
+
+    assert closed.classification == fyers_socket.HISTORY_RECOVERED
+    assert closed.backfill_records == records
+    assert len(emitted) == len(records)
+    assert [
+        event.fields["backfill"]["event_timestamp"] for event in emitted
+    ] == [record.event_timestamp for record in records]
+    assert [event.raw_sha256 for event in emitted] == [
+        record.payload_digest for record in records
+    ]
+    assert all(
+        event.event_type == fyers_socket.EVENT_BACKFILL
+        and event.completeness == fyers_socket.COMPLETE
+        for event in emitted
+    )
+
+
+def test_missing_middle_interval_is_history_incomplete():
+    """REGRESSION: an unexplained internal interval blocks recovery."""
+    clock = FakeClock()
+    transport = FakeTransport()
+    adapter = _connected(transport, _options(clock))
+    adapter.subscribe(SYMBOL)
+    gap = _reconnect_with_gap(
+        adapter, transport, clock, duration_ns=30_000_000_000
+    )
+    records = _backfill_records(
+        _canonical(SYMBOL),
+        gap.started_wall_clock_ns,
+        gap.ended_wall_clock_ns,
+        with_sequences=False,
+    )
+    assert len(records) >= 5
+
+    gapped = adapter.recover_event_history(
+        records[:2] + records[-2:], authoritative=True
+    )
+    closed = adapter.status()["gaps"][0]
+
+    assert closed.classification == fyers_socket.HISTORY_INCOMPLETE
+    assert any("internal gap" in reason for reason in closed.validation_reasons)
+    assert any(
+        event.event_type == fyers_socket.EVENT_BACKFILL for event in gapped
+    )
+
+    next_gap = _reconnect_with_gap(adapter, transport, clock)
+    current = _backfill_records(
+        _canonical(SYMBOL),
+        next_gap.started_wall_clock_ns,
+        next_gap.ended_wall_clock_ns,
+    )
+    adapter.recover_event_history(current[:3] + current[4:], authoritative=True)
+    sequence_gap = adapter.status()["gaps"][1]
+    assert sequence_gap.classification == fyers_socket.HISTORY_INCOMPLETE
+    assert any(
+        "sequence gap" in reason for reason in sequence_gap.validation_reasons
+    )
+
+
+def test_backfill_span_order_and_duplicates_are_validated():
+    """Incomplete, out-of-order and duplicated records cannot recover."""
+    clock = FakeClock()
+    transport = FakeTransport()
+    adapter = _connected(transport, _options(clock))
+    adapter.subscribe(SYMBOL)
+    gap = _reconnect_with_gap(adapter, transport, clock)
+    records = _backfill_records(
+        _canonical(SYMBOL),
+        gap.started_wall_clock_ns,
+        gap.ended_wall_clock_ns,
+    )
+
+    adapter.recover_event_history((records[0],), authoritative=True)
+    assert any(
+        "ends before" in reason
+        for reason in adapter.status()["gaps"][0].validation_reasons
+    )
+
+    _reconnect_with_gap(adapter, transport, clock)
+    adapter.recover_event_history(
+        (records[0], records[2], records[1], *records[3:]), authoritative=True
+    )
+    assert any(
+        "out of event order" in reason
+        for reason in adapter.status()["gaps"][1].validation_reasons
+    )
+
+    _reconnect_with_gap(adapter, transport, clock)
+    adapter.recover_event_history(
+        records[:2] + (records[1],) + records[2:], authoritative=True
+    )
+    assert any(
+        "duplicate payload digest" in reason
+        for reason in adapter.status()["gaps"][2].validation_reasons
+    )
+    assert all(
+        gap_record.classification == fyers_socket.HISTORY_INCOMPLETE
+        for gap_record in adapter.status()["gaps"]
+    )
+
+
+def test_backfill_source_must_be_authorised():
+    """An unauthorised source cannot establish historical completeness."""
+    clock = FakeClock()
+    transport = FakeTransport()
+    adapter = _connected(transport, _options(clock))
+    adapter.subscribe(SYMBOL)
+    gap = _reconnect_with_gap(adapter, transport, clock)
+    records = _backfill_records(
+        _canonical(SYMBOL),
+        gap.started_wall_clock_ns,
+        gap.ended_wall_clock_ns,
+        source="SNAPSHOT",
+    )
+
+    adapter.recover_event_history(records, authoritative=True)
+
+    closed = adapter.status()["gaps"][0]
+    assert closed.classification in (
+        fyers_socket.HISTORY_INCOMPLETE,
+        fyers_socket.UNRECOVERABLE,
+    )
+    assert closed.classification != fyers_socket.HISTORY_RECOVERED
+    assert closed.authoritative is False
+    assert any(
+        "not authorised" in reason for reason in closed.validation_reasons
+    )
+
+    next_gap = _reconnect_with_gap(adapter, transport, clock)
+    unsubscribed = _backfill_records(
+        "ID::symbol::NSE:UNKNOWN-EQ",
+        next_gap.started_wall_clock_ns,
+        next_gap.ended_wall_clock_ns,
+    )
+    adapter.recover_event_history(unsubscribed, authoritative=True)
+    assert adapter.status()["gaps"][1].classification == (
+        fyers_socket.UNRECOVERABLE
+    )
+
+
+def test_heartbeat_send_does_not_establish_inbound_liveness():
+    """REGRESSION: an outbound heartbeat never proves inbound traffic."""
+    clock = FakeClock()
+    adapter = _connected(
+        FakeTransport(), _options(clock, stale_after_ns=5_000_000_000)
+    )
+    adapter.subscribe(SYMBOL)
+    clock.advance(10_000_000_000)
+
+    assert adapter.inbound_live() is False
+    assert adapter.feed_healthy() is False
+    assert adapter.heartbeat() is True
+
+    state = adapter.status()
+    assert state["last_successful_send_ns"] == clock.monotonic_ns()
+    assert state["last_inbound_frame_ns"] is None
+    assert state["last_server_heartbeat_or_pong_ns"] is None
+    assert state["last_valid_symbol_event_ns"] is None
+    assert state["last_valid_index_event_ns"] is None
+    assert adapter.is_heartbeat_fresh() is True
+    assert adapter.inbound_live() is False
+    assert adapter.is_stale() is True
+    assert adapter.feed_healthy() is False
+
+    adapter.process_payload(_frame(GOLDEN_CN))
+    state = adapter.status()
+    assert state["last_inbound_frame_ns"] == clock.monotonic_ns()
+    assert state["last_server_heartbeat_or_pong_ns"] == clock.monotonic_ns()
+    assert adapter.inbound_live() is True
+    assert adapter.feed_healthy() is True
+    assert adapter.market_active() is False
+
+    clock.advance(6_000_000_000)
+    assert adapter.inbound_live() is False
+    assert adapter.is_heartbeat_fresh() is False
+    assert adapter.feed_healthy() is False
+
+
+def test_per_instrument_freshness_is_independent():
+    """REGRESSION: one symbol's ticks do not make another symbol fresh."""
+    clock = FakeClock()
+    adapter = _connected(FakeTransport(), _options(clock, stale_after_ns=100))
+    adapter.subscribe(SYMBOL)
+    adapter.subscribe(INDEX)
+
+    adapter.process_payload(_frame(GOLDEN_SF))
+    assert adapter.is_symbol_fresh(SYMBOL) is True
+    assert adapter.is_symbol_fresh(INDEX) is False
+    assert adapter.last_valid_symbol_event_ns == clock.monotonic_ns()
+    assert adapter.last_valid_index_event_ns is None
+    assert adapter.market_active() is True
+
+    clock.advance(101)
+    assert adapter.is_symbol_fresh(SYMBOL) is False
+    adapter.process_payload(_frame(GOLDEN_IF))
+    assert adapter.is_symbol_fresh(SYMBOL) is False
+    assert adapter.is_symbol_fresh(INDEX) is True
+    assert adapter.last_valid_symbol_event_ns < (
+        adapter.last_valid_index_event_ns or 0
+    )
+    assert adapter.symbol_freshness(SYMBOL).last_valid_event_monotonic_ns != (
+        adapter.symbol_freshness(INDEX).last_valid_event_monotonic_ns
+    )

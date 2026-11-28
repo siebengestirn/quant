@@ -19,6 +19,14 @@ Incoming frames are dispatched on the documented provider ``type`` field:
 ``if`` (index update), ``dp`` (five-level depth), ``unsub`` (unsubscribe ack)
 and error frames. Control frames do not require ``symbol`` or ``ltp``.
 
+Recovery and health separation
+------------------------------
+Current state and event history are recovered through distinct APIs. A single
+current snapshot can only establish ``STATE_RECONCILED``; ``HISTORY_RECOVERED``
+requires validated typed backfill records. Transport connection, inbound
+liveness, market activity and per-instrument freshness are recorded as separate
+timestamps. An outgoing heartbeat proves only that a send succeeded.
+
 Qualification status
 --------------------
 LIVE ENTITLEMENT AND QUALIFICATION REMAIN PENDING. No live credential is used,
@@ -75,6 +83,7 @@ INDEX_SUFFIX = "-INDEX"
 
 EVENT_UPDATE = "UPDATE"
 EVENT_SNAPSHOT = "SNAPSHOT"
+EVENT_BACKFILL = "BACKFILL"
 EVENT_GAP_MARKER = "GAP_MARKER"
 EVENT_MALFORMED = "MALFORMED"
 
@@ -112,7 +121,24 @@ DEFAULT_MAX_RETRIES = 3
 DEFAULT_MAX_SUBSCRIPTIONS = 64
 DEFAULT_DEDUPE_WINDOW = 4096
 DEFAULT_STALE_AFTER_NS = 30_000_000_000
+# Maximum spacing tolerated between consecutive backfill events for one
+# instrument; a larger spacing is an unexplained internal gap.
+DEFAULT_MAX_BACKFILL_GAP_NS = 10_000_000_000
 HEARTBEAT_FRAME = '{"action":"heartbeat"}'
+
+# Only these sources may assert complete historical coverage. A current
+# snapshot or an unspecified source can never establish HISTORY_RECOVERED.
+AUTHORIZED_HISTORY_SOURCES = frozenset(
+    {
+        "BACKFILL",
+        "HISTORY",
+        "HISTORY_BACKFILL",
+        "HISTORY_REPLAY",
+        "PROVIDER_HISTORY",
+        "PROVIDER_REPLAY",
+        "REST_HISTORY",
+    }
+)
 
 # Bounds are finite and enforced before any value is emitted.
 MAX_TOTAL_QUANTITY = 10**18
@@ -124,6 +150,8 @@ MAX_CODE = 100_000
 
 _FLOAT_TEXT = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\Z")
 _INTEGER_TEXT = re.compile(r"[+-]?\d+\Z")
+_DIGEST_TEXT = re.compile(r"[0-9a-f]{64}\Z")
+MAX_BACKFILL_TIMESTAMP_NS = 2**63 - 1
 
 _PRICE_FIELDS = (
     "prev_close_price",
@@ -238,6 +266,60 @@ class SystemClock:
 
 
 @dataclass(frozen=True)
+class BackfillRecord:
+    """One typed historical event used to validate a connection gap.
+
+    ``event_timestamp`` and ``receive_timestamp`` are wall-clock nanoseconds.
+    ``provider_sequence_if_available`` is retained only when the provider
+    supplies it; no sequence is invented. ``payload_digest`` is the SHA-256 of
+    the provider payload and is carried as evidence, never recomputed from a
+    synthesised frame.
+    """
+
+    canonical_instrument_id: str
+    event_timestamp: int
+    receive_timestamp: int
+    source: str
+    payload_digest: str
+    provider_sequence_if_available: int | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        """Return the full non-secret evidence carried by this record."""
+        return {
+            "canonical_instrument_id": self.canonical_instrument_id,
+            "event_timestamp": self.event_timestamp,
+            "provider_sequence_if_available": (
+                self.provider_sequence_if_available
+            ),
+            "receive_timestamp": self.receive_timestamp,
+            "source": self.source,
+            "payload_digest": self.payload_digest,
+        }
+
+
+@dataclass(frozen=True)
+class BackfillValidation:
+    """The outcome of validating typed records against an open gap."""
+
+    records: tuple[BackfillRecord, ...]
+    covered: tuple[str, ...]
+    missing: tuple[str, ...]
+    reasons: tuple[str, ...]
+    complete: bool
+
+
+@dataclass(frozen=True)
+class _ValidatedBackfill:
+    """A backfill record that passed field-level validation."""
+
+    record: BackfillRecord
+    symbol: str
+    event_timestamp: int
+    receive_timestamp: int
+    sequence: int | None
+
+
+@dataclass(frozen=True)
 class GapRecord:
     """An explicit connection gap; never a continuity assertion."""
 
@@ -253,6 +335,8 @@ class GapRecord:
     missing_symbols: tuple[str, ...] = ()
     source: str = ""
     authoritative: bool = False
+    backfill_records: tuple[BackfillRecord, ...] = ()
+    validation_reasons: tuple[str, ...] = ()
 
     @property
     def status(self) -> str:
@@ -274,6 +358,10 @@ class GapRecord:
             "missing_symbols": list(self.missing_symbols),
             "source": self.source,
             "authoritative": self.authoritative,
+            "backfill_records": tuple(
+                record.as_dict() for record in self.backfill_records
+            ),
+            "validation_reasons": list(self.validation_reasons),
         }
 
 
@@ -393,6 +481,7 @@ class AdapterOptions:
     max_retries: int = DEFAULT_MAX_RETRIES
     max_subscriptions: int = DEFAULT_MAX_SUBSCRIPTIONS
     stale_after_ns: int = DEFAULT_STALE_AFTER_NS
+    max_backfill_gap_ns: int = DEFAULT_MAX_BACKFILL_GAP_NS
     dedupe_window: int = DEFAULT_DEDUPE_WINDOW
     clock: Clock | None = None
     resolver: Resolver | None = None
@@ -687,18 +776,24 @@ def _gap_classification(
     return STATE_RECONCILED
 
 
-def _backfill_entry(entry: object) -> Mapping[str, object]:
-    """Accept a snapshot entry or the last point of a historical sequence."""
-    if isinstance(entry, Mapping):
-        return entry
-    if isinstance(entry, (list, tuple)) and entry:
-        last = entry[-1]
-        if isinstance(last, Mapping):
-            return last
-    return {}
+def _backfill_candidates(backfill: object) -> tuple[object, ...]:
+    """Flatten backfill inputs without collapsing a sequence to one point."""
+    if isinstance(backfill, BackfillRecord):
+        return (backfill,)
+    if isinstance(backfill, Mapping):
+        entries: list[object] = []
+        for value in backfill.values():
+            if isinstance(value, (list, tuple)):
+                entries.extend(value)
+            else:
+                entries.append(value)
+        return tuple(entries)
+    if isinstance(backfill, (list, tuple)):
+        return tuple(backfill)
+    return () if backfill is None else (backfill,)
 
 
-class FyersDataSocket:
+class FyersDataSocket:  # pylint: disable=too-many-public-methods
     """Read-only Data Socket lifecycle and canonical event adapter.
 
     ``connection_id`` is an adapter-local correlation identifier; it is not a
@@ -724,8 +819,12 @@ class FyersDataSocket:
         self._seen: OrderedDict[str, None] = OrderedDict()
         self._gaps: list[GapRecord] = []
         self._open_gap: GapRecord | None = None
-        self._feed_receive_ns: int | None = None
-        self._last_heartbeat_ns: int | None = None
+        # Each timestamp has one meaning; none is inferred from another.
+        self._last_successful_send_ns: int | None = None
+        self._last_inbound_frame_ns: int | None = None
+        self._last_server_heartbeat_or_pong_ns: int | None = None
+        self._last_valid_symbol_event_ns: int | None = None
+        self._last_valid_index_event_ns: int | None = None
 
     def _require_active(self) -> None:
         if self._closed:
@@ -773,8 +872,11 @@ class FyersDataSocket:
 
     def _reset_connection_state(self) -> None:
         """Drop freshness claims that belonged to the previous connection."""
-        self._feed_receive_ns = None
-        self._last_heartbeat_ns = None
+        self._last_successful_send_ns = None
+        self._last_inbound_frame_ns = None
+        self._last_server_heartbeat_or_pong_ns = None
+        self._last_valid_symbol_event_ns = None
+        self._last_valid_index_event_ns = None
         self._subscriptions = {
             symbol: replace(
                 sub,
@@ -855,12 +957,11 @@ class FyersDataSocket:
         return restored
 
     def heartbeat(self) -> bool:
-        """Send one keepalive frame and record its monotonic send time."""
+        """Send one keepalive frame; this never proves inbound liveness."""
         self._require_active()
         sent = self._send_with_retries(HEARTBEAT_FRAME)
         if sent:
-            self._last_heartbeat_ns = self._clock.monotonic_ns()
-            self._feed_receive_ns = self._last_heartbeat_ns
+            self._last_successful_send_ns = self._clock.monotonic_ns()
         return sent
 
     def poll(self, timeout_ns: int = 0) -> tuple[CanonicalEvent, ...]:
@@ -891,32 +992,70 @@ class FyersDataSocket:
         except ValueError:
             return None
 
+    @property
+    def last_successful_send_ns(self) -> int | None:
+        """Monotonic time of the last frame accepted by the transport."""
+        return self._last_successful_send_ns
+
+    @property
+    def last_inbound_frame_ns(self) -> int | None:
+        """Monotonic time of the last raw frame received from the server."""
+        return self._last_inbound_frame_ns
+
+    @property
+    def last_server_heartbeat_or_pong_ns(self) -> int | None:
+        """Monotonic time of the last documented ``cn`` server frame."""
+        return self._last_server_heartbeat_or_pong_ns
+
+    @property
+    def last_valid_symbol_event_ns(self) -> int | None:
+        """Monotonic time of the last valid symbol market event."""
+        return self._last_valid_symbol_event_ns
+
+    @property
+    def last_valid_index_event_ns(self) -> int | None:
+        """Monotonic time of the last valid index market event."""
+        return self._last_valid_index_event_ns
+
+    def _is_fresh(self, last_ns: int | None, now_ns: int) -> bool:
+        return (
+            last_ns is not None
+            and now_ns - last_ns <= self._options.stale_after_ns
+        )
+
     def _is_stale(self, now_ns: int) -> bool:
-        last = self._feed_receive_ns
-        if last is None:
-            return False
-        return now_ns - last > self._options.stale_after_ns
+        """Inbound staleness never uses an outbound send timestamp."""
+        return not self._is_fresh(self._last_inbound_frame_ns, now_ns)
 
     def is_stale(self) -> bool:
-        """Report whether the whole feed has gone quiet past the threshold."""
+        """Report whether the inbound feed has gone quiet or never arrived."""
         return self._is_stale(self._clock.monotonic_ns())
 
-    def is_heartbeat_fresh(self) -> bool:
-        """Report whether a recent heartbeat was sent or acknowledged."""
-        last = self._last_heartbeat_ns
-        if last is None:
-            return False
+    def inbound_live(self) -> bool:
+        """Report recent inbound traffic independently of heartbeats."""
+        return not self.is_stale()
+
+    def market_active(self) -> bool:
+        """Report recent valid market activity of either market kind."""
         now_ns = self._clock.monotonic_ns()
-        return now_ns - last <= self._options.stale_after_ns
+        return self._is_fresh(
+            self._last_valid_symbol_event_ns, now_ns
+        ) or self._is_fresh(self._last_valid_index_event_ns, now_ns)
+
+    def transport_connected(self) -> bool:
+        """Report only Data Socket connection state, not data liveness."""
+        return self._connected and not self._closed
+
+    def is_heartbeat_fresh(self) -> bool:
+        """Report a recent successful send or server heartbeat/pong."""
+        now_ns = self._clock.monotonic_ns()
+        return self._is_fresh(
+            self._last_successful_send_ns, now_ns
+        ) or self._is_fresh(self._last_server_heartbeat_or_pong_ns, now_ns)
 
     def feed_healthy(self) -> bool:
-        """Report transport-level health; this says nothing per instrument."""
-        return (
-            self._connected
-            and not self._closed
-            and not self.is_stale()
-            and self.is_heartbeat_fresh()
-        )
+        """Require a connection and live inbound frames, nothing more."""
+        return self.transport_connected() and self.inbound_live()
 
     def is_symbol_fresh(self, symbol: str) -> bool:
         """Report whether one instrument has a recent valid event."""
@@ -988,8 +1127,9 @@ class FyersDataSocket:
         duplicate = self._remember(digest) if request.dedupe else False
         stale = self._is_stale(mono_ns)
         active_gap = request.gap if request.gap is not None else self._open_gap
-        unreconciled = active_gap is not None and (
-            request.event_type != EVENT_SNAPSHOT
+        unreconciled = active_gap is not None and request.event_type not in (
+            EVENT_SNAPSHOT,
+            EVENT_BACKFILL,
         )
         complete = request.complete and not unreconciled
         canonical_id = (
@@ -1026,7 +1166,7 @@ class FyersDataSocket:
         payload = raw.encode("utf-8") if isinstance(raw, str) else bytes(raw)
         wall_ns = self._clock.wall_clock_ns()
         mono_ns = self._clock.monotonic_ns()
-        self._feed_receive_ns = mono_ns
+        self._last_inbound_frame_ns = mono_ns
         try:
             message = _validate_message(payload, kind)
         except ValidationError:
@@ -1046,13 +1186,17 @@ class FyersDataSocket:
         self._touch_receive(message.symbol, wall_ns, mono_ns)
         if message.status == VALID and message.market:
             self._touch_valid(message.symbol, wall_ns, mono_ns)
+            if message.kind == KIND_SYMBOL:
+                self._last_valid_symbol_event_ns = mono_ns
+            elif message.kind == KIND_INDEX:
+                self._last_valid_index_event_ns = mono_ns
         if (
             message.status == VALID
             and message.message_type == TYPE_SUBSCRIPTION
         ):
             self._record_ack(message, wall_ns, mono_ns)
-        if message.message_type == TYPE_CONNECTION:
-            self._last_heartbeat_ns = mono_ns
+        if message.status == VALID and message.message_type == TYPE_CONNECTION:
+            self._last_server_heartbeat_or_pong_ns = mono_ns
         return self._build_event(
             EventRequest(
                 symbol=message.symbol,
@@ -1097,18 +1241,25 @@ class FyersDataSocket:
         self._connection_id = f"fyers-data-{self._connection_seq}"
         self._connected = True
         self._open_gap = replace(
-            self._open_gap, connection_id_after=self._connection_id
+            self._open_gap,
+            connection_id_after=self._connection_id,
+            ended_wall_clock_ns=(
+                self._open_gap.ended_wall_clock_ns
+                or self._clock.wall_clock_ns()
+            ),
+            ended_monotonic_ns=(
+                self._open_gap.ended_monotonic_ns or self._clock.monotonic_ns()
+            ),
         )
         self.resubscribe()
         return self._open_gap
 
-    def _snapshot_event(
-        self,
-        symbol: str,
-        sub: Subscription,
-        entry: Mapping[str, object],
-        gap: GapRecord,
-    ) -> CanonicalEvent:
+    def _prepare_snapshot(
+        self, symbol: str, sub: Subscription, entry: object
+    ) -> tuple[bytes, ParsedMessage | None]:
+        """Validate one current snapshot without emitting or closing a gap."""
+        if not isinstance(entry, Mapping):
+            entry = {}
         prepared = dict(entry)
         prepared["symbol"] = symbol
         snapshot_type = (
@@ -1121,6 +1272,18 @@ class FyersDataSocket:
         try:
             message = _validate_message(payload, sub.kind)
         except ValidationError:
+            return payload, None
+        return payload, message if message.status == VALID else None
+
+    def _snapshot_event(
+        self,
+        symbol: str,
+        sub: Subscription,
+        payload: bytes,
+        message: ParsedMessage | None,
+        gap: GapRecord,
+    ) -> CanonicalEvent:
+        if message is None:
             return self._build_event(
                 EventRequest(
                     symbol=symbol,
@@ -1175,6 +1338,40 @@ class FyersDataSocket:
             raise ReconciliationError("no open connection gap")
         return self._open_gap
 
+    def _finalize_gap(
+        self,
+        *,
+        classification: str,
+        covered: list[str],
+        missing: list[str],
+        source: str,
+        authoritative: bool,
+        records: tuple[BackfillRecord, ...] = (),
+        reasons: tuple[str, ...] = (),
+    ) -> GapRecord:
+        """Close the open gap and retain all supplied evidence."""
+        gap = self._require_gap()
+        closed = replace(
+            gap,
+            ended_wall_clock_ns=(
+                gap.ended_wall_clock_ns or self._clock.wall_clock_ns()
+            ),
+            ended_monotonic_ns=(
+                gap.ended_monotonic_ns or self._clock.monotonic_ns()
+            ),
+            classification=classification,
+            covered_symbols=tuple(covered),
+            missing_symbols=tuple(missing),
+            source=source,
+            authoritative=authoritative,
+            backfill_records=records,
+            validation_reasons=reasons,
+        )
+        self._apply_classification(closed, covered, missing)
+        self._gaps.append(closed)
+        self._open_gap = None
+        return closed
+
     def _close_gap(
         self,
         snapshot: Mapping[str, object] | None = None,
@@ -1183,43 +1380,46 @@ class FyersDataSocket:
         source: str = "SNAPSHOT",
         history_requested: bool = False,
     ) -> tuple[CanonicalEvent, ...]:
-        """Close the open gap; this needs no active connection."""
-        gap = self._require_gap()
+        """Close a gap from current snapshots; this needs no connection."""
+        self._require_gap()
         supplied = snapshot or {}
+        prepared: list[
+            tuple[str, Subscription, bytes, ParsedMessage | None]
+        ] = []
         covered: list[str] = []
         missing: list[str] = []
-        events: list[CanonicalEvent] = []
         for symbol, sub in self._subscriptions.items():
-            if symbol in supplied:
-                event = self._snapshot_event(
-                    symbol, sub, _backfill_entry(supplied[symbol]), gap
-                )
-                events.append(event)
-                if event.validation_status == VALID:
-                    covered.append(symbol)
-                else:
-                    missing.append(symbol)
-            else:
+            if symbol not in supplied:
                 missing.append(symbol)
-                events.append(self._gap_marker(symbol, sub, gap))
-        closed = replace(
-            gap,
-            ended_wall_clock_ns=self._clock.wall_clock_ns(),
-            ended_monotonic_ns=self._clock.monotonic_ns(),
+                continue
+            payload, message = self._prepare_snapshot(
+                symbol, sub, supplied[symbol]
+            )
+            prepared.append((symbol, sub, payload, message))
+            if message is None:
+                missing.append(symbol)
+            else:
+                covered.append(symbol)
+        closed = self._finalize_gap(
             classification=_gap_classification(
                 len(covered),
                 len(covered) + len(missing),
                 authoritative=authoritative,
                 history_requested=history_requested,
             ),
-            covered_symbols=tuple(covered),
-            missing_symbols=tuple(missing),
+            covered=covered,
+            missing=missing,
             source=source,
             authoritative=authoritative,
         )
-        self._apply_classification(closed, covered, missing)
-        self._gaps.append(closed)
-        self._open_gap = None
+        events = [
+            self._snapshot_event(symbol, sub, payload, message, closed)
+            for symbol, sub, payload, message in prepared
+        ]
+        events.extend(
+            self._gap_marker(symbol, self._subscriptions[symbol], closed)
+            for symbol in missing
+        )
         return tuple(events)
 
     def _apply_classification(
@@ -1242,38 +1442,359 @@ class FyersDataSocket:
                     sub, reconciliation_status=UNRECOVERABLE
                 )
 
-    def reconcile_snapshot(
+    def recover_current_state(
         self, snapshot: Mapping[str, object]
     ) -> tuple[CanonicalEvent, ...]:
-        """Reconcile a gap with a fresh snapshot; never recover history."""
-        return self._close_gap(snapshot, authoritative=False, source="SNAPSHOT")
+        """Reconcile the current state; a snapshot never recovers history."""
+        return self._close_gap(
+            snapshot,
+            authoritative=False,
+            source="SNAPSHOT",
+            history_requested=False,
+        )
 
-    def recover_history(
+    def _instrument_map(self) -> dict[str, str]:
+        """Map canonical instrument ids to subscribed provider symbols."""
+        mapping: dict[str, str] = {}
+        for symbol, sub in self._subscriptions.items():
+            mapping[self._resolve(symbol, sub.kind) or symbol] = symbol
+        return mapping
+
+    def _reject_record_identity(
         self,
-        backfill: Mapping[str, object],
+        record: BackfillRecord,
+        instruments: Mapping[str, str],
+        source: str,
+    ) -> str | None:
+        """Check attribution and source authority of one typed record."""
+        canonical = record.canonical_instrument_id
+        if not isinstance(canonical, str) or not canonical.strip():
+            return "missing canonical_instrument_id"
+        if canonical not in instruments:
+            return f"canonical instrument is not subscribed: {canonical}"
+        if not isinstance(source, str) or source.strip().upper() not in (
+            AUTHORIZED_HISTORY_SOURCES
+        ):
+            return "source is not authorised for historical completeness"
+        if not isinstance(record.source, str) or (
+            record.source.strip().upper() not in AUTHORIZED_HISTORY_SOURCES
+        ):
+            return "record source is not authorised for historical completeness"
+        return None
+
+    def _reject_record_values(self, record: BackfillRecord) -> str | None:
+        """Check evidence fields of one typed record."""
+        for label, value in (
+            ("event_timestamp", record.event_timestamp),
+            ("receive_timestamp", record.receive_timestamp),
+        ):
+            try:
+                _exact_int(value, minimum=1, maximum=MAX_BACKFILL_TIMESTAMP_NS)
+            except ValidationError:
+                return f"invalid {label}"
+        if int(record.receive_timestamp) < int(record.event_timestamp):
+            return "receive_timestamp precedes event_timestamp"
+        if not isinstance(record.payload_digest, str) or not (
+            _DIGEST_TEXT.fullmatch(record.payload_digest)
+        ):
+            return "invalid payload_digest"
+        sequence = record.provider_sequence_if_available
+        if sequence is not None:
+            try:
+                _exact_int(
+                    sequence, minimum=0, maximum=MAX_BACKFILL_TIMESTAMP_NS
+                )
+            except ValidationError:
+                return "invalid provider_sequence_if_available"
+        return None
+
+    def _record_rejection(
+        self,
+        record: BackfillRecord,
+        instruments: Mapping[str, str],
+        source: str,
+    ) -> str | None:
+        """Reject a typed record that cannot support history recovery."""
+        return self._reject_record_identity(
+            record, instruments, source
+        ) or self._reject_record_values(record)
+
+    def _reject_record_duplicates(
+        self,
+        symbol: str,
+        ordered: list[_ValidatedBackfill],
+        timestamps: list[int],
+    ) -> str | None:
+        """Reject duplicate evidence and out-of-order event times."""
+        if timestamps != sorted(timestamps):
+            return f"{symbol}: backfill records are out of event order"
+        digests = [item.record.payload_digest for item in ordered]
+        if len(set(digests)) != len(digests):
+            return f"{symbol}: duplicate payload digest"
+        sequences = [
+            item.sequence for item in ordered if item.sequence is not None
+        ]
+        if len(set(sequences)) != len(sequences):
+            return f"{symbol}: duplicate provider sequence"
+        return None
+
+    def _reject_sequence_and_receipts(
+        self, symbol: str, ordered: list[_ValidatedBackfill]
+    ) -> str | None:
+        """Reject sequence discontinuities and reversed receive times."""
+        sequences = [
+            item.sequence for item in ordered if item.sequence is not None
+        ]
+        if len(sequences) == len(ordered):
+            if any(
+                b != a + 1
+                for a, b in zip(sequences, sequences[1:], strict=False)
+            ):
+                return f"{symbol}: unexplained provider sequence gap"
+        elif any(
+            b <= a for a, b in zip(sequences, sequences[1:], strict=False)
+        ):
+            return f"{symbol}: provider sequence is not increasing"
+        receives = [item.receive_timestamp for item in ordered]
+        if any(b < a for a, b in zip(receives, receives[1:], strict=False)):
+            return f"{symbol}: receive timestamps are out of order"
+        return None
+
+    def _reject_record_span(
+        self,
+        symbol: str,
+        timestamps: list[int],
         *,
-        authoritative: bool = True,
+        start_ns: int,
+        end_ns: int,
+        max_gap_ns: int,
+    ) -> str | None:
+        """Reject coverage that does not span the whole gap continuously."""
+        if timestamps[0] > start_ns:
+            return f"{symbol}: backfill starts after the gap start"
+        if timestamps[-1] < end_ns:
+            return f"{symbol}: backfill ends before the gap end"
+        if timestamps[-1] == timestamps[0]:
+            return f"{symbol}: events do not span the gap interval"
+        if any(
+            b - a > max_gap_ns
+            for a, b in zip(timestamps, timestamps[1:], strict=False)
+        ):
+            return f"{symbol}: unexplained internal gap"
+        return None
+
+    def _check_instrument_coverage(
+        self,
+        symbol: str,
+        items: list[_ValidatedBackfill],
+        *,
+        start_ns: int,
+        end_ns: int,
+        max_gap_ns: int,
+    ) -> str | None:
+        """Validate ordering, duplicates, span and internal gaps."""
+        timestamps = [item.event_timestamp for item in items]
+        ordered = sorted(items, key=lambda item: item.event_timestamp)
+        for rejection in (
+            self._reject_record_duplicates(symbol, ordered, timestamps),
+            self._reject_sequence_and_receipts(symbol, ordered),
+            self._reject_record_span(
+                symbol,
+                timestamps,
+                start_ns=start_ns,
+                end_ns=end_ns,
+                max_gap_ns=max_gap_ns,
+            ),
+        ):
+            if rejection is not None:
+                return rejection
+        return None
+
+    def _validate_backfill(
+        self,
+        backfill: object,
+        *,
+        source: str,
+        covered_from_ns: int | None,
+        covered_to_ns: int | None,
+        max_internal_gap_ns: int | None,
+    ) -> BackfillValidation:
+        """Validate typed records against every subscribed instrument."""
+        gap = self._require_gap()
+        instruments = self._instrument_map()
+        reasons: list[str] = []
+        if not gap.connection_id_after:
+            reasons.append("gap was not closed by a successful reconnect")
+        valid: list[_ValidatedBackfill] = []
+        for index, candidate in enumerate(_backfill_candidates(backfill)):
+            if not isinstance(candidate, BackfillRecord):
+                reasons.append(f"record {index} is not a typed BackfillRecord")
+                continue
+            rejection = self._record_rejection(candidate, instruments, source)
+            if rejection is not None:
+                reasons.append(f"record {index}: {rejection}")
+                continue
+            valid.append(
+                _ValidatedBackfill(
+                    record=candidate,
+                    symbol=instruments[candidate.canonical_instrument_id],
+                    event_timestamp=int(candidate.event_timestamp),
+                    receive_timestamp=int(candidate.receive_timestamp),
+                    sequence=candidate.provider_sequence_if_available,
+                )
+            )
+        grouped: dict[str, list[_ValidatedBackfill]] = {}
+        for item in valid:
+            grouped.setdefault(item.symbol, []).append(item)
+        start_ns = (
+            gap.started_wall_clock_ns
+            if covered_from_ns is None
+            else covered_from_ns
+        )
+        end_ns = (
+            gap.ended_wall_clock_ns if covered_to_ns is None else covered_to_ns
+        )
+        max_gap_ns = (
+            self._options.max_backfill_gap_ns
+            if max_internal_gap_ns is None
+            else max_internal_gap_ns
+        )
+        covered: list[str] = []
+        for symbol, items in grouped.items():
+            failure = self._check_instrument_coverage(
+                symbol,
+                items,
+                start_ns=start_ns,
+                end_ns=end_ns,
+                max_gap_ns=max_gap_ns,
+            )
+            if failure is not None:
+                reasons.append(failure)
+            else:
+                covered.append(symbol)
+        missing = [
+            symbol for symbol in self._subscriptions if symbol not in covered
+        ]
+        complete = (
+            bool(covered)
+            and not reasons
+            and len(covered) == len(self._subscriptions)
+        )
+        return BackfillValidation(
+            tuple(item.record for item in valid),
+            tuple(covered),
+            tuple(missing),
+            tuple(reasons),
+            complete,
+        )
+
+    def _backfill_event(
+        self,
+        record: BackfillRecord,
+        symbol: str,
+        sub: Subscription,
+        gap: GapRecord,
+        complete: bool,
+    ) -> CanonicalEvent:
+        """Emit one canonical event per typed record, with full evidence."""
+        evidence = record.as_dict()
+        snapshot_type = (
+            TYPE_INDEX_UPDATE if sub.kind == KIND_INDEX else TYPE_SYMBOL_UPDATE
+        )
+        payload = json.dumps(
+            {
+                "type": snapshot_type,
+                "symbol": symbol,
+                "event": EVENT_BACKFILL,
+                "backfill": evidence,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        mono_ns = self._clock.monotonic_ns()
+        event = CanonicalEvent(
+            provider=PROVIDER,
+            connection_id=gap.connection_id_after or self._connection_id,
+            receive_wall_clock_ns=int(record.receive_timestamp),
+            receive_monotonic_ns=mono_ns,
+            canonical_instrument_id=self._resolve(symbol, sub.kind) or symbol,
+            validation_status=VALID,
+            event_type=EVENT_BACKFILL,
+            symbol=symbol,
+            kind=sub.kind,
+            fields={
+                "symbol": symbol,
+                "type": snapshot_type,
+                "backfill": evidence,
+            },
+            raw_sha256=record.payload_digest,
+            raw_payload=payload,
+            duplicate=self._remember(f"backfill:{record.payload_digest}"),
+            stale=self._is_stale(mono_ns),
+            completeness=COMPLETE if complete else INCOMPLETE,
+            gap=gap,
+        )
+        self._emit(event)
+        return event
+
+    def recover_event_history(
+        self,
+        backfill: object,
+        *,
+        authoritative: bool = False,
+        source: str = "BACKFILL",
         covered_from_ns: int | None = None,
         covered_to_ns: int | None = None,
+        max_internal_gap_ns: int | None = None,
     ) -> tuple[CanonicalEvent, ...]:
-        """Apply backfill; only authoritative data recovers history."""
-        gap = self._require_gap()
-        interval_complete = not (
-            (
-                covered_from_ns is not None
-                and covered_from_ns > gap.started_monotonic_ns
-            )
-            or (
-                covered_to_ns is not None
-                and covered_to_ns < gap.started_monotonic_ns
-            )
-        )
-        return self._close_gap(
+        """Recover history only from complete, validated typed records."""
+        self._require_gap()
+        validation = self._validate_backfill(
             backfill,
-            authoritative=authoritative and interval_complete,
-            source="BACKFILL",
-            history_requested=authoritative,
+            source=source,
+            covered_from_ns=covered_from_ns,
+            covered_to_ns=covered_to_ns,
+            max_internal_gap_ns=max_internal_gap_ns,
         )
+        if not validation.records:
+            classification = UNRECOVERABLE
+        elif not validation.complete:
+            classification = HISTORY_INCOMPLETE
+        elif authoritative:
+            classification = HISTORY_RECOVERED
+        else:
+            classification = STATE_RECONCILED
+        closed = self._finalize_gap(
+            classification=classification,
+            covered=list(validation.covered),
+            missing=list(validation.missing),
+            source=source,
+            authoritative=classification == HISTORY_RECOVERED,
+            records=validation.records,
+            reasons=validation.reasons,
+        )
+        grouped: dict[str, list[BackfillRecord]] = {}
+        for record in validation.records:
+            grouped.setdefault(record.canonical_instrument_id, []).append(
+                record
+            )
+        complete = classification in (HISTORY_RECOVERED, STATE_RECONCILED)
+        events: list[CanonicalEvent] = []
+        for symbol, sub in self._subscriptions.items():
+            if symbol not in validation.covered:
+                events.append(self._gap_marker(symbol, sub, closed))
+            canonical = self._resolve(symbol, sub.kind) or symbol
+            # Invalid or incomplete history is still emitted as evidence; it
+            # is never collapsed to a single point or silently discarded.
+            for record in sorted(
+                grouped.get(canonical, ()),
+                key=lambda item: item.event_timestamp,
+            ):
+                events.append(
+                    self._backfill_event(record, symbol, sub, closed, complete)
+                )
+        return tuple(events)
 
     def mark_unrecoverable(self) -> tuple[CanonicalEvent, ...]:
         """Close an open gap with no snapshot; mark every symbol incomplete."""
@@ -1314,17 +1835,29 @@ class FyersDataSocket:
             "stale": self.is_stale(),
             "heartbeat_fresh": self.is_heartbeat_fresh(),
             "feed_healthy": self.feed_healthy(),
+            "transport_connected": self.transport_connected(),
+            "inbound_live": self.inbound_live(),
+            "market_active": self.market_active(),
+            "last_successful_send_ns": self.last_successful_send_ns,
+            "last_inbound_frame_ns": self.last_inbound_frame_ns,
+            "last_server_heartbeat_or_pong_ns": (
+                self.last_server_heartbeat_or_pong_ns
+            ),
+            "last_valid_symbol_event_ns": self.last_valid_symbol_event_ns,
+            "last_valid_index_event_ns": self.last_valid_index_event_ns,
             "symbol_freshness": {
                 symbol: sub.as_dict()
                 for symbol, sub in self._subscriptions.items()
             },
         }
 
-    # Readable aliases; they share the canonical implementation above.
-    apply_backfill = recover_history
-    reconcile_history = recover_history
-    recover_gap = recover_history
-    reconcile_gap = reconcile_snapshot
+    # Readable aliases; they share the canonical implementations above.
+    reconcile_snapshot = recover_current_state
+    reconcile_gap = recover_current_state
+    recover_history = recover_event_history
+    apply_backfill = recover_event_history
+    reconcile_history = recover_event_history
+    recover_gap = recover_event_history
     freshness = symbol_freshness
     is_feed_healthy = feed_healthy
     feed_health = feed_healthy
