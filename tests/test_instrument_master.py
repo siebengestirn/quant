@@ -55,6 +55,13 @@ NEXT_DAY = "2026-11-27"
 T0 = "2026-11-26T09:00:00Z"
 T1 = "2026-11-27T09:00:00Z"
 T2 = "2026-11-28T09:00:00Z"
+JAN = "2026-01-01"
+FEB = "2026-02-01"
+MAR = "2026-03-01"
+APR = "2026-04-01"
+EARLY = "2025-12-31T09:00:00Z"
+MID = "2026-03-01T09:00:00Z"
+LATER = "2026-04-02T09:00:00Z"
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -104,6 +111,27 @@ def _obs(
         value,
         observed_at=observed_at,
         ingested_at=ingested_at,
+        valid_from=valid_from,
+        valid_to=valid_to,
+        source_digest=digest,
+    )
+
+
+def _alias_obs(
+    alias: str,
+    identity: str = CID,
+    *,
+    observed_at: str = EARLY,
+    valid_from: str | None = JAN,
+    valid_to: str | None = FEB,
+    digest: str = "a" * 64,
+) -> im.Observation:
+    """Build one provider-key alias observation with explicit bounds."""
+    return im.observation(
+        identity,
+        im.provider_attribute("fyers", im.PROVIDER_KEY_ATTRIBUTE),
+        alias,
+        observed_at=observed_at,
         valid_from=valid_from,
         valid_to=valid_to,
         source_digest=digest,
@@ -1504,3 +1532,285 @@ def test_module_query_aliases_match_registry_methods() -> None:
     missing = "missing_query"
     with pytest.raises(AttributeError, match="no attribute"):
         getattr(im, missing)
+
+
+def test_expired_alias_cannot_resolve_on_a_later_market_date() -> None:
+    """An alias interval is a market-validity bound, not a knowledge bound."""
+    alias = im.provider_alias("fyers", "TOKEN1")
+    registry = im.build_registry([_alias_obs(alias)])
+    inside = registry.resolve_alias(alias, JAN, MID)
+    assert inside.status == im.RESOLVED
+    assert inside.validity == im.KNOWN_INTERVAL
+    assert inside.canonical_instrument_id == CID
+    assert registry.resolve(alias, JAN, MID) is not None
+    expired = registry.resolve_alias(alias, MAR, MID)
+    assert expired.status == im.EXPIRED
+    assert expired.canonical_instrument_id is None
+    assert registry.resolve(alias, MAR, MID) is None
+    assert (
+        registry.canonical_id_for(alias, market_date=MAR, observed_at=MID)
+        is None
+    )
+    assert registry.canonical_id_for(alias, as_of=MID) is None
+    assert registry.resolve_alias(alias, "2025-12-15", MID).status == (
+        im.NOT_YET_VALID
+    )
+    assert registry.resolve_alias("missing", MAR, MID).status == im.NOT_FOUND
+
+
+def test_unknown_interval_is_exposed_but_never_proven_valid() -> None:
+    """Unknown bounds stay visible as an assessment, not a validity claim."""
+    rows = [
+        _obs(im.ATTR_EFFECTIVE_FROM, None, observed_at=T0),
+        _obs(im.ATTR_EFFECTIVE_TO, None, observed_at=T0),
+        _obs(im.ATTR_PROVIDER_TRADING_STATUS, im.ACTIVE, observed_at=T0),
+    ]
+    registry = im.build_registry(rows)
+    state = registry.as_of(DAY, T1)[CID]
+    assert state.validity == im.UNKNOWN_INTERVAL
+    assert state.validity_assessment == im.UNKNOWN_INTERVAL
+    assert state.as_dict()["validity"] == im.UNKNOWN_INTERVAL
+    assert state.attribute_validity[im.ATTR_EFFECTIVE_FROM] == (
+        im.UNKNOWN_INTERVAL
+    )
+    assert state.proven_valid is False
+    assert state.effective_from is None
+    assert registry.as_of(DAY, T1, proven_valid_only=True) == {}
+    open_ended = im.build_registry(
+        [_obs("tick_size", 1.0, observed_at=T0, valid_from=DAY)]
+    )
+    assert open_ended.as_of(NEXT_DAY, T1)[CID].validity == im.OPEN_ENDED
+    assert open_ended.as_of(NEXT_DAY, T1)[CID].proven_valid is True
+    assert open_ended.as_of("2026-11-25", T1) == {}
+    half_unknown = im.build_registry(
+        [_obs("tick_size", 1.0, observed_at=T0, valid_to=NEXT_DAY)]
+    )
+    assert half_unknown.as_of(DAY, T1)[CID].validity == im.UNKNOWN_INTERVAL
+
+
+def test_ambiguous_alias_has_no_arbitrary_selection() -> None:
+    """Overlapping historical claimants return AMBIGUOUS with no chosen ID."""
+    alias = im.provider_alias("fyers", "TOKEN2")
+    registry = im.build_registry(
+        [
+            _alias_obs(
+                alias,
+                CID + "-A",
+                valid_from=JAN,
+                valid_to=MAR,
+                digest="1" * 64,
+            ),
+            _alias_obs(
+                alias,
+                CID + "-B",
+                valid_from=FEB,
+                valid_to=APR,
+                digest="2" * 64,
+            ),
+        ]
+    )
+    resolution = registry.resolve_alias(alias, FEB, MID)
+    assert resolution.status == im.AMBIGUOUS
+    assert resolution.canonical_instrument_id is None
+    assert resolution.claimants == (CID + "-A", CID + "-B")
+    assert registry.resolve(alias, FEB, MID) is None
+    assert (
+        registry.canonical_id_for(alias, market_date=FEB, observed_at=MID)
+        is None
+    )
+
+
+def test_token_reuse_is_detected_without_arbitrary_selection() -> None:
+    """Sequential claimants flag reuse even when only one is valid today."""
+    alias = im.provider_alias("fyers", "TOKEN3")
+    registry = im.build_registry(
+        [
+            _alias_obs(alias, CID + "-A", digest="1" * 64),
+            _alias_obs(
+                alias,
+                CID + "-B",
+                valid_from=FEB,
+                valid_to=MAR,
+                digest="2" * 64,
+            ),
+        ]
+    )
+    resolution = registry.resolve_alias(alias, FEB, MID)
+    assert resolution.status == im.TOKEN_REUSE
+    assert resolution.canonical_instrument_id is None
+    assert resolution.claimants == (CID + "-A", CID + "-B")
+    assert registry.resolve(alias, FEB, MID) is None
+    assert registry.detect_token_reuse() == (alias,)
+
+
+def test_retroactive_correction_keeps_the_original_fact() -> None:
+    """A later observation corrects history without rewriting append rows."""
+    original = _obs(
+        im.ATTR_PROVIDER_TRADING_STATUS,
+        im.ACTIVE,
+        observed_at=T0,
+        valid_from=DAY,
+        valid_to=NEXT_DAY,
+        digest="1" * 64,
+    )
+    correction = _obs(
+        im.ATTR_PROVIDER_TRADING_STATUS,
+        im.INACTIVE,
+        observed_at=T2,
+        valid_from=DAY,
+        valid_to=NEXT_DAY,
+        digest="2" * 64,
+    )
+    registry = im.build_registry([correction, original])
+    assert registry.observations == (original, correction)
+    assert registry.as_of(DAY, T1)[CID].provider_trading_status == im.ACTIVE
+    assert registry.as_of(DAY, T2)[CID].provider_trading_status == im.INACTIVE
+    assert registry.as_of(NEXT_DAY, T2) == {}
+
+
+def test_wrong_order_intervals_fail_closed() -> None:
+    """Reversed and zero-length intervals are malformed, not silent."""
+    with pytest.raises(ValueError, match="valid_from must precede"):
+        im.observation(
+            CID,
+            "tick_size",
+            1.0,
+            observed_at=T0,
+            valid_from=NEXT_DAY,
+            valid_to=DAY,
+            source_digest="a" * 64,
+        )
+    with pytest.raises(ValueError, match="valid_from must precede"):
+        im.build_registry([_obs("x", 1, valid_from=DAY, valid_to=DAY)])
+    bad_row = im.Observation(
+        CID,
+        "x",
+        1,
+        NEXT_DAY,
+        DAY,
+        T0,
+        T0,
+        None,
+        "a" * 64,
+        im.SCHEMA_VERSION,
+        im.REGISTRY_VERSION,
+    )
+    with pytest.raises(ValueError, match="valid_from must precede"):
+        im.build_registry([bad_row])
+
+
+def test_malformed_timestamps_and_provenance_are_rejected() -> None:
+    """Only attested timestamps and provenance can enter the registry."""
+    with pytest.raises(ValueError, match="UTC offset"):
+        im.observation(
+            CID,
+            "x",
+            1,
+            observed_at="2026-11-26T09:00:00",
+            source_digest="a" * 64,
+        )
+    with pytest.raises(ValueError, match="source_digest"):
+        im.observation(
+            CID, "x", 1, observed_at=T0, source_digest="not-a-digest"
+        )
+    with pytest.raises(ValueError, match="source_version"):
+        im.observation(
+            CID,
+            "x",
+            1,
+            observed_at=T0,
+            source_digest="a" * 64,
+            source_version="",
+        )
+    with pytest.raises(ValueError, match="provider_updated_at"):
+        im.observation(
+            CID,
+            "x",
+            1,
+            observed_at=T0,
+            source_digest="a" * 64,
+            provider_updated_at="not-a-time",
+        )
+    bad_row = _obs("x", 1)._replace(registry_version="")
+    with pytest.raises(ValueError, match="registry_version"):
+        im.build_registry([bad_row])
+    dated = im.observation(
+        CID,
+        "x",
+        1,
+        observed_at=T0,
+        source_digest="a" * 64,
+        provider_updated_at=DAY,
+    )
+    assert im.build_registry([dated]).as_of(DAY, T1)[CID] is not None
+
+
+def test_resolve_separates_market_date_from_observation_time() -> None:
+    """The new resolve path never uses the observation date as market date."""
+    alias = im.provider_alias("fyers", "TOKEN4")
+    claim = _alias_obs(
+        alias,
+        observed_at=T0,
+        valid_from=DAY,
+        valid_to=NEXT_DAY,
+        digest="1" * 64,
+    )
+    old = _obs(
+        im.ATTR_PROVIDER_TRADING_STATUS,
+        im.ACTIVE,
+        observed_at=T0,
+        valid_from=DAY,
+        valid_to=NEXT_DAY,
+        digest="1" * 64,
+    )
+    correction = _obs(
+        im.ATTR_PROVIDER_TRADING_STATUS,
+        im.INACTIVE,
+        observed_at=T2,
+        valid_from=DAY,
+        valid_to=NEXT_DAY,
+        digest="2" * 64,
+    )
+    registry = im.build_registry([claim, old, correction])
+    first = registry.resolve(alias, DAY, T1)
+    assert first is not None
+    assert first.market_date == DAY
+    assert first.observed_at == T1
+    assert first.provider_trading_status == im.ACTIVE
+    later = registry.resolve(alias, DAY, T2)
+    assert later is not None
+    assert later.provider_trading_status == im.INACTIVE
+    assert registry.resolve(alias, NEXT_DAY, T2) is None
+    assert im.resolve(registry, alias, DAY, T1) == first
+
+
+def test_converter_preserves_unknown_effective_dates(
+    upstox_data, fyers_data
+) -> None:
+    """Pinned snapshots give observation evidence, never validity bounds."""
+    rows = im.observations_from_snapshots()
+    assert rows
+    assert all(row.valid_from is None and row.valid_to is None for row in rows)
+    digests = {meta.decoded_sha256 for meta in METAS.values()}
+    assert {row.source_digest for row in rows} <= digests
+    markets = {
+        row.attribute_value
+        for row in rows
+        if row.attribute_name.endswith(":market_date")
+    }
+    assert markets == {DAY}
+    observed = METAS["fyers"].captured_at_utc
+    identity = _identity("upstox", MARUTI_KEY, upstox_data, fyers_data)
+    registry = im.build_registry(rows)
+    state = registry.as_of(DAY, observed)[identity]
+    assert state.effective_from is None
+    assert state.effective_to is None
+    assert state.validity == im.UNKNOWN_INTERVAL
+    assert state.proven_valid is False
+    assert im.provider_alias("upstox", MARUTI_KEY) in state.provider_keys
+    assert registry.as_of(DAY, observed, proven_valid_only=True) == {}
+    alias = im.provider_alias("upstox", MARUTI_KEY)
+    resolution = registry.resolve_alias(alias, DAY, observed)
+    assert resolution.status == im.RESOLVED
+    assert resolution.validity == im.UNKNOWN_INTERVAL
+    assert resolution.canonical_instrument_id == identity
