@@ -144,7 +144,7 @@ def _eligible_rows(
 ) -> list[im.Observation]:
     """Return observations affirming every independent eligibility gate.
 
-    Attested validity is itself a gate. Passing None builds the perfect-but
+    Attested validity is itself a gate. Passing None builds the otherwise-valid-but
     unknown-validity shape used by the fail-closed regression test.
     """
     return [

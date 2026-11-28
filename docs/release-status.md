@@ -1,4 +1,4 @@
-# QUANT release status — baseline PR #67 / source PR #70
+# QUANT release status — baseline PR #67 / source PR #86
 
 HISTORICAL records are retained below with explicit HISTORICAL labels.
 
@@ -7,14 +7,16 @@ HISTORICAL records are retained below with explicit HISTORICAL labels.
 Canonical machine-readable state: `governance/release-state.json`, checked
 by `scripts/check_release_state.py`. The authoritative product release
 baseline is R8.4.3 / PR #67, COMPLETE; merged PRs 47-67. The latest source
-revision is PR #70 at the captured `source_commit` in that state; source
+revision is PR #86 at the captured `source_commit` in that state; source
 changes after the baseline do not redefine the released product. Scope
 PORTABLE_RESEARCH; 4 required checks with zero GitHub approvals; native q
 GATED_NOT_RUN, native q runner execution NOT_OBSERVED and runner attestation
 mechanism CHECKED. Trading DISABLED / NO TRADE; independent acceptance
-PENDING, with audit evidence verification PENDING until PR #71 merges. W1
-is PARTIAL with 46 offline tests and W1-D PENDING. The exact current main
-SHA, CI runs and bundle digest are in `MANIFEST.md` of the current final
+PENDING. W1 is PARTIAL with 71 offline tests and W1-D PENDING.
+Current source record — PR #86; W1 71 tests; 4 required checks;
+PORTABLE_RESEARCH; GATED_NOT_RUN; NOT_OBSERVED; CHECKED; R8.4.3 COMPLETE.
+The exact current main SHA, CI runs and bundle digest are in `MANIFEST.md`
+of the current final
 release bundle (external artifact), with captured pins in the canonical
 state file. R8.4.2 / PR #66 and PR #64 are HISTORICAL.
 
@@ -247,7 +249,8 @@ This record supersedes the earlier seven-open-PR snapshot. Operating status
 remains: research INCONCLUSIVE/negative; holdout SEALED_NOT_EVALUATED;
 provider streaming, contract-note reconciliation, corporate actions and
 operational paper trading NOT IMPLEMENTED; W1-A/B/C offline public-master
-evidence only (46 tests at PR #67, four bundled snapshots, 9,926 VERIFIED /
+evidence only (46 tests at PR #67 — HISTORICAL, four bundled snapshots,
+9,926 VERIFIED /
 174 UNMAPPED), with W1-D effective dating and live consistency PENDING and
 no full W1 exit; native q hosted tier GATED (skipped/GATED_NOT_RUN at
 PR #62 and PR #63, both HISTORICAL); power-loss durability NOT PROVEN;
@@ -382,3 +385,7 @@ PR #67 capture and the earlier PR #64 capture are retained under its
 `git-policy.json` declares policy; only an authenticated API export proves
 the live GitHub configuration. The historical JSON exports do not establish
 the current zero-approval setting.
+
+ Current source record — PR #86; release PR #67; W1 71 tests; 4 req
+ uired checks; PORTABLE_RESEARCH; GATED_NOT_RUN; NOT_OBSERVED; CHECKED; R8.4.
+ 3 COMPLETE.

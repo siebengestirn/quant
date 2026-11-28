@@ -35,6 +35,7 @@
     "W9": "NOT QUALIFIED"
   },
   "gate_results": {
+    "audit_disposition_evidence": "PASS",
     "audit_disposition_tests": "PASS",
     "ci_security_tests": "PASS",
     "hosted_ci": "PASS",
@@ -42,9 +43,10 @@
     "portable_cpp": "PASS",
     "portable_pytest": "PASS",
     "release_bundle_tests": "PASS",
+    "runner_attestation_tests": "PASS",
     "sanitizer": "PASS",
-    "state_freshness": "PASS",
-    "style": "PASS",
+    "state_freshness": "FAIL",
+    "style": "FAIL",
     "terminology_audit": "PASS",
     "verify_report_tests": "PASS",
     "w1": "PASS"
@@ -88,7 +90,7 @@
   ],
   "independent_acceptance": "PENDING",
   "latest_branch_protection_captured": true,
-  "latest_source_revision": "PR #70",
+  "latest_source_revision": "PR #86",
   "main_captured_basis": "captured at PR #68; product release baseline pin retained for R8.4.3 / PR #67; not claimed as the latest source commit",
   "main_commit": "1c63da9ed08418b9160a1445d9080422e17e8fda",
   "manifest_basis": "captured from the R8.4.3 product release manifest; verified against the current bundle; product baseline PR #67 is unchanged by later source revisions",
@@ -102,6 +104,7 @@
   "release_version": "R8.4.3",
   "report_basis": "captured from data/assurance/verification-report.json at PR #70; verified byte for byte",
   "required_gate_set": [
+    "audit_disposition_evidence",
     "audit_disposition_tests",
     "ci_security_tests",
     "hosted_ci",
@@ -109,6 +112,7 @@
     "portable_cpp",
     "portable_pytest",
     "release_bundle_tests",
+    "runner_attestation_tests",
     "sanitizer",
     "state_freshness",
     "style",
@@ -117,23 +121,23 @@
     "w1"
   ],
   "runner_attestation_mechanism": "CHECKED",
-  "source_commit": "90f45f31e8f28070f0bbcb38c1e9189a020e6cdc",
+  "source_commit": "681e9d2cc22a72822f7ff9748fe0f4cbdd3a0fee",
   "source_commit_basis": "captured at PR #70; verified against git HEAD and the generated assurance report by scripts/check_release_state.py",
   "test_inventory": {
-    "audit_disposition_tests": 31,
-    "ci_security_tests": 16,
+    "audit_disposition_tests": 38,
+    "ci_security_tests": 18,
     "cpp_checks": 14114,
     "native_q_checker_tests": 8,
     "portable_pytest": 51,
-    "release_bundle_tests": 152,
+    "release_bundle_tests": 189,
     "sanitizer_checks": 14114,
-    "verify_report_tests": 197,
-    "w1": 46
+    "verify_report_tests": 207,
+    "w1": 71
   },
   "trading_authorization": {
     "decision": "NO_TRADE",
     "live_execution": "DISABLED"
   },
   "verification_captured_basis": "captured from data/assurance/verification-report.json at PR #70; verified byte for byte",
-  "verification_report_sha256": "f8da888e8488cd47dd6547671395a9508be03d315b79f09d5e76cb8c8427abf3"
+  "verification_report_sha256": "a9fa611ff3c296b9818f5c3dbad8f26ac2447173c2d0f4c2533d347e398cec5c"
 }
