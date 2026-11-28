@@ -27,8 +27,15 @@ SPEC.loader.exec_module(upstox)
 CANONICAL_ID = "INE002A01018"
 TOKEN = "unit-test-token"
 
+# Bound the adapter's internal validators through public aliases so the
+# contract tests stay explicit without reaching into protected attributes.
+VALIDATE_BASE_URL = vars(upstox)["_validate_base_url"]
+VALIDATE_REDIRECT = vars(upstox)["_validate_redirect"]
+BUILD_URL = vars(upstox)["_build_url"]
+REQUEST_ONCE = vars(upstox)["_request"]
 
-class FakeClient:  # pylint: disable=too-few-public-methods
+
+class FakeClient:
     """Deterministic in-memory HTTP client that never opens a socket."""
 
     def __init__(self, responses: list[object]) -> None:
@@ -43,6 +50,10 @@ class FakeClient:  # pylint: disable=too-few-public-methods
         if not self.responses:
             raise AssertionError("unexpected HTTP request")
         return self.responses.pop(0)
+
+    def seen(self) -> tuple[str, ...]:
+        """Return the recorded URLs for assertions about redirect safety."""
+        return tuple(self.calls)
 
 
 def _resolve(canonical_id: str) -> str:
@@ -398,3 +409,326 @@ def test_transport_and_payload_errors_are_classified() -> None:
     assert duplicate.rejections[0].failure_class is (
         upstox.FailureClass.MALFORMED_RESPONSE
     )
+
+
+def _redirect(location: str) -> object:
+    """Build a redirect response carrying one Location header."""
+    return upstox.HttpResponse(302, b"", {"Location": location})
+
+
+def test_official_hosts_and_allowlists_are_explicit() -> None:
+    """Production and sandbox hosts are pinned with no wildcard entries."""
+    assert upstox.PRODUCTION_HOSTS == frozenset({"api.upstox.com"})
+    assert upstox.SANDBOX_HOSTS == frozenset({"api-sandbox.upstox.com"})
+    assert not upstox.PRODUCTION_HOSTS & upstox.SANDBOX_HOSTS
+    assert upstox.DEFAULT_BASE_URL == "https://api.upstox.com/v3"
+    assert upstox.SANDBOX_BASE_URL == "https://api-sandbox.upstox.com/v3"
+    assert upstox.API_PATH_PREFIX == "/v3"
+    assert VALIDATE_BASE_URL(upstox.SANDBOX_BASE_URL) == upstox.SANDBOX_BASE_URL
+
+
+def test_evil_base_url_is_rejected_before_any_request() -> None:
+    """A proxy host must never receive the bearer token."""
+    with pytest.raises(upstox.ConfigError, match="allowlisted"):
+        VALIDATE_BASE_URL("https://evil.example/proxy")
+    client = FakeClient([])
+    with pytest.raises(upstox.ConfigError):
+        upstox.fetch_daily(
+            CANONICAL_ID,
+            "2024-01-02",
+            "2024-01-02",
+            token=TOKEN,
+            http_client=client,
+            resolve_instrument_key=_resolve,
+            config=upstox.FetchConfig(base_url="https://evil.example/proxy"),
+            enable_network=True,
+        )
+    assert not client.seen()
+
+
+@pytest.mark.parametrize(
+    ("url", "message"),
+    [
+        ("http://api.upstox.com/v3", "non-HTTPS"),
+        ("https://u:p@api.upstox.com/v3", "credentials"),
+        ("https://api.upstox.com:8443/v3", "port"),
+        ("https://api.upstox.com/v3?x=1", "form"),
+        ("https://api.upstox.com/v3#fragment", "form"),
+        ("https://api.upstox.com/v3/../evil", "unsafe"),
+        ("https://api.upstox.com/v3/%2e%2e/evil", "unsafe"),
+        ("https://api.upstox.com/v2", "prefix"),
+        ("https://api.upstox.com/v3/extra", "prefix"),
+        ("https://api.upstox.com.evil.example/v3", "allowlisted"),
+        ("https://api.upstox.com@evil.example/v3", "allowlisted"),
+        ("https://sub.api.upstox.com/v3", "allowlisted"),
+    ],
+)
+def test_unsafe_base_url_forms_are_rejected(url: str, message: str) -> None:
+    """Non-HTTPS, credentials, traversal, ports and wrong paths fail closed."""
+    with pytest.raises(upstox.ConfigError, match=message):
+        VALIDATE_BASE_URL(url)
+
+
+def test_environment_allowlists_are_separate() -> None:
+    """A sandbox host is never accepted for a production fetch."""
+    assert (
+        VALIDATE_BASE_URL(upstox.SANDBOX_BASE_URL, "sandbox")
+        == upstox.SANDBOX_BASE_URL
+    )
+    with pytest.raises(upstox.ConfigError, match="allowlisted"):
+        VALIDATE_BASE_URL(upstox.SANDBOX_BASE_URL, "production")
+    with pytest.raises(upstox.ConfigError, match="allowlisted"):
+        VALIDATE_BASE_URL(upstox.PRODUCTION_BASE_URL, "sandbox")
+    with pytest.raises(upstox.ConfigError):
+        _fetch(config=upstox.FetchConfig(base_url=upstox.SANDBOX_BASE_URL))
+
+
+def _request_url() -> str:
+    """Return the validated URL used by the short single-date tests."""
+    return BUILD_URL(
+        upstox.FetchConfig(),
+        "NSE_EQ|INE002A01018",
+        upstox.DateRange("2024-01-02", "2024-01-02"),
+    )
+
+
+def test_cross_host_redirect_is_rejected_before_a_second_request() -> None:
+    """A redirect to an unrelated host never receives the token."""
+    evil = (
+        "https://evil.example/v3/historical-candle/x/day/2024-01-02/2024-01-02"
+    )
+    client = FakeClient([_redirect(evil)])
+    outcome = _fetch(client=client)
+    assert outcome.status == "REJECTED"
+    assert outcome.rejections[0].failure_class is (
+        upstox.FailureClass.TRANSPORT_ERROR
+    )
+    assert len(client.seen()) == 1
+    assert TOKEN not in repr(outcome)
+    with pytest.raises(upstox.TransportError, match="disallowed redirect"):
+        VALIDATE_REDIRECT(evil, _request_url(), upstox.PRODUCTION_HOSTS)
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "http://api.upstox.com/v3/historical-candle/x",
+        "https://api.upstox.com:8443/v3/historical-candle/x",
+        "https://u:p@api.upstox.com/v3/historical-candle/x",
+        "https://api.upstox.com/v3/../evil",
+        "https://api.upstox.com/v2/historical-candle/x",
+        "https://api-sandbox.upstox.com/v3/historical-candle/x",
+        "https://evil.example/v3/historical-candle/x",
+        "//evil.example/v3/historical-candle/x",
+    ],
+)
+def test_unsafe_redirect_targets_are_rejected(location: str) -> None:
+    """Redirects may not leave HTTPS, the pinned host or the V3 prefix."""
+    with pytest.raises(upstox.ConfigError, match="disallowed redirect"):
+        VALIDATE_REDIRECT(location, _request_url(), upstox.PRODUCTION_HOSTS)
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        _request_url(),
+        "/v3/historical-candle/NSE_EQ%7CINE002A01018/day/2024-01-02/2024-01-02",
+    ],
+)
+def test_same_host_redirect_is_followed(location: str) -> None:
+    """An allowlisted same-host HTTPS redirect is followed with the token."""
+    client = FakeClient([_redirect(location), _success([_row()])])
+    outcome = _fetch(client=client)
+    assert outcome.status == "OK"
+    assert outcome.records[0].session == "2024-01-02"
+    assert len(client.seen()) == 2
+    assert all(
+        url.startswith("https://api.upstox.com/v3/historical-candle/")
+        for url in client.seen()
+    )
+    assert client.headers[1]["Authorization"] == f"Bearer {TOKEN}"
+
+
+def test_redirect_chain_is_bounded() -> None:
+    """An endless redirect loop stops after the configured maximum."""
+    same = _request_url()
+    client = FakeClient(
+        [_redirect(same) for _ in range(upstox.MAX_REDIRECTS + 1)]
+    )
+    outcome = _fetch(client=client)
+    assert outcome.status == "REJECTED"
+    assert outcome.rejections[0].failure_class is (
+        upstox.FailureClass.TRANSPORT_ERROR
+    )
+    assert len(client.seen()) == upstox.MAX_REDIRECTS + 1
+    looping = FakeClient(
+        [_redirect(same) for _ in range(upstox.MAX_REDIRECTS + 1)]
+    )
+    with pytest.raises(upstox.TransportError, match="too many redirects"):
+        REQUEST_ONCE(looping, _request_url(), TOKEN)
+
+
+def test_oversize_response_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Oversize bodies and declared lengths fail before parsing."""
+    monkeypatch.setattr(upstox, "MAX_RESPONSE_BYTES", 64)
+    client = FakeClient([upstox.HttpResponse(200, b"x" * 65, {})])
+    outcome = _fetch(client=client)
+    assert outcome.status == "REJECTED"
+    assert "exceeds 64 bytes" in outcome.rejections[0].detail
+    assert TOKEN not in repr(outcome)
+
+    declared = FakeClient(
+        [upstox.HttpResponse(200, b"", {"Content-Length": "65"})]
+    )
+    assert _fetch(client=declared).rejections[0].failure_class is (
+        upstox.FailureClass.TRANSPORT_ERROR
+    )
+
+
+def test_streaming_response_read_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A streaming client cannot supply unbounded bytes."""
+
+    class EndlessStream:
+        """Minimal stream that produces bytes without ever ending."""
+
+        status = 200
+        headers: dict[str, str] = {}
+
+        def __init__(self) -> None:
+            self.reads = 0
+
+        def read(self, size: int) -> bytes:
+            """Return one full chunk on every call."""
+            self.reads += 1
+            return b"y" * size
+
+        def count(self) -> int:
+            """Expose the number of reads performed by the adapter."""
+            return self.reads
+
+    monkeypatch.setattr(upstox, "MAX_RESPONSE_BYTES", 64)
+    stream = EndlessStream()
+    client = FakeClient([stream])
+    with pytest.raises(upstox.TransportError, match="exceeds 64 bytes"):
+        REQUEST_ONCE(client, _request_url(), TOKEN)
+    assert stream.count() >= 1
+
+
+def test_timeout_and_client_exceptions_are_sanitised(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Timeout and arbitrary client failures never expose the token."""
+
+    class ExplodingClient:
+        """Injected client that raises a token-bearing exception."""
+
+        def __init__(self, error: Exception) -> None:
+            self.error = error
+            self.calls: list[str] = []
+
+        def get(self, url: str, _headers: dict[str, str]) -> object:
+            """Record the attempt, then fail with the configured exception."""
+            self.calls.append(url)
+            raise self.error
+
+        def seen(self) -> tuple[str, ...]:
+            """Return the attempted URLs."""
+            return tuple(self.calls)
+
+    for error in (
+        TimeoutError(f"timed out carrying Bearer {TOKEN}"),
+        RuntimeError(f"Authorization header was Bearer {TOKEN}"),
+    ):
+        client = ExplodingClient(error)
+        outcome = _fetch(client=client)
+        assert outcome.status == "REJECTED"
+        rejection = outcome.rejections[0]
+        assert rejection.failure_class is upstox.FailureClass.TRANSPORT_ERROR
+        expected = (
+            "request timed out"
+            if isinstance(error, TimeoutError)
+            else "transport failure"
+        )
+        assert rejection.detail == expected
+        assert TOKEN not in repr(outcome)
+        assert TOKEN not in caplog.text
+        with pytest.raises(upstox.TransportError) as caught:
+            REQUEST_ONCE(client, _request_url(), TOKEN)
+        assert caught.value.__cause__ is None
+        assert TOKEN not in str(caught.value)
+        if isinstance(error, TimeoutError):
+            assert "timed out" in str(caught.value)
+        assert len(client.seen()) == 2
+
+
+def test_bounded_timeout_is_passed_to_supporting_clients() -> None:
+    """Injected clients receive a positive timeout within the hard bound."""
+
+    class TimeoutClient:
+        """Client that records the timeout it was given."""
+
+        def __init__(self) -> None:
+            self.timeouts: list[float] = []
+            self.calls: list[str] = []
+
+        def get(
+            self, url: str, _headers: dict[str, str], timeout: float = 0
+        ) -> object:
+            """Return a valid response and record the timeout."""
+            self.calls.append(url)
+            self.timeouts.append(timeout)
+            return _success([_row()])
+
+        def seen(self) -> tuple[str, ...]:
+            """Return the attempted URLs."""
+            return tuple(self.calls)
+
+    client = TimeoutClient()
+    assert _fetch(client=client).status == "OK"
+    assert client.timeouts == [upstox.DEFAULT_TIMEOUT_SECONDS]
+    assert 0 < client.timeouts[0] <= upstox.MAX_TIMEOUT_SECONDS
+    assert len(client.seen()) == 1
+
+    configured = TimeoutClient()
+    config = upstox.FetchConfig(timeout_seconds=2.5)
+    assert _fetch(client=configured, config=config).status == "OK"
+    assert configured.timeouts == [2.5]
+    for timeout in (0, -1, upstox.MAX_TIMEOUT_SECONDS + 1):
+        with pytest.raises(upstox.ConfigError):
+            _fetch(config=upstox.FetchConfig(timeout_seconds=timeout))
+
+
+def test_rate_limit_retries_are_bounded_and_classified() -> None:
+    """Only rate limits are retried, and never beyond the hard bound."""
+    limited = upstox.HttpResponse(
+        429, b"", {"Retry-After": "1", "content-length": "0"}
+    )
+    config = upstox.FetchConfig(
+        max_rate_limit_retries=upstox.MAX_RATE_LIMIT_RETRIES
+    )
+    recovered = FakeClient([limited, limited, limited, _success([_row()])])
+    assert _fetch(client=recovered, config=config).status == "OK"
+    assert len(recovered.seen()) == 4
+
+    exhausted = FakeClient([limited] * (upstox.MAX_RATE_LIMIT_RETRIES + 1))
+    outcome = _fetch(client=exhausted, config=config)
+    assert outcome.rejections[0].failure_class is (
+        upstox.FailureClass.RATE_LIMIT
+    )
+    assert len(exhausted.seen()) == upstox.MAX_RATE_LIMIT_RETRIES + 1
+    with pytest.raises(upstox.ConfigError):
+        _fetch(
+            config=upstox.FetchConfig(
+                max_rate_limit_retries=upstox.MAX_RATE_LIMIT_RETRIES + 1
+            )
+        )
+
+
+def test_module_never_imports_network_primitives() -> None:
+    """Importing the adapter cannot open a socket or an HTTP connection."""
+    source = (ROOT / "python" / "upstox_v3.py").read_text(encoding="utf-8")
+    assert "import socket" not in source
+    assert "urlopen" not in source
+    assert "requests.get" not in source

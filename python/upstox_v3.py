@@ -14,12 +14,22 @@ The official V3 REST contract implemented here is
 Timestamps are exchange-local ISO-8601 values with an explicit UTC offset.
 Open interest follows the canonical sentinel contract: -1 is unavailable,
 >= 0 is available, < -1 is invalid and values must be below 2**63.
+
+Transport hardening (PR #78) is fail-closed and entirely offline: requests
+are limited to two explicit host allowlists (production api.upstox.com and
+the separate sandbox api-sandbox.upstox.com), HTTPS only, with no credentials,
+query, fragment, traversal, unexpected port or unexpected path prefix.
+Redirects must stay on the same allowlisted host over HTTPS and are bounded.
+Client calls carry a bounded timeout when the injected client accepts one,
+responses are size-limited (including streamed reads), and client exception
+text (which may contain a token) is never propagated, logged or stored.
 """
 
 from __future__ import annotations
 
 import hashlib
 import importlib
+import inspect
 import json
 import math
 import os
@@ -32,7 +42,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urljoin, urlsplit
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -40,12 +50,47 @@ reject_duplicate_keys = importlib.import_module(
     "json_support"
 ).reject_duplicate_keys
 
-DEFAULT_BASE_URL = "https://api.upstox.com/v3"
+# Official V3 hosts: the V3 candle example in the Upstox developer
+# documentation uses https://api.upstox.com/v3; the official Python SDK maps
+# Configuration(sandbox=True) to https://api-sandbox.upstox.com. Both lists
+# are explicit: no wildcard, subdomain, IP or look-alike host is permitted.
+PRODUCTION_HOSTS = frozenset({"api.upstox.com"})
+SANDBOX_HOSTS = frozenset({"api-sandbox.upstox.com"})
+ALLOWED_HOSTS = PRODUCTION_HOSTS | SANDBOX_HOSTS
+ENVIRONMENTS = frozenset({"production", "sandbox"})
+API_PATH_PREFIX = "/v3"
+PRODUCTION_BASE_URL = "https://api.upstox.com/v3"
+SANDBOX_BASE_URL = "https://api-sandbox.upstox.com/v3"
+DEFAULT_BASE_URL = PRODUCTION_BASE_URL
+
 HISTORICAL_PATH = "/historical-candle"
 DEFAULT_INTERVAL = "day"
 DEFAULT_MAX_DAYS = 365
 DEFAULT_TIMEZONE = "Asia/Kolkata"
 DEFAULT_MAX_REQUESTS = 1000
+DEFAULT_ENVIRONMENT = "production"
+# Bounds are deliberately conservative and caller-inspectable.
+DEFAULT_TIMEOUT_SECONDS = 10.0
+MAX_TIMEOUT_SECONDS = 30.0
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+READ_CHUNK_SIZE = 64 * 1024
+MAX_REDIRECTS = 3
+MAX_RATE_LIMIT_RETRIES = 3
+DEFAULT_RATE_LIMIT_RETRIES = 0
+REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+TRANSPORT_STATUS = 0
+TRANSPORT_REASON_HEADER = "X-Quant-Transport-Reason"
+TRANSPORT_REASONS = frozenset(
+    {
+        "request timed out",
+        "connection failed",
+        "transport failure",
+        "too many redirects",
+        "disallowed redirect target",
+        "invalid response body",
+        "invalid response stream",
+    }
+)
 MAX_VOLUME = 2**53
 MAX_EXACT_DOUBLE_INTEGER = 2**53
 MAX_OPEN_INTEREST = 2**63
@@ -56,9 +101,23 @@ VALID_INTERVALS = frozenset({"day"})
 RATE_LIMIT_CODES = frozenset(
     {"UDAPI100026", "UDAPI100027", "TOO_MANY_REQUESTS", "RATE_LIMIT_EXCEEDED"}
 )
+# Client failures are sanitised by type; exception text is never retained.
+_CLIENT_ERRORS = (
+    OSError,
+    ValueError,
+    TypeError,
+    RuntimeError,
+    AttributeError,
+    KeyError,
+    IndexError,
+    AssertionError,
+    StopIteration,
+    ZeroDivisionError,
+)
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*\|[A-Za-z0-9][A-Za-z0-9 .&/_-]*$")
 _RAW_NAME_RE = re.compile(r"^[A-Za-z0-9._:-]+_[0-9]{4}_[0-9a-f]{64}\.json$")
+_SIZE_REASON_RE = re.compile(r"^response exceeds \d+ bytes$")
 
 SessionCalendar = Callable[[str, str], Iterable[str]]
 KeyResolver = Callable[[str], str]
@@ -94,6 +153,14 @@ class InstrumentResolutionError(ConfigError):
 
 class NetworkDisabledError(RuntimeError):
     """A fetch was attempted without explicit network opt-in."""
+
+
+class TransportError(ConfigError):
+    """A sanitised transport, redirect or size failure without client detail."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 class ReplayError(ValueError):
@@ -141,6 +208,9 @@ class FetchConfig:
     expected_sessions: Sequence[str] | SessionCalendar | None = None
     raw_dir: Path | None = None
     max_requests: int = DEFAULT_MAX_REQUESTS
+    environment: str = DEFAULT_ENVIRONMENT
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+    max_rate_limit_retries: int = DEFAULT_RATE_LIMIT_RETRIES
 
 
 @dataclass(frozen=True)
@@ -219,32 +289,192 @@ def _validate_date(value: object, name: str) -> str:
     return value
 
 
-def _validate_base_url(base_url: object) -> str:
-    """Validate an HTTPS V3 base URL without embedded credentials."""
-    if not isinstance(base_url, str) or any(
-        char.isspace() for char in base_url
-    ):
-        raise ConfigError("invalid base_url")
-    url = urlsplit(base_url)
-    if url.scheme != "https" or not url.netloc:
-        raise ConfigError("invalid base_url")
+def _allowed_hosts(environment: object) -> frozenset[str]:
+    """Return the one explicit host allowlist for an environment."""
+    if environment == "production":
+        return PRODUCTION_HOSTS
+    if environment == "sandbox":
+        return SANDBOX_HOSTS
+    raise ConfigError("invalid environment")
+
+
+def _parse_secure_url(
+    value: object, hosts: frozenset[str], label: str
+) -> tuple[str, str]:
+    """Validate HTTPS, host, credentials, port and URL extras; return parts."""
     if (
-        url.username is not None
-        or url.password is not None
-        or url.query
-        or url.fragment
+        not isinstance(value, str)
+        or not value
+        or any(
+            char.isspace() or ord(char) < 0x20 or ord(char) == 0x7F
+            for char in value
+        )
     ):
-        raise ConfigError("invalid base_url")
-    if ".." in url.path:
-        raise ConfigError("invalid base_url")
-    return base_url.rstrip("/")
+        raise ConfigError(f"invalid {label}")
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        raise ConfigError(f"invalid {label}") from None
+    if parts.scheme != "https":
+        raise ConfigError(f"non-HTTPS {label}")
+    host = parts.hostname
+    if host is None or host.lower() not in hosts:
+        raise ConfigError(f"host not allowlisted in {label}")
+    if (
+        parts.username is not None
+        or parts.password is not None
+        or "@" in parts.netloc
+    ):
+        raise ConfigError(f"{label} credentials are not allowed")
+    try:
+        port = parts.port
+    except ValueError:
+        raise ConfigError(f"unexpected {label} port") from None
+    if port not in (None, 443):
+        raise ConfigError(f"unexpected {label} port")
+    if parts.query or parts.fragment or "?" in value or "#" in value:
+        raise ConfigError(f"unexpected {label} form")
+    path = unquote(parts.path)
+    if "\\" in path or ".." in path.split("/"):
+        raise ConfigError(f"unsafe {label} path")
+    return host.lower(), parts.path
+
+
+def _validate_base_url(
+    base_url: object, environment: object | None = None
+) -> str:
+    """Validate an HTTPS V3 base URL against the selected host allowlist.
+
+    With no environment argument both documented allowlists are accepted;
+    callers that pin an environment get only that environment's hosts.
+    """
+    hosts = (
+        ALLOWED_HOSTS if environment is None else _allowed_hosts(environment)
+    )
+    host, path = _parse_secure_url(base_url, hosts, "base_url")
+    if path.rstrip("/") != API_PATH_PREFIX:
+        raise ConfigError("unexpected base_url path prefix")
+    return f"https://{host}{API_PATH_PREFIX}"
+
+
+def _header(headers: object, name: str) -> str | None:
+    """Return one header value case-insensitively without echoing headers."""
+    items = getattr(headers, "items", None)
+    if not callable(items):
+        return None
+    for key, value in items():
+        if (
+            isinstance(key, str)
+            and key.lower() == name.lower()
+            and isinstance(value, str)
+        ):
+            return value
+    return None
+
+
+def _validate_redirect(
+    location: object, current_url: str, hosts: frozenset[str]
+) -> str:
+    """Require the same allowlisted HTTPS host and an in-scope API path."""
+    if not isinstance(location, str) or not location:
+        raise TransportError("disallowed redirect target")
+    try:
+        target = urljoin(current_url, location)
+        host, path = _parse_secure_url(target, hosts, "redirect target")
+    except ConfigError:
+        raise TransportError("disallowed redirect target") from None
+    current_host = urlsplit(current_url).hostname
+    if host != (current_host.lower() if current_host else None):
+        raise TransportError("disallowed redirect target")
+    if path != API_PATH_PREFIX and not path.startswith(API_PATH_PREFIX + "/"):
+        raise TransportError("disallowed redirect target")
+    return target
+
+
+def _transport_reason(exc: object) -> str:
+    """Classify a client failure by type only, never by its message."""
+    if isinstance(exc, TimeoutError):
+        return "request timed out"
+    if isinstance(exc, ConnectionError):
+        return "connection failed"
+    return "transport failure"
+
+
+def _check_declared_size(headers: object) -> None:
+    """Fail early when a response declares an oversized body."""
+    declared = _header(headers, "content-length")
+    if declared is not None and declared.strip().isdigit():
+        if int(declared.strip()) > MAX_RESPONSE_BYTES:
+            raise TransportError(f"response exceeds {MAX_RESPONSE_BYTES} bytes")
+
+
+def _check_body_size(body: object) -> None:
+    """Reject an already-materialised body that exceeds the byte limit."""
+    if not isinstance(body, (bytes, bytearray)):
+        raise TransportError("invalid response body")
+    if len(body) > MAX_RESPONSE_BYTES:
+        raise TransportError(f"response exceeds {MAX_RESPONSE_BYTES} bytes")
+
+
+def _read_limited(handle: object) -> bytes:
+    """Stream at most MAX_RESPONSE_BYTES from an injected response handle."""
+    read = getattr(handle, "read", None)
+    if not callable(read):
+        raise TransportError("invalid response stream")
+    payload = bytearray()
+    while chunk := read(READ_CHUNK_SIZE):
+        if not isinstance(chunk, (bytes, bytearray)):
+            raise TransportError("invalid response stream")
+        if len(payload) + len(chunk) > MAX_RESPONSE_BYTES:
+            raise TransportError(f"response exceeds {MAX_RESPONSE_BYTES} bytes")
+        payload.extend(chunk)
+    return bytes(payload)
+
+
+def _coerce_response(result: object) -> HttpResponse:
+    """Convert an injected result to a bounded HttpResponse."""
+    if isinstance(result, HttpResponse):
+        _check_declared_size(result.headers)
+        _check_body_size(result.body)
+        return result
+    headers = getattr(result, "headers", {})
+    if not callable(getattr(headers, "items", None)):
+        raise ConfigError("http_client.get must return HttpResponse")
+    _check_declared_size(headers)
+    body = _read_limited(result)
+    status = getattr(result, "status", 200)
+    if isinstance(status, bool) or not isinstance(status, int):
+        raise ConfigError("http_client.get must return HttpResponse")
+    return HttpResponse(status, body, headers)
+
+
+def _call_get(
+    get: Callable[..., object],
+    url: str,
+    headers: dict[str, str],
+    timeout: float,
+) -> object:
+    """Use a bounded timeout when the injected client accepts one."""
+    try:
+        parameters = inspect.signature(get).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    accepts_timeout = "timeout" in parameters or any(
+        value.kind is inspect.Parameter.VAR_KEYWORD
+        for value in parameters.values()
+    )
+    if accepts_timeout:
+        return get(url, headers, timeout=timeout)
+    return get(url, headers)
 
 
 def _validate_config(config: FetchConfig) -> FetchConfig:
     """Validate configuration and return its normalised copy."""
     if not isinstance(config, FetchConfig):
         raise ConfigError("config must be a FetchConfig")
-    base_url = _validate_base_url(config.base_url)
+    if config.environment not in ENVIRONMENTS:
+        raise ConfigError("invalid environment")
+    base_url = _validate_base_url(config.base_url, config.environment)
     if config.interval not in VALID_INTERVALS:
         raise ConfigError("invalid interval")
     for name in ("max_days_per_request", "max_requests"):
@@ -253,6 +483,20 @@ def _validate_config(config: FetchConfig) -> FetchConfig:
             raise ConfigError(f"invalid {name}")
     if config.max_days_per_request > 366:
         raise ConfigError("max_days_per_request is too large")
+    retries = config.max_rate_limit_retries
+    if (
+        isinstance(retries, bool)
+        or not isinstance(retries, int)
+        or not (0 <= retries <= MAX_RATE_LIMIT_RETRIES)
+    ):
+        raise ConfigError("invalid max_rate_limit_retries")
+    if (
+        isinstance(config.timeout_seconds, bool)
+        or not isinstance(config.timeout_seconds, (int, float))
+        or not math.isfinite(config.timeout_seconds)
+        or not 0 < config.timeout_seconds <= MAX_TIMEOUT_SECONDS
+    ):
+        raise ConfigError("invalid timeout_seconds")
     if not isinstance(config.exchange_timezone, str):
         raise ConfigError("invalid exchange_timezone")
     try:
@@ -279,6 +523,9 @@ def _validate_config(config: FetchConfig) -> FetchConfig:
         expected_sessions=config.expected_sessions,
         raw_dir=config.raw_dir,
         max_requests=config.max_requests,
+        environment=config.environment,
+        timeout_seconds=float(config.timeout_seconds),
+        max_rate_limit_retries=retries,
     )
 
 
@@ -339,16 +586,82 @@ def _build_url(config: FetchConfig, key: str, batch: DateRange) -> str:
     return f"{config.base_url}{HISTORICAL_PATH}/{tail}"
 
 
-def _request(http_client: object, url: str, token: str) -> HttpResponse:
-    """Issue one authenticated GET using a transient header mapping."""
+def _request(
+    http_client: object,
+    url: str,
+    token: str,
+    hosts: frozenset[str] | None = None,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+) -> HttpResponse:
+    """Issue one authenticated GET with redirect and transport safeguards."""
     get = getattr(http_client, "get", None)
     if not callable(get):
         raise ConfigError("http_client.get(url, headers) is required")
-    headers = {"Accept": "application/json", "Authorization": f"Bearer {token}"}
-    response = get(url, headers)
-    if not isinstance(response, HttpResponse):
-        raise ConfigError("http_client.get must return HttpResponse")
-    return response
+    allowed = ALLOWED_HOSTS if hosts is None else hosts
+    _parse_secure_url(url, allowed, "request url")
+    secret = _validate_token(token)
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {secret}",
+    }
+    current = url
+    for _ in range(MAX_REDIRECTS + 1):
+        try:
+            result = _call_get(get, current, headers, timeout)
+            response = _coerce_response(result)
+        except TransportError:
+            raise
+        except _CLIENT_ERRORS as exc:
+            # Suppress the original exception: its message may contain the
+            # token or the Authorization header supplied by the caller.
+            raise TransportError(_transport_reason(exc)) from None
+        location = (
+            _header(response.headers, "location")
+            if response.status in REDIRECT_STATUSES
+            else None
+        )
+        if location is None:
+            return response
+        current = _validate_redirect(location, current, allowed)
+    raise TransportError("too many redirects")
+
+
+def _safe_transport_reason(reason: object) -> str:
+    """Allow only adapter-authored reasons to travel with a failure."""
+    if not isinstance(reason, str):
+        return "transport failure"
+    if reason in TRANSPORT_REASONS or _SIZE_REASON_RE.fullmatch(reason):
+        return reason
+    return "transport failure"
+
+
+def _transport_response(reason: str) -> HttpResponse:
+    """Represent a sanitised transport failure without client-supplied data."""
+    safe = _safe_transport_reason(reason)
+    return HttpResponse(TRANSPORT_STATUS, b"", {TRANSPORT_REASON_HEADER: safe})
+
+
+def _fetch_batch(
+    http_client: object,
+    url: str,
+    token: str,
+    hosts: frozenset[str],
+    timeout: float,
+    retries: int,
+) -> HttpResponse:
+    """Fetch one URL with bounded, rate-limit-only retries."""
+    attempts = 0
+    while True:
+        try:
+            response = _request(http_client, url, token, hosts, timeout)
+        except TransportError as exc:
+            return _transport_response(exc.reason)
+        failure = _classify_response(response)
+        if failure is None or failure[0] is not FailureClass.RATE_LIMIT:
+            return response
+        if attempts >= retries:
+            return response
+        attempts += 1
 
 
 def _retry_after(headers: Mapping[str, str]) -> int | None:
@@ -404,6 +717,12 @@ def _classify_response(
     response: HttpResponse,
 ) -> tuple[FailureClass, str] | None:
     """Classify a failed response; return None for a successful one."""
+    if response.status == TRANSPORT_STATUS:
+        detail = _header(response.headers, TRANSPORT_REASON_HEADER)
+        return (
+            FailureClass.TRANSPORT_ERROR,
+            _safe_transport_reason(detail) if detail else "transport failure",
+        )
     retry = _retry_after(response.headers)
     code, message = _error_fields(response.body)
     if _is_rate_limit(response.status, code, message, retry):
@@ -594,11 +913,12 @@ def _collect_records(
         failure = _classify_response(response)
         if failure is not None:
             failure_class, detail = failure
-            reason = (
-                "rate limited"
-                if failure_class is FailureClass.RATE_LIMIT
-                else "http error"
-            )
+            if failure_class is FailureClass.RATE_LIMIT:
+                reason = "rate limited"
+            elif failure_class is FailureClass.TRANSPORT_ERROR:
+                reason = "transport error"
+            else:
+                reason = "http error"
             rejections.append(
                 Rejection(
                     reason,
@@ -754,8 +1074,12 @@ def _read_object(root_fd: int, name: str) -> bytes:
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise ReplayError("raw object is not a regular file")
-        chunks = list(iter(lambda: os.read(fd, 16384), b""))
-        return b"".join(chunks)
+        payload = bytearray()
+        while chunk := os.read(fd, READ_CHUNK_SIZE):
+            if len(payload) + len(chunk) > MAX_RESPONSE_BYTES:
+                raise ReplayError("raw object is too large")
+            payload.extend(chunk)
+        return bytes(payload)
     finally:
         os.close(fd)
 
@@ -786,6 +1110,9 @@ def _manifest_payload(
         "require_midnight": config.require_midnight,
         "expected_sessions": stored_sessions,
         "max_requests": config.max_requests,
+        "environment": config.environment,
+        "timeout_seconds": config.timeout_seconds,
+        "max_rate_limit_retries": config.max_rate_limit_retries,
         "requested_start": start,
         "requested_end": end,
         "batches": [asdict(batch) for batch in outcome.batches],
@@ -826,9 +1153,17 @@ def fetch_daily(
     if len(batches) > cfg.max_requests:
         raise ConfigError("too many batches requested")
     key = _resolve_key(resolve_instrument_key, canonical_id)
+    hosts = _allowed_hosts(cfg.environment)
     responses: list[tuple[DateRange, HttpResponse]] = []
     for index, batch in enumerate(batches):
-        response = _request(http_client, _build_url(cfg, key, batch), secret)
+        response = _fetch_batch(
+            http_client,
+            _build_url(cfg, key, batch),
+            secret,
+            hosts,
+            cfg.timeout_seconds,
+            cfg.max_rate_limit_retries,
+        )
         if cfg.raw_dir is not None:
             cfg.raw_dir.mkdir(parents=True, exist_ok=True)
             _persist_response(cfg.raw_dir, canonical_id, index, response.body)
@@ -881,6 +1216,13 @@ def _config_from_manifest(
             expected_sessions=resolved,
             raw_dir=raw_dir,
             max_requests=entry["max_requests"],
+            environment=entry.get("environment", DEFAULT_ENVIRONMENT),
+            timeout_seconds=entry.get(
+                "timeout_seconds", DEFAULT_TIMEOUT_SECONDS
+            ),
+            max_rate_limit_retries=entry.get(
+                "max_rate_limit_retries", DEFAULT_RATE_LIMIT_RETRIES
+            ),
         )
     except (KeyError, TypeError) as exc:
         raise ReplayError("incomplete manifest") from exc
