@@ -476,3 +476,7 @@ certification, operational paper trading, fully proven universal power-loss
 durability, HFT suitability, multi-asset conformance, full W1 exit,
 independent acceptance, live execution authorisation or `READY FOR TRADE`
 is permitted until the corresponding exit evidence above is recorded.
+
+ Current source record — PR #86; release PR #67; W1 71 tests; 4 req
+ uired checks; PORTABLE_RESEARCH; GATED_NOT_RUN; NOT_OBSERVED; CHECKED; R8.4.
+ 3 COMPLETE.

@@ -83,8 +83,8 @@ or single-source evidence returns NOT_ELIGIBLE. Temporal validity is an
 additional, independent gate evaluated by `fail_closed_eligibility()`:
 `KNOWN_INTERVAL` may proceed; `OPEN_ENDED` has a known start but no end and so
 may proceed only while the FRESH data gate still holds; `UNKNOWN_INTERVAL`,
-`INVALID_INTERVAL` and any tied-value `CONFLICT` never proceed. A perfect
-instrument whose observations all lack a validity start is therefore
+`INVALID_INTERVAL` and tied-value `CONFLICT` never proceed. An
+otherwise-valid instrument with no validity start is therefore
 `NOT_ELIGIBLE` even though identity resolution still returns its canonical ID
 and every other gate passes. Invalid intervals are quarantined before storage
 or as an `INVALID_INTERVAL` state. Consumers that require attested bounds use
