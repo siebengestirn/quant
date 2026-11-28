@@ -45,8 +45,8 @@
     "release_bundle_tests": "PASS",
     "runner_attestation_tests": "PASS",
     "sanitizer": "PASS",
-    "state_freshness": "FAIL",
-    "style": "FAIL",
+    "state_freshness": "PASS",
+    "style": "PASS",
     "terminology_audit": "PASS",
     "verify_report_tests": "PASS",
     "w1": "PASS"
@@ -90,7 +90,7 @@
   ],
   "independent_acceptance": "PENDING",
   "latest_branch_protection_captured": true,
-  "latest_source_revision": "PR #86",
+  "latest_source_revision": "PR #90",
   "main_captured_basis": "captured at PR #68; product release baseline pin retained for R8.4.3 / PR #67; not claimed as the latest source commit",
   "main_commit": "1c63da9ed08418b9160a1445d9080422e17e8fda",
   "manifest_basis": "captured from the R8.4.3 product release manifest; verified against the current bundle; product baseline PR #67 is unchanged by later source revisions",
@@ -121,14 +121,14 @@
     "w1"
   ],
   "runner_attestation_mechanism": "CHECKED",
-  "source_commit": "681e9d2cc22a72822f7ff9748fe0f4cbdd3a0fee",
+  "source_commit": "ce72542e513465d4a225f763027b280d2fe5c652",
   "source_commit_basis": "captured at PR #70; verified against git HEAD and the generated assurance report by scripts/check_release_state.py",
   "test_inventory": {
     "audit_disposition_tests": 38,
     "ci_security_tests": 18,
     "cpp_checks": 14114,
     "native_q_checker_tests": 8,
-    "portable_pytest": 51,
+    "portable_pytest": 63,
     "release_bundle_tests": 189,
     "sanitizer_checks": 14114,
     "verify_report_tests": 207,
@@ -139,5 +139,5 @@
     "live_execution": "DISABLED"
   },
   "verification_captured_basis": "captured from data/assurance/verification-report.json at PR #70; verified byte for byte",
-  "verification_report_sha256": "a9fa611ff3c296b9818f5c3dbad8f26ac2447173c2d0f4c2533d347e398cec5c"
+  "verification_report_sha256": "1c58937026d4c19178cfb4d602cab488b4fc7b3f991f8dcb32555f26b887c558"
 }
